@@ -21,6 +21,15 @@
 # re-running a version when a run failed after the release itself shipped,
 # and always takes the push path: `candidate` is a workflow_call input only.
 #
+# The checkout is the ref this workflow runs from, never the release tag.
+# The tag only supplies the source tarball the manifest pins; its Cargo.lock
+# is pulled out of that download so the generated crate list matches what
+# the offline build reads. Everything else, the manifest, flathub.json, the
+# metainfo, metainfo-releases.sh and these steps, is packaging and comes
+# from main: a re-dispatch after a failed run has to pick up their fixes,
+# and a tag that predates one of those files still builds. On a release run
+# both refs are the same commit.
+#
 # Needs one secret, FLATHUB_TOKEN: a token with write access to
 # flathub/com.zealsprince.rox, which exists once Flathub has accepted the
 # app. When it's unset the run still builds, lints, and uploads the bundle,
@@ -90,11 +99,10 @@ jobs:
             echo "push=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The tag, not main: main can move while this runs, and the point is
-      # to build the commit that was just released.
+      # The workflow's own ref, not the tag: this checkout only provides the
+      # packaging files, and after a fix the re-run has to see the fixed
+      # ones. The source being built comes from the tag tarball below.
       - uses: actions/checkout@v7
-        with:
-          ref: v${{ inputs.version }}
 
       # Two tools the image doesn't carry. flatpak-cargo-generator is a single
       # file in flatpak/flatpak-builder-tools, which has no tags, so it's
@@ -119,31 +127,46 @@ jobs:
             --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
           echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
 
+      # The tag tarball is what the manifest builds, so its sha256 and its
+      # Cargo.lock are taken from the download itself and not from the
+      # checkout, which may be a newer commit with a different lock. The
+      # lock's hash keys the build cache further down: same crates, same
+      # compiled state.
+      - name: Fetch the release source
+        id: source
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          curl -fsSLo "$RUNNER_TEMP/release/rox-v$VERSION.tar.gz" \
+            "https://github.com/zealsprince/rox/archive/refs/tags/v$VERSION.tar.gz"
+          tar -xzf "$RUNNER_TEMP/release/rox-v$VERSION.tar.gz" -C "$RUNNER_TEMP/release" \
+            --strip-components=1 "rox-$VERSION/Cargo.lock"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/release/rox-v$VERSION.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "lock=$(sha256sum "$RUNNER_TEMP/release/Cargo.lock" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
       # The generator skips gpui and gpui-component: the lock carries them as
       # path deps with no source, which is why the manifest fetches those two
       # tarballs itself. Written beside the manifest (gitignored there) so a
       # local build finds it in the same place.
       - name: Generate cargo sources
         run: |
-          python3 "$RUNNER_TEMP/tools/flatpak-cargo-generator.py" Cargo.lock \
+          python3 "$RUNNER_TEMP/tools/flatpak-cargo-generator.py" "$RUNNER_TEMP/release/Cargo.lock" \
             -o scripts/flatpak/cargo-sources.json
 
       # Never edit the checked-in manifest in CI. The working copy gets the
-      # tarball url and sha256 of the version being built, hashed here the
+      # tarball url and sha256 of the version being built, hashed above the
       # same way the AUR job does it, and the release-filled metainfo the
       # manifest installs in place of the tarball's marker version. The sed
       # leans on the sha256 line sitting directly under the url line.
       - name: Prepare the Flathub tree
+        env:
+          TARBALL_SHA256: ${{ steps.source.outputs.sha256 }}
         run: |
           flathub="$RUNNER_TEMP/flathub"
           mkdir -p "$flathub"
           cp scripts/flatpak/flathub.json scripts/flatpak/cargo-sources.json "$flathub/"
-          curl -fsSLo "$RUNNER_TEMP/rox-v$VERSION.tar.gz" \
-            "https://github.com/zealsprince/rox/archive/refs/tags/v$VERSION.tar.gz"
-          sha=$(sha256sum "$RUNNER_TEMP/rox-v$VERSION.tar.gz" | cut -d' ' -f1)
           sed \
             -e "s|/rox/archive/refs/tags/v[^/]*\.tar\.gz|/rox/archive/refs/tags/v$VERSION.tar.gz|" \
-            -e "\|/rox/archive/refs/tags/|{n;s|sha256: .*|sha256: $sha|;}" \
+            -e "\|/rox/archive/refs/tags/|{n;s|sha256: .*|sha256: $TARBALL_SHA256|;}" \
             "scripts/flatpak/$MANIFEST" > "$flathub/$MANIFEST"
           scripts/metainfo-releases.sh crates/rox/assets/app/rox.metainfo.xml
           cp crates/rox/assets/app/rox.metainfo.xml "$flathub/rox.metainfo.xml"
@@ -158,13 +181,13 @@ jobs:
 
       # master as of 2025-04-24. The action leaves the OSTree repo in repo/
       # and the bundle in the workspace; the cache is flatpak-builder's state
-      # dir, keyed on the lock so a release with the same crates reuses the
-      # compiled ones.
+      # dir, keyed on the tarball's lock so a release with the same crates
+      # reuses the compiled ones.
       - uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40
         with:
           manifest-path: ${{ runner.temp }}/flathub/com.zealsprince.rox.yml
           bundle: rox-v${{ inputs.version }}-flatpak-x86_64.flatpak
-          cache-key: flatpak-${{ hashFiles('Cargo.lock') }}
+          cache-key: flatpak-${{ steps.source.outputs.lock }}
           upload-artifact: false
 
       - name: Lint repo
