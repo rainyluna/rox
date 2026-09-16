@@ -7,9 +7,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use gpui::{prelude::*, App, Context, SharedString};
+use gpui::{App, Context, SharedString, prelude::*};
 
-use crate::search_picker::{search_picker, PickRow};
+use crate::search_picker::{PickRow, search_picker};
 
 /// The head of the list, the row that clears the override so the text
 /// falls back to whatever the layer above sets.
@@ -18,12 +18,18 @@ const DEFAULT_LABEL: &str = "Default";
 /// A font-family picker: the shared field over the installed families,
 /// with a Default at the head that clears the override back to the app
 /// font. `current` is the panel's stored family, None meaning inherit.
-pub fn font_picker<P: 'static>(
+// `use<..>` and the named `A` for the same reason as the crate root's
+// `picker`.
+pub fn font_picker<P, A>(
     id: &'static str,
     current: Option<String>,
-    apply: impl Fn(&mut P, Option<String>, &mut Context<P>) + 'static,
+    apply: A,
     cx: &mut Context<P>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<P, A>
+where
+    P: 'static,
+    A: Fn(&mut P, Option<String>, &mut Context<P>) + 'static,
+{
     // The stored family shows even when it isn't installed here, since
     // clearing someone's override because this machine lacks the font
     // would be the picker's doing, not theirs.
@@ -58,6 +64,7 @@ fn families(cx: &mut App) -> Arc<Vec<PickRow>> {
                 label: DEFAULT_LABEL.into(),
                 value: None,
                 terms: Vec::new(),
+                icon: None,
             }];
             rows.extend(names.into_iter().map(|name| {
                 let name = SharedString::from(name);
@@ -65,6 +72,7 @@ fn families(cx: &mut App) -> Arc<Vec<PickRow>> {
                     label: name.clone(),
                     value: Some(name),
                     terms: Vec::new(),
+                    icon: None,
                 }
             }));
             Arc::new(rows)

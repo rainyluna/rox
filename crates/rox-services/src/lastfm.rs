@@ -39,7 +39,7 @@ use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
 use rox_library::cue::TrackKey;
 use rox_library::store::TrackMeta;
 
-use rox_core::settings::{clamp_threshold, Lastfm, LastfmSession, Settings};
+use rox_core::settings::{Lastfm, LastfmSession, Settings, clamp_threshold};
 
 use crate::catalog::{Library, LibraryEvent};
 use crate::player::Player;
@@ -47,7 +47,7 @@ use crate::player::Player;
 // The signing, the call that sends it, and the identity it signs with all
 // are in rox-net now; the scrobbler uses them through the same paths it
 // always did.
-pub use rox_net::lastfm::{call, has_builtin_keys, keys, ApiError, AuthPhase};
+pub use rox_net::lastfm::{ApiError, AuthPhase, call, has_builtin_keys, keys};
 
 /// Last.fm rejects scrobbles for tracks this short, so the scrobbler
 /// doesn't try; the listen signal draws the same line, so history and
@@ -872,10 +872,11 @@ impl Scrobbler {
         // Stamp the start the first time audio is seen moving, not when
         // the watch was created: a launch-restored track starts paused, and
         // Last.fm reads the timestamp as when the track started playing.
-        if let Some(watch) = self.watch.as_mut() {
-            if watch.started == 0 && playing {
-                watch.started = unix_now();
-            }
+        if let Some(watch) = self.watch.as_mut()
+            && watch.started == 0
+            && playing
+        {
+            watch.started = unix_now();
         }
 
         // Evaluate both rules once against the current watch: the fixed
@@ -1017,10 +1018,10 @@ impl Scrobbler {
         // means no destination should hear a thing. A file the library
         // holds no tags for says nothing, since there'd be no artist or
         // title to send.
-        if self.scrobbling {
-            if let Some(event) = started_event(&key, meta.as_ref(), duration) {
-                cx.emit(event);
-            }
+        if self.scrobbling
+            && let Some(event) = started_event(&key, meta.as_ref(), duration)
+        {
+            cx.emit(event);
         }
         self.watch = Some(Watch {
             key,

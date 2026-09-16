@@ -15,26 +15,18 @@
 
 use std::path::{Path, PathBuf};
 
-/// True for a file whose extension rox recognizes as audio. Shares the
-/// scanner's list so an opened or dropped file is judged the same way a
-/// scanned one is.
-fn is_audio_file(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        crate::scanner::EXTENSIONS
-            .iter()
-            .any(|x| e.eq_ignore_ascii_case(x))
-    })
-}
-
 /// Every audio file directly under a directory, sorted so a dropped folder
 /// enqueues in a stable order. Shallow: a folder drop grabs the tracks
-/// directly in it, not a whole recursive tree.
+/// directly in it, not a whole recursive tree. The test is the scanner's
+/// own [`crate::scanner::is_audio`], so a drop and a scan agree on what
+/// counts, and a folder full of macOS `._name` sidecars enqueues the real
+/// tracks instead of twice as many files, half of which will not decode.
 fn audio_files_in_dir(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_file() && is_audio_file(p))
+            .filter(|p| p.is_file() && crate::scanner::is_audio(p))
             .collect(),
         Err(_) => return Vec::new(),
     };
@@ -81,7 +73,7 @@ fn audio_files_in_playlist(path: &Path) -> Vec<PathBuf> {
             }
             full = image;
         }
-        if full.is_file() && is_audio_file(&full) {
+        if full.is_file() && crate::scanner::is_audio(&full) {
             out.push(full);
         }
     }
@@ -105,7 +97,7 @@ where
             out.extend(audio_files_in_dir(&path));
         } else if path.is_file() && crate::playlist_file::is_playlist_file(&path) {
             out.extend(audio_files_in_playlist(&path));
-        } else if path.is_file() && is_audio_file(&path) {
+        } else if path.is_file() && crate::scanner::is_audio(&path) {
             out.push(path);
         }
     }
@@ -143,6 +135,33 @@ pub fn from_args() -> (LaunchMode, Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder dropped off a macOS-formatted stick is full of AppleDouble
+    /// sidecars that carry the real extension. Enqueueing those would double
+    /// the queue with files the engine cannot open, so the drop runs the
+    /// scanner's own audio test.
+    #[test]
+    fn a_dropped_folder_skips_os_junk() {
+        let dir = std::env::temp_dir().join("rox-open-files-junk");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "one.flac",
+            "._one.flac",
+            "two.flac",
+            "._two.flac",
+            ".DS_Store",
+        ] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+
+        assert_eq!(
+            resolve_audio_paths([&dir]),
+            [dir.join("one.flac"), dir.join("two.flac")],
+            "only the real tracks, in sorted order"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A dropped playlist expands to the tracks it names, in its order, with
     /// a relative entry read against the playlist's own folder and a stale

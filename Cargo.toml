@@ -26,7 +26,7 @@ default-members = ["crates/rox"]
 
 [workspace.package]
 version = "1.27.0"
-edition = "2021"
+edition = "2024"
 license = "AGPL-3.0-only"
 
 # Our crates stay unoptimized for fast dev iteration, but dependencies build

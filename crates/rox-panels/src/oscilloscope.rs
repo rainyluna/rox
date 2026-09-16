@@ -16,27 +16,27 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, size, AnyElement, App, Bounds, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, Path, Pixels, Point, Rgba, SharedString, Subscription,
-    WeakEntity, Window,
+    AnyElement, App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Path,
+    Pixels, Point, Rgba, SharedString, Subscription, WeakEntity, Window, canvas, div, fill, point,
+    prelude::*, px, size,
 };
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::Sizable as _;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
-use rox_viz::analysis::MAX_FFT_SIZE;
 use rox_viz::AudioFeed;
+use rox_viz::analysis::MAX_FFT_SIZE;
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, choices_shared, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, choices_shared, setting_row, toggle,
 };
 use crate::panel_settings;
 use crate::settings::ui as settings_ui;
-use crate::spectrum::{gradient_choices, ramp_color, Gradient};
+use crate::spectrum::{Gradient, gradient_choices, ramp_color};
 
 /// The time window slider's span, ms: a millisecond resolves a single cycle
 /// of a high note, a tenth of a second holds a bar of a slow bassline.

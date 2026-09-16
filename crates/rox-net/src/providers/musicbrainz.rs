@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::{
-    agent, net_reason, normalize_folded, string, MetadataCandidate, MetadataProvider, TrackQuery,
+    MetadataCandidate, MetadataProvider, TrackQuery, agent, net_reason, normalize_folded, string,
 };
 
 const API: &str = "https://musicbrainz.org/ws/2/recording";

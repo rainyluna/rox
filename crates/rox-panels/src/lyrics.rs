@@ -19,17 +19,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, prelude::*, px, uniform_list, AnyElement, App, Bounds, Context, Div, EventEmitter,
-    FocusHandle, Focusable, FontWeight, MouseButton, Pixels, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, Size, Subscription, UniformListScrollHandle, WeakEntity,
-    Window,
+    AnyElement, App, Bounds, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight,
+    MouseButton, Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Size,
+    Subscription, UniformListScrollHandle, WeakEntity, Window, canvas, div, prelude::*, px,
+    uniform_list,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, Sizable};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
-use rox_library::lyrics::{self, active_line, weave_rests, Lyrics};
+use rox_library::lyrics::{self, Lyrics, active_line, weave_rests};
 use rox_viz::curve;
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +37,7 @@ use crate::assets::icons;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, align_row, items, justify, Align, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, Align, AppState, PanelChrome, PanelSettings, ScrubState, align_row, items, justify,
 };
 use crate::panel_settings;
 use crate::providers;
@@ -466,10 +466,10 @@ impl LyricsPanel {
     /// pointer, so a re-read never reads through a stale weave.
     fn display_lyrics(&mut self, raw: &Arc<Lyrics>) -> Arc<Lyrics> {
         let key = (Arc::as_ptr(raw) as usize, self.rest_sig());
-        if let Some((cached, lyrics)) = &self.display {
-            if *cached == key {
-                return lyrics.clone();
-            }
+        if let Some((cached, lyrics)) = &self.display
+            && *cached == key
+        {
+            return lyrics.clone();
         }
         let woven = weave_rests(
             raw,
@@ -1498,20 +1498,20 @@ impl LyricsPanel {
         // Word-build: how far the playhead has run into the active line's
         // span, as a fraction, so line_rows lights words up to there.
         self.reveal = None;
-        if self.config.word_by_word {
-            if let (Some(pos), Some(ix)) = (position, active) {
-                let start = lyrics.lines[ix].at.unwrap_or(pos);
-                let end = lyrics.lines[ix + 1..]
-                    .iter()
-                    .find_map(|line| line.at)
-                    .unwrap_or(start + WORD_TAIL_SECS);
-                let frac = if end > start {
-                    ((pos - start) / (end - start)) as f32
-                } else {
-                    1.0
-                };
-                self.reveal = Some(frac.clamp(0.0, 1.0));
-            }
+        if self.config.word_by_word
+            && let (Some(pos), Some(ix)) = (position, active)
+        {
+            let start = lyrics.lines[ix].at.unwrap_or(pos);
+            let end = lyrics.lines[ix + 1..]
+                .iter()
+                .find_map(|line| line.at)
+                .unwrap_or(start + WORD_TAIL_SECS);
+            let frac = if end > start {
+                ((pos - start) / (end - start)) as f32
+            } else {
+                1.0
+            };
+            self.reveal = Some(frac.clamp(0.0, 1.0));
         }
         // The word-build tracks the playhead across the line, so keep the
         // frames coming while it still has words to light; the pump's tick
@@ -1526,10 +1526,10 @@ impl LyricsPanel {
         // Re-aim the glide when the active line moves; drive it toward the
         // middle here in render, the grid's follow idiom, asking for the
         // next frame only while it still moves.
-        if self.config.follow {
-            if let Some(active) = active {
-                self.glide_to = Some(active + pad);
-            }
+        if self.config.follow
+            && let Some(active) = active
+        {
+            self.glide_to = Some(active + pad);
         }
         if let Some(row) = self.glide_to {
             let arrived = match panel::glide_target(&self.scroll, row, count) {

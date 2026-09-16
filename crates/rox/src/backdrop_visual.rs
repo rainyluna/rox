@@ -54,8 +54,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    canvas, div, prelude::*, px, AnyElement, App, Entity, SharedString, UserShaderChain,
-    UserShaderId, UserShaderPass, UserTextureId, Window,
+    AnyElement, App, Entity, SharedString, UserShaderChain, UserShaderId, UserShaderPass,
+    UserTextureId, Window, canvas, div, prelude::*, px,
 };
 
 use rox_core::settings::{self, BackdropVisualConfig, MilkdropColor, Settings};
@@ -64,7 +64,7 @@ use rox_milkdrop::library::Shuffle;
 use rox_milkdrop::{Command, Engine, EngineOptions, Event, PresetLibrary, Rotation, Status};
 use rox_panel_api::panel::shader as surface;
 use rox_panel_api::preset_browser::{
-    find_folder_by_relative, folder_label, relative_to_roots, PresetHost,
+    PresetHost, find_folder_by_relative, folder_label, relative_to_roots,
 };
 use rox_panel_kit::fade::{self, Fade};
 use rox_panel_kit::grade::{self, Grade, GradeMode};
@@ -853,11 +853,12 @@ fn paint(bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App, 
     // seq still moves on, so it's dropped once and not re-fetched.
     if let Some(frame) = engine.frame_after(target.last_seq) {
         target.last_seq = frame.seq;
-        if frame.width == target.width && frame.height == target.height {
-            if let Err(message) = window.update_user_texture(target.texture, frame.rgba8) {
-                visual.error = Some(message);
-                return;
-            }
+        if frame.width == target.width
+            && frame.height == target.height
+            && let Err(message) = window.update_user_texture(target.texture, frame.rgba8)
+        {
+            visual.error = Some(message);
+            return;
         }
     }
 

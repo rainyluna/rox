@@ -15,26 +15,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, point, prelude::*, px, size, AnyElement, App, BorderStyle, Bounds, Context, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Rgba, SharedString, Subscription, WeakEntity, Window,
+    AnyElement, App, BorderStyle, Bounds, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Rgba, SharedString,
+    Subscription, WeakEntity, Window, canvas, div, point, prelude::*, px, size,
 };
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::Sizable as _;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
-use rox_viz::signal::{Route, SignalHub};
 use rox_viz::AudioFeed;
+use rox_viz::signal::{Route, SignalHub};
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit, setting_row, toggle,
 };
 use crate::panel_settings;
-use crate::settings::ui::{self as settings_ui, section, SECTION_GAP};
+use crate::settings::ui::{self as settings_ui, SECTION_GAP, section};
 use crate::signal_ui::{self, RouteHost, RouteTargets, SignalHost, SignalUi};
 
 /// Where a burst emitter's routed signal reads as a hit and where it

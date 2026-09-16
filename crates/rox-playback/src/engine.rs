@@ -14,9 +14,9 @@
 //! before the buffer ever reaches here.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use std::time::Instant;
 
@@ -624,14 +624,14 @@ impl Engine {
                                 let rate = self.device_rate as f64;
                                 let b = (b * rate).round() as u64;
                                 let floor = (AB_MIN_SECS * rate) as u64;
-                                if let Some(src) = source.as_ref() {
-                                    if src.pos_frames + floor <= b {
-                                        self.ab = Some(AbLoop {
-                                            track: self.idx,
-                                            a: src.pos_frames,
-                                            b,
-                                        });
-                                    }
+                                if let Some(src) = source.as_ref()
+                                    && src.pos_frames + floor <= b
+                                {
+                                    self.ab = Some(AbLoop {
+                                        track: self.idx,
+                                        a: src.pos_frames,
+                                        b,
+                                    });
                                 }
                             }
                             _ => {}
@@ -808,16 +808,16 @@ impl Engine {
                     // That's what makes it a loop rather than a seek every
                     // few seconds. `!more` carries EOF in, for a B set on
                     // the last second of the track.
-                    if let Some(ab) = self.ab.filter(|ab| ab.track == self.idx) {
-                        if let Some(landed) = src.wrap_ab(ab.a, ab.b, !more, &mut self.pending) {
-                            // The wrap is at the end of what survived the
-                            // cut, not the start of the chunk, so the
-                            // position readout flips back to A on the frame
-                            // the ear hears it.
-                            let at = (self.pending.len() / 2) as u64;
-                            self.register_segment_after(landed, at);
-                            more = true;
-                        }
+                    if let Some(ab) = self.ab.filter(|ab| ab.track == self.idx)
+                        && let Some(landed) = src.wrap_ab(ab.a, ab.b, !more, &mut self.pending)
+                    {
+                        // The wrap is at the end of what survived the
+                        // cut, not the start of the chunk, so the
+                        // position readout flips back to A on the frame
+                        // the ear hears it.
+                        let at = (self.pending.len() / 2) as u64;
+                        self.register_segment_after(landed, at);
+                        more = true;
                     }
                     // A fade in flight mixes the outgoing track underneath
                     // before anything downstream sees the samples, so the
@@ -2590,17 +2590,17 @@ impl Source {
             // belong to the track before it, and playing them would double
             // them up at the boundary. They go here, in the file's own
             // frames, before anything downstream can hear them.
-            if let Some(start) = self.span.map(|s| s.start) {
-                if self.src_frame < start {
-                    let skip = ((start - self.src_frame) as usize).min(frames);
-                    stereo.drain(..skip * 2);
-                    self.src_frame += skip as u64;
-                    if stereo.is_empty() {
-                        if ch == 2 {
-                            self.scratch = stereo;
-                        }
-                        continue;
+            if let Some(start) = self.span.map(|s| s.start)
+                && self.src_frame < start
+            {
+                let skip = ((start - self.src_frame) as usize).min(frames);
+                stereo.drain(..skip * 2);
+                self.src_frame += skip as u64;
+                if stereo.is_empty() {
+                    if ch == 2 {
+                        self.scratch = stereo;
                     }
+                    continue;
                 }
             }
 
@@ -3434,7 +3434,7 @@ mod tests {
         let mut e = test_engine(5);
         set_audible(&e, 2);
         e.pos = 3; // decode cursor ran ahead of the audible track
-                   // id 2 is the audible track; removing it must be refused.
+        // id 2 is the audible track; removing it must be refused.
         let removed_runahead = e.remove(2);
         assert!(!removed_runahead);
         assert_eq!(e.order.len(), 5, "audible entry stays");

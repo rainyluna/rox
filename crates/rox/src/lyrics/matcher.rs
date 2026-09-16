@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle, Global,
-    KeyBinding, ScrollHandle, SharedString, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, FocusHandle, Global, KeyBinding, ScrollHandle, SharedString,
+    Subscription, Window, WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::Root;
 
@@ -24,14 +24,14 @@ use rox_library::cue::TrackKey;
 use rox_library::lyrics;
 
 use crate::matching::{
-    confidence_badge, confidence_bar, note, open_or_focus, Phase, WindowRegistry,
+    Phase, WindowRegistry, confidence_badge, confidence_bar, note, open_or_focus,
 };
 use rox_core::settings::lyrics_dir;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_net::providers::{self, LyricsCandidate, TrackQuery};
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, Seg, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::lyrics::{query_for, save_target};
 use rox_services::player::fmt_time;

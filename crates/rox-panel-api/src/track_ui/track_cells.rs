@@ -5,7 +5,7 @@
 //! affordance until the row is hovered, so a column of them stays quiet;
 //! that reveal keys off the row being tagged with [`ROW_GROUP`].
 
-use gpui::{div, prelude::*, px, svg, Div, MouseButton};
+use gpui::{Div, MouseButton, div, prelude::*, px, svg};
 
 use crate::panel::AppState;
 use rox_design::assets::icons;

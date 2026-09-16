@@ -7,8 +7,8 @@
 //! settled on, and whether anything is converting on the way out.
 
 use gpui::{
-    div, prelude::*, px, App, Context, Div, EventEmitter, FocusHandle, Focusable, Rgba,
-    ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    App, Context, Div, EventEmitter, FocusHandle, Focusable, Rgba, ScrollHandle, SharedString,
+    Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -571,7 +571,7 @@ impl Render for BadgeNote {
 mod tests {
     use rox_playback::output::{Mode, Negotiated};
 
-    use super::{badge_label, tone_for, OutputConfig, OutputDetail, OutputStatus, Tone};
+    use super::{OutputConfig, OutputDetail, OutputStatus, Tone, badge_label, tone_for};
 
     fn status(fallback: Option<&str>, device_rate: u32, source_rate: Option<u32>) -> OutputStatus {
         OutputStatus {

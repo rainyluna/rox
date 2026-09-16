@@ -12,15 +12,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use gpui::{div, AnyWeakEntity, App, Div, Entity, EntityId, SharedString, WeakEntity, Window};
+use gpui::{AnyWeakEntity, App, Div, Entity, EntityId, SharedString, WeakEntity, Window, div};
 use gpui_component::menu::PopupMenu;
 use rox_dock::{PanelView, TabPanel};
 use rox_library::cue::TrackKey;
 use rox_services::backdrop::NowPlayingArt;
 use rox_services::catalog::Library;
 
-use crate::panel::shader::edit::ShaderEditTarget;
 use crate::panel::AppState;
+use crate::panel::shader::edit::ShaderEditTarget;
 use crate::preset_browser::PresetHost;
 
 /// The app's windows, as plain function pointers. One field per call a

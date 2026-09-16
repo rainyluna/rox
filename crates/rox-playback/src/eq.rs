@@ -20,8 +20,8 @@
 //! sample and the filter state stays at zero. So the EQ can stay in the
 //! chain while it's flat without anyone having to trust it.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::chain::Node;
 

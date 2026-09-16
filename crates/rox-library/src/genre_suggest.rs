@@ -408,7 +408,7 @@ pub fn nearest(mut scored: Vec<(i64, f32)>, k: usize) -> Vec<(i64, f32)> {
 mod tests {
     use super::*;
     use crate::rusqlite::Connection;
-    use crate::{store, TrackRow};
+    use crate::{TrackRow, store};
 
     /// A plain row; a test sets the fields its case is about.
     fn track(path: &str) -> TrackRow {

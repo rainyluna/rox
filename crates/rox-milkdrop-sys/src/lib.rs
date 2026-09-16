@@ -79,7 +79,7 @@ pub type projectm_log_callback = Option<
     ),
 >;
 
-extern "C" {
+unsafe extern "C" {
     // core.h
     pub fn projectm_create_with_opengl_load_proc(
         load_proc: projectm_load_proc,

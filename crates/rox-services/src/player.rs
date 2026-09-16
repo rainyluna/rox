@@ -9,21 +9,21 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use gpui::{App, Context, Entity, Global, SharedString, Subscription, Task};
 
+use rox_core::QUEUE_CAP;
 use rox_core::settings::{
     GainModeSetting, ReplayGainSave, ReplayGainSettings, Settings, ShuffleMode,
 };
-use rox_core::QUEUE_CAP;
 use rox_library::cue::{Span, TrackKey};
 use rox_library::embeddings;
 use rox_library::song;
 use rox_library::store;
 use rox_playback::continuation::{self, Pick};
-use rox_playback::engine::{self, shuffle_head, shuffle_slice, Cmd, LoopMode, StartQueue};
+use rox_playback::engine::{self, Cmd, StartQueue, shuffle_head, shuffle_slice};
 use rox_playback::eq::{Eq, EqParams};
 use rox_playback::gain;
 use rox_playback::output::{self, Mode, Negotiated, Request};
@@ -36,6 +36,11 @@ use crate::catalog::Library;
 // The clock formatters are with the rest of the readouts in rox-core now.
 // Callers still get them through the player, where the clock is.
 pub use rox_core::fmt::{fmt_time, fmt_time_padded};
+// The loop mode is re-exported rather than plainly imported: it's the
+// engine's type, but [`Player::loop_mode`] is where anything above the
+// services layer meets it, and a crate that can call the method otherwise
+// has no way to name what it got back.
+pub use rox_playback::engine::LoopMode;
 
 /// Pump cadence, roughly one video frame. The tap ring holds 16,384 samples
 /// (about 170 ms at 48 kHz stereo), so a tick has an order of magnitude of
@@ -1574,63 +1579,65 @@ impl Player {
         let mut was_playing = self.is_playing();
         let mut seen_rev = self.queue_rev();
         let mut seen_pos = self.position_key();
-        self.pump = Some(cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(PUMP_INTERVAL).await;
-            let alive = this.update(cx, |this, cx| {
-                if this.session.is_none() {
-                    return false;
+        self.pump = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PUMP_INTERVAL).await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.session.is_none() {
+                        return false;
+                    }
+                    // The output stream died (device unplugged, backend fault).
+                    // Rebuild it at the current spot and stop this pump: the
+                    // rebuild starts its own, and running two would double-drain
+                    // the tap. If the rebuild couldn't get a device it clears the
+                    // session, so either way this pump is done.
+                    if this
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.shared.device_lost())
+                    {
+                        this.reopen_device(cx);
+                        return false;
+                    }
+                    // Exclusive follows the file's rate, which means the same
+                    // stop: the rebuild brings its own pump up.
+                    if this.follow_source_rate(cx) {
+                        return false;
+                    }
+                    this.drain_tap();
+                    // The sleep timer rides the same clock: one compare against
+                    // an Instant, on a tick that already runs for every session.
+                    this.tick_sleep(cx);
+                    // The continuation trigger runs on this same clock (ADR 17).
+                    // It reads the queue snapshot the check below already needs
+                    // and does nothing at all on the overwhelming majority of
+                    // ticks, which is why it can run on a 60 Hz timer.
+                    this.continue_if_dry(cx);
+                    // Track boundaries ride the same clock, and for the same
+                    // reason: this is the only thing watching what's audible
+                    // often enough to notice one going past.
+                    this.reseed_on_boundary(cx);
+                    let playing = this.is_playing();
+                    let rev = this.queue_rev();
+                    // A seek while paused moves the clock without touching any
+                    // of the above: audio stays quiet and the queue keeps its
+                    // revision, so the seek strip and the MPRIS position would
+                    // show the old spot until the next resume. Compare the
+                    // resolved position while paused; playing ticks notify
+                    // anyway, so the check skips them and a settled pause still
+                    // costs nothing when nothing moved.
+                    let pos = if playing { None } else { this.position_key() };
+                    if playing || playing != was_playing || rev != seen_rev || pos != seen_pos {
+                        cx.notify();
+                    }
+                    was_playing = playing;
+                    seen_rev = rev;
+                    seen_pos = pos;
+                    true
+                });
+                if !matches!(alive, Ok(true)) {
+                    break;
                 }
-                // The output stream died (device unplugged, backend fault).
-                // Rebuild it at the current spot and stop this pump: the
-                // rebuild starts its own, and running two would double-drain
-                // the tap. If the rebuild couldn't get a device it clears the
-                // session, so either way this pump is done.
-                if this
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| s.shared.device_lost())
-                {
-                    this.reopen_device(cx);
-                    return false;
-                }
-                // Exclusive follows the file's rate, which means the same
-                // stop: the rebuild brings its own pump up.
-                if this.follow_source_rate(cx) {
-                    return false;
-                }
-                this.drain_tap();
-                // The sleep timer rides the same clock: one compare against
-                // an Instant, on a tick that already runs for every session.
-                this.tick_sleep(cx);
-                // The continuation trigger runs on this same clock (ADR 17).
-                // It reads the queue snapshot the check below already needs
-                // and does nothing at all on the overwhelming majority of
-                // ticks, which is why it can run on a 60 Hz timer.
-                this.continue_if_dry(cx);
-                // Track boundaries ride the same clock, and for the same
-                // reason: this is the only thing watching what's audible
-                // often enough to notice one going past.
-                this.reseed_on_boundary(cx);
-                let playing = this.is_playing();
-                let rev = this.queue_rev();
-                // A seek while paused moves the clock without touching any
-                // of the above: audio stays quiet and the queue keeps its
-                // revision, so the seek strip and the MPRIS position would
-                // show the old spot until the next resume. Compare the
-                // resolved position while paused; playing ticks notify
-                // anyway, so the check skips them and a settled pause still
-                // costs nothing when nothing moved.
-                let pos = if playing { None } else { this.position_key() };
-                if playing || playing != was_playing || rev != seen_rev || pos != seen_pos {
-                    cx.notify();
-                }
-                was_playing = playing;
-                seen_rev = rev;
-                seen_pos = pos;
-                true
-            });
-            if !matches!(alive, Ok(true)) {
-                break;
             }
         }));
     }
@@ -2726,10 +2733,10 @@ impl Player {
 
     /// Relative seek within the playing track.
     pub fn seek_by(&self, delta: f64) {
-        if let Some(session) = &self.session {
-            if let Some((_, secs)) = session.shared.position(session.device_rate) {
-                let _ = session.tx.send(Cmd::Seek((secs + delta).max(0.0)));
-            }
+        if let Some(session) = &self.session
+            && let Some((_, secs)) = session.shared.position(session.device_rate)
+        {
+            let _ = session.tx.send(Cmd::Seek((secs + delta).max(0.0)));
         }
     }
 
@@ -2837,14 +2844,15 @@ impl Player {
     /// pending write.
     fn persist_playback_soon(&mut self, cx: &mut Context<Self>) {
         self.persist_gen += 1;
-        let gen = self.persist_gen;
+        let generation = self.persist_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
-            // A later tick bumped the gen past this capture, so only the last
-            // edit in a burst writes. Read the values at write time, not
-            // capture time, so a mute toggled during the wait persists as is.
+            // A later tick bumped the generation past this capture, so only
+            // the last edit in a burst writes. Read the values at write
+            // time, not capture time, so a mute toggled during the wait
+            // persists as is.
             let Ok((latest, volume, muted, crossfade, restore, step, replay_gain)) =
                 this.update(cx, |this, _| {
                     (
@@ -2860,7 +2868,7 @@ impl Player {
             else {
                 return;
             };
-            if latest == gen {
+            if latest == generation {
                 Settings::update(move |s| {
                     s.session.volume = volume;
                     s.session.muted = muted;
@@ -3543,7 +3551,7 @@ pub fn observe_output<V: 'static>(player: &Entity<Player>, cx: &mut Context<V>) 
 mod tests {
     use super::*;
 
-    use rox_library::rusqlite::{params, Connection};
+    use rox_library::rusqlite::{Connection, params};
 
     /// A library of tagged rows, ids in insertion order. Enough of the
     /// schema for the song-identity lookups; nothing here scores anything.

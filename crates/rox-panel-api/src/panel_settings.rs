@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, size, AnyElement, App, Bounds, Context, Div, Entity, EntityId,
-    Focusable as _, Global, Hsla, KeyBinding, PathPromptOptions, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, WindowHandle,
+    AnyElement, App, Bounds, Context, Div, Entity, EntityId, Focusable as _, Global, Hsla,
+    KeyBinding, PathPromptOptions, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
@@ -24,10 +24,10 @@ use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::{Icon, Root, Sizable as _};
 
-use crate::panel::{self, shader, AppState, PanelSettings, ScrubState};
+use crate::panel::{self, AppState, PanelSettings, ScrubState, shader};
 use rox_core::settings;
 use rox_design::assets::icons;
-use rox_design::palette::{self, Palette, PanelTheme, Side, Sides, ROLES};
+use rox_design::palette::{self, Palette, PanelTheme, ROLES, Side, Sides};
 use rox_design::tokens;
 use rox_services::backdrop::WindowBackdrop;
 // The frame sliders' ceilings are defined in settings, shared with the app
@@ -37,8 +37,8 @@ use crate::signal_ui::{self, routes::RouteEditState};
 use rox_core::settings::{BORDER_MAX, MARGIN_MAX, PADDING_MAX, ROUNDING_MAX};
 use rox_dock::TabPanel;
 use rox_panel_kit::ui::{
-    self as settings_ui, grid_columns, kbd_line, section, sidebar, small_button, Seg, SidesScrub,
-    SECTION_GAP,
+    self as settings_ui, SECTION_GAP, Seg, SidesScrub, grid_columns, kbd_line, section, sidebar,
+    small_button,
 };
 use rox_viz::signal::Route;
 
@@ -147,13 +147,11 @@ pub fn open<P: PanelSettings>(panel: Entity<P>, cx: &mut App) {
     if let Some(handle) = cx
         .try_global::<OpenPanelSettings>()
         .and_then(|open| open.0.get(&id).copied())
-    {
-        if handle
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let title = SharedString::from(format!(
         "rox - {} settings",
@@ -736,13 +734,11 @@ fn open_rename<P: PanelSettings>(panel: Entity<P>, cx: &mut App) {
     if let Some(handle) = cx
         .try_global::<OpenRenames>()
         .and_then(|open| open.0.get(&id).copied())
-    {
-        if handle
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let title = SharedString::from(format!(
         "rox - rename {}",
@@ -912,13 +908,11 @@ fn open_save_preset<P: PanelSettings>(panel: Entity<P>, cx: &mut App) {
     if let Some(handle) = cx
         .try_global::<OpenPresetSaves>()
         .and_then(|open| open.0.get(&id).copied())
-    {
-        if handle
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let title = SharedString::from(format!(
         "rox - save {} as preset",
@@ -2885,14 +2879,13 @@ impl<P: PanelSettings> Render for PanelSettingsWindow<P> {
         // A page somebody asked for from the panel's own body, taken here
         // rather than at construction so it works on a window that was
         // already open.
-        if let Some(panel) = self.panel.upgrade() {
-            if let Some(page) = cx
+        if let Some(panel) = self.panel.upgrade()
+            && let Some(page) = cx
                 .default_global::<RequestedPage>()
                 .0
                 .remove(&panel.entity_id())
-            {
-                self.page = page;
-            }
+        {
+            self.page = page;
         }
 
         // The window renders under the player's art tint like the

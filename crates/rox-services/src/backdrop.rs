@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    div, img, prelude::*, AnyElement, App, Context, Entity, ObjectFit, Pixels, RenderImage, Rgba,
-    Subscription, Window,
+    AnyElement, App, Context, Entity, ObjectFit, Pixels, RenderImage, Rgba, Subscription, Window,
+    div, img, prelude::*,
 };
 use image::{Frame, RgbaImage};
 use std::sync::RwLock;
@@ -356,8 +356,10 @@ impl WindowBackdrop {
         let u = (self.fade_at.elapsed().as_secs_f32() / tokens::EASE_SECS).min(1.0);
         if u < 1.0 {
             window.request_animation_frame();
-        } else if let Some(old) = self.from.take() {
-            let _ = window.drop_image(old);
+        } else {
+            if let Some(old) = self.from.take() {
+                let _ = window.drop_image(old);
+            }
         }
         // The registered shade is drawn inside the layer, over the wash, so
         // every window that paints a bake gets it the same way and

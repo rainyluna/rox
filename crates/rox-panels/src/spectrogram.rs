@@ -27,9 +27,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, size, AnyElement, App, Bounds, Context, Corners, Div,
-    EventEmitter, FocusHandle, Focusable, Hsla, Pixels, RenderImage, Rgba, SharedString,
-    Subscription, TextRun, WeakEntity, Window,
+    AnyElement, App, Bounds, Context, Corners, Div, EventEmitter, FocusHandle, Focusable, Hsla,
+    Pixels, RenderImage, Rgba, SharedString, Subscription, TextRun, WeakEntity, Window, canvas,
+    div, fill, point, prelude::*, px, size,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use image::{Frame, RgbaImage};
@@ -37,18 +37,18 @@ use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_panel_kit::axis::{fmt_axis_hz, fmt_hz};
 use serde::{Deserialize, Serialize};
 
-use rox_viz::analysis::{hz_ladder, Analyzer, MAX_FFT_SIZE, MIN_FFT_SIZE};
 use rox_viz::AudioFeed;
+use rox_viz::analysis::{Analyzer, MAX_FFT_SIZE, MIN_FFT_SIZE, hz_ladder};
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, choices, choices_shared, setting_row, toggle, AppState, PanelChrome, PanelSettings,
-    ScrubState,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, choices, choices_shared, setting_row,
+    toggle,
 };
 use crate::panel_settings;
 use crate::settings::ui as settings_ui;
-use crate::spectrum::{orientation_choices, Orientation};
+use crate::spectrum::{Orientation, orientation_choices};
 
 /// The frequency resolution a stored column keeps, rows. Fixed rather than
 /// following the FFT size, so the window size and the history's memory are

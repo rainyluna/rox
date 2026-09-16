@@ -11,19 +11,23 @@
 //! act, a click apart. A top track the
 //! library holds selects on a click, the app-wide selection every other
 //! panel follows, and plays on a double click; one it doesn't is inert.
+//! A similar name is a chip too: a click turns the sheet to that artist,
+//! a trail of chips over the sheet leading back, and one the library
+//! files tracks under carries a search glyph that picks it on the shared
+//! search.
 //! Which track is per-view config through [`crate::source::TrackSource`],
 //! the cover panel's knob, so a duplicate can watch each. The sheet
 //! scrolls as one; each block has its own toggle in the panel settings,
 //! so a narrow panel can pare down to just the text.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, point, prelude::*, px, svg, App, Context, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, ObjectFit, Rgba,
-    ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent,
+    ObjectFit, Rgba, ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window, div,
+    img, linear_color_stop, linear_gradient, point, prelude::*, px, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
@@ -204,10 +208,19 @@ pub struct BiographyPanel {
     /// Which of the credited artists the sheet shows, an index into the
     /// list above; back to the first when the track changes.
     pick: usize,
+    /// The names browsed into off the similar lists, the last one what
+    /// the sheet shows; empty means the sheet is about the credited
+    /// artist itself. Cleared with the pick when the track changes.
+    trail: Vec<String>,
     /// Every album artist the library knows, folded, the evidence the
     /// credit splitter uses to keep "Earth, Wind & Fire" whole. Built on
     /// first use and dropped when the catalog changes.
     known_acts: Option<Arc<HashSet<String>>>,
+    /// Every name the library files tracks under, folded, with the filter
+    /// field and the spelling a search pick wants for it. What tells a
+    /// similar name the library holds from one it doesn't. Built on first
+    /// use and dropped when the catalog or the name source changes.
+    held: Option<Arc<HashMap<String, (FilterField, String)>>>,
     /// The store's result, keyed by the folded name it was asked under;
     /// None inside is a clean miss, no Last.fm entry under that name.
     loaded: Option<(String, Option<Artist>)>,
@@ -278,6 +291,7 @@ impl BiographyPanel {
                 this.resolved.invalidate();
                 this.artist = None;
                 this.known_acts = None;
+                this.held = None;
                 this.matches = None;
                 cx.notify();
             },
@@ -292,10 +306,12 @@ impl BiographyPanel {
         // The cycle's clock: a slow tick that moves the header on once the
         // interval has passed; the loop ends with the view, the stats
         // widget's shape. Idle when the cycle is off or there is one image.
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(CYCLE_TICK).await;
-            if view.update(cx, |this, cx| this.tick(cx)).is_err() {
-                break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(CYCLE_TICK).await;
+                if view.update(cx, |this, cx| this.tick(cx)).is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -304,7 +320,9 @@ impl BiographyPanel {
             config,
             artist: None,
             pick: 0,
+            trail: Vec::new(),
             known_acts: None,
+            held: None,
             loaded: None,
             pending: None,
             error: None,
@@ -355,6 +373,7 @@ impl BiographyPanel {
                 .unwrap_or_default();
             self.artist = Some((key.clone(), names));
             self.pick = 0;
+            self.trail.clear();
         }
         self.artist
             .as_ref()
@@ -397,6 +416,56 @@ impl BiographyPanel {
             .and_then(|(_, names)| names.get(self.pick).or_else(|| names.first()))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The artist the sheet shows: the end of the browse trail while one
+    /// is walked, the picked credit otherwise.
+    fn shown(&self) -> String {
+        self.trail.last().cloned().unwrap_or_else(|| self.picked())
+    }
+
+    /// Turn the sheet to a name off the similar list, one more step down
+    /// the trail. A name already on it is a step back to that point
+    /// rather than a loop, and the credited artist's own name is the
+    /// trail's start.
+    fn browse(&mut self, name: String, cx: &mut Context<Self>) {
+        if let Some(at) = self.trail.iter().position(|n| *n == name) {
+            self.trail.truncate(at + 1);
+        } else if fold_name(&name) == fold_name(&self.picked()) {
+            self.trail.clear();
+        } else {
+            self.trail.push(name);
+        }
+        cx.notify();
+    }
+
+    /// The names the library files tracks under, from the cache or one
+    /// pass over the projection's artist and album artist tables, the
+    /// chosen tag's table first so a name in both picks the field the
+    /// sheet reads.
+    fn held(&mut self, cx: &App) -> Arc<HashMap<String, (FilterField, String)>> {
+        if let Some(held) = &self.held {
+            return held.clone();
+        }
+
+        let library = self.state.library.read(cx);
+        let held = library
+            .projection()
+            .map(|projection| {
+                let artists = (FilterField::Artist, projection.artists.strings.as_slice());
+                let album_artists = (
+                    FilterField::AlbumArtist,
+                    projection.album_artists.strings.as_slice(),
+                );
+                match self.config.name_source {
+                    NameSource::Artist => held_index([artists, album_artists]),
+                    NameSource::AlbumArtist => held_index([album_artists, artists]),
+                }
+            })
+            .unwrap_or_default();
+        let held = Arc::new(held);
+        self.held = Some(held.clone());
+        held
     }
 
     /// Make sure the store's result for `name` is loaded or on its way:
@@ -482,7 +551,7 @@ impl BiographyPanel {
     /// Refresh: a moved portrait or a grown wiki article shows up without
     /// waiting out the month.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let name = self.picked();
+        let name = self.shown();
         if name.is_empty() {
             return;
         }
@@ -578,16 +647,16 @@ impl BiographyPanel {
         tracks: &[TopTrack],
         cx: &App,
     ) -> Vec<Option<i64>> {
-        if let Some((k, matches)) = &self.matches {
-            if k == key {
-                return matches.clone();
-            }
+        if let Some((k, matches)) = &self.matches
+            && k == key
+        {
+            return matches.clone();
         }
         let fold = |text: &str| providers::normalize(&rox_library::fold::fold(text));
         let mut names: Vec<String> = vec![fold(lastfm_name)];
-        let picked = fold(&self.picked());
-        if !names.contains(&picked) {
-            names.push(picked);
+        let shown = fold(&self.shown());
+        if !names.contains(&shown) {
+            names.push(shown);
         }
         names.retain(|name| !name.is_empty());
         let titles: Vec<String> = tracks.iter().map(|track| fold(&track.name)).collect();
@@ -825,8 +894,10 @@ impl PanelSettings for BiographyPanel {
                     self.config.name_source,
                     |this: &mut Self, name_source, cx| {
                         this.config.name_source = name_source;
-                        // The credits re-read off the other tag.
+                        // The credits and the held names re-read off the
+                        // other tag.
                         this.artist = None;
+                        this.held = None;
                         cx.notify();
                     },
                     cx,
@@ -1130,7 +1201,7 @@ impl BiographyPanel {
             return root.child(quiet(rox_i18n::t!("content-no-track")));
         };
         let names = self.credits_for(&key, cx);
-        let name = self.picked();
+        let name = self.shown();
         if name.is_empty() {
             return root.child(quiet(rox_i18n::t!("biography-no-artist-tag")));
         }
@@ -1138,17 +1209,22 @@ impl BiographyPanel {
         let key = providers::normalize(&name);
         // With several acts credited, a chip per name over whatever the
         // sheet shows, the picked one in the accent, so the other's sheet
-        // is one click away.
-        let picker = (names.len() > 1).then(|| {
-            let pick = self.pick.min(names.len() - 1);
-            div()
+        // is one click away. A walked trail follows the credits behind a
+        // chevron each, its end in the accent instead, and a click on any
+        // earlier chip steps back to it.
+        let trail = self.trail.clone();
+        let picker = (names.len() > 1 || !trail.is_empty()).then(|| {
+            let pick = self.pick.min(names.len().saturating_sub(1));
+            let browsing = !trail.is_empty();
+            let mut row = div()
                 .flex()
                 .flex_row()
                 .flex_wrap()
+                .items_center()
                 .gap(tokens::SPACE_XS)
                 .p(tokens::SPACE_SM)
                 .children(names.iter().enumerate().map(|(i, credit)| {
-                    let picked = i == pick;
+                    let picked = i == pick && !browsing;
                     chip(credit.clone())
                         .id(("biography-credit", i))
                         .cursor_pointer()
@@ -1159,9 +1235,37 @@ impl BiographyPanel {
                         .when(!picked, |d| d.hover(|d| d.bg(palette::bg_control_hover())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pick = i;
+                            this.trail.clear();
                             cx.notify();
                         }))
-                }))
+                }));
+
+            for (i, name) in trail.iter().enumerate() {
+                let last = i + 1 == trail.len();
+                row = row
+                    .child(
+                        svg()
+                            .path(icons::CHEVRON_RIGHT)
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(palette::text_faint()),
+                    )
+                    .child(
+                        chip(name.clone())
+                            .id(("biography-trail", i))
+                            .cursor_pointer()
+                            .when(last, |d| {
+                                d.bg(palette::accent())
+                                    .text_color(palette::text_on_accent())
+                            })
+                            .when(!last, |d| d.hover(|d| d.bg(palette::bg_control_hover())))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.trail.truncate(i + 1);
+                                cx.notify();
+                            })),
+                    );
+            }
+            row
         });
         let root = root.flex().flex_col();
         let root = root.children(picker);
@@ -1216,17 +1320,15 @@ impl BiographyPanel {
     fn header_layer(&self, sized: &SizedImage) -> Div {
         let fit = !self.config.header_aspect && self.config.header_blur;
         let mut layer = div().absolute().inset_0();
-        if fit {
-            if let Some(soft) = &sized.soft {
-                layer = layer.child(
-                    div().absolute().inset_0().child(
-                        img(soft.clone())
-                            .overflow_hidden()
-                            .object_fit(ObjectFit::Cover)
-                            .size_full(),
-                    ),
-                );
-            }
+        if fit && let Some(soft) = &sized.soft {
+            layer = layer.child(
+                div().absolute().inset_0().child(
+                    img(soft.clone())
+                        .overflow_hidden()
+                        .object_fit(ObjectFit::Cover)
+                        .size_full(),
+                ),
+            );
         }
         layer.child(
             img(sized.image.clone())
@@ -1376,15 +1478,15 @@ impl BiographyPanel {
                 .child(SharedString::from(artist.info.name.clone())),
         );
         let mut block = div().flex().flex_col().gap(px(2.)).min_w_0().child(name);
-        if self.config.profile {
-            if let Some(years) = years_active(profile) {
-                block = block.child(
-                    div()
-                        .text_xs()
-                        .text_color(palette::text_muted())
-                        .child(years),
-                );
-            }
+        if self.config.profile
+            && let Some(years) = years_active(profile)
+        {
+            block = block.child(
+                div()
+                    .text_xs()
+                    .text_color(palette::text_muted())
+                    .child(years),
+            );
         }
         block
     }
@@ -1491,6 +1593,24 @@ impl BiographyPanel {
             content = content.child(list);
         }
         if self.config.similar && !info.similar.is_empty() {
+            // The search glyph follows the tag row's rule: only while a
+            // search box is up somewhere to show the pick.
+            let held = self.held(cx);
+            let query = self
+                .state
+                .query
+                .read(cx)
+                .has_box()
+                .then(|| self.state.query.clone());
+            let chips: Vec<Stateful<Div>> = info
+                .similar
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let library = held.get(&fold_name(name)).cloned();
+                    self.similar_chip(i, name.clone(), library, query.clone(), cx)
+                })
+                .collect();
             content = content.child(
                 div()
                     .mt(tokens::SPACE_XS)
@@ -1500,8 +1620,12 @@ impl BiographyPanel {
                     .child(heading(rox_i18n::t!("biography-similar-heading")))
                     .child(
                         div()
-                            .text_color(palette::text_secondary())
-                            .child(SharedString::from(info.similar.join(", "))),
+                            .mt(px(2.))
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap(tokens::SPACE_XS)
+                            .children(chips),
                     ),
             );
         }
@@ -1537,27 +1661,27 @@ impl BiographyPanel {
         // credit picker above this when a track names several acts, and
         // the sheet takes what's left.
         let mut root = div().flex_1().min_h_0().w_full().relative();
-        if self.config.background {
-            if let Some(image) = &artist.background {
-                let base = palette::bg_root();
-                let opacity = (self.config.background_opacity / 100.).clamp(0., 1.);
-                root = root
-                    .child(
-                        div().absolute().inset_0().opacity(opacity).child(
-                            img(image.clone())
-                                .overflow_hidden()
-                                .object_fit(ObjectFit::Cover)
-                                .size_full(),
-                        ),
-                    )
-                    .child(div().absolute().inset_0().bg(linear_gradient(
-                        0.0,
-                        // Angle 0 puts 0% at the bottom: solid there, thinning
-                        // to a light dim at the top.
-                        linear_color_stop(base, 0.0),
-                        linear_color_stop(scrim(base, 0xA6), 1.0),
-                    )));
-            }
+        if self.config.background
+            && let Some(image) = &artist.background
+        {
+            let base = palette::bg_root();
+            let opacity = (self.config.background_opacity / 100.).clamp(0., 1.);
+            root = root
+                .child(
+                    div().absolute().inset_0().opacity(opacity).child(
+                        img(image.clone())
+                            .overflow_hidden()
+                            .object_fit(ObjectFit::Cover)
+                            .size_full(),
+                    ),
+                )
+                .child(div().absolute().inset_0().bg(linear_gradient(
+                    0.0,
+                    // Angle 0 puts 0% at the bottom: solid there, thinning
+                    // to a light dim at the top.
+                    linear_color_stop(base, 0.0),
+                    linear_color_stop(scrim(base, 0xA6), 1.0),
+                )));
         }
         // The bar over the sheet's right edge, the queue's arrangement:
         // gpui's overflow scroll draws none of its own.
@@ -1701,6 +1825,56 @@ impl BiographyPanel {
                 )
             })
     }
+
+    /// One similar name as a chip. A click turns the sheet to that
+    /// artist, whether or not the library holds them: reading up on a
+    /// name you don't own is the point of the list. A name the library
+    /// files tracks under reads in the chip's own colour and carries a
+    /// search glyph that picks it on the shared search, under the
+    /// library's spelling so the filter's whole-value match lands; one it
+    /// doesn't reads faint, the top tracks' cue, with no glyph to promise
+    /// a search that would find nothing.
+    fn similar_chip(
+        &self,
+        i: usize,
+        name: String,
+        library: Option<(FilterField, String)>,
+        query: Option<Entity<SharedQuery>>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let held = library.is_some();
+        let browse = name.clone();
+        let mut chip = chip(name)
+            .id(("biography-similar", i))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .cursor_pointer()
+            .when(!held, |d| d.text_color(palette::text_faint()))
+            .hover(|d| d.bg(palette::bg_control_hover()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.browse(browse.clone(), cx);
+                }),
+            );
+
+        if let (Some((field, value)), Some(query)) = (library, query) {
+            chip = chip.child(
+                svg()
+                    .path(icons::SEARCH)
+                    .size(px(11.))
+                    .flex_none()
+                    .text_color(palette::accent())
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation();
+                        shared_query::toggle_pick(&query, field, &value, cx);
+                    }),
+            );
+        }
+        chip
+    }
 }
 
 /// The wiki text as markdown: every character that markdown would read
@@ -1771,6 +1945,23 @@ fn bio_markdown(bio: &str, links: &[BioLink]) -> String {
 /// "earth wind fire" meet.
 fn fold_name(name: &str) -> String {
     providers::normalize(&rox_library::fold::fold(name))
+}
+
+/// The names the library files tracks under, folded, each with the field
+/// and the spelling a filter pick wants. Whole symbols rather than split
+/// credits: the filter matches a pick against a whole value, so a guest
+/// on a "feat." credit would read as held and then find nothing. The
+/// first table wins a name in both; empties are skipped.
+fn held_index(tables: [(FilterField, &[String]); 2]) -> HashMap<String, (FilterField, String)> {
+    let mut index = HashMap::new();
+    for (field, strings) in tables {
+        for name in strings.iter().filter(|name| !name.is_empty()) {
+            index
+                .entry(fold_name(name))
+                .or_insert_with(|| (field, name.clone()));
+        }
+    }
+    index
 }
 
 /// The acts an artist tag credits, in its order. Semicolons, slashes,
@@ -2006,6 +2197,35 @@ mod tests {
             "Formed with [Other](https://x/Other%20%28band%29) in 1993. \\*Not\\* a list:\n\n1. one"
         );
         assert_eq!(bio_markdown("a [b]", &[]), "a \\[b\\]");
+    }
+
+    #[test]
+    fn held_names_fold_and_keep_the_library_spelling() {
+        let artists = ["Madeon".to_string(), "Mat Zo & Porter Robinson".to_string()];
+        let album_artists = ["MADEON".to_string(), String::new(), "Doss".to_string()];
+        let held = held_index([
+            (FilterField::Artist, &artists[..]),
+            (FilterField::AlbumArtist, &album_artists[..]),
+        ]);
+        // A name in both tables reads off the first, under its spelling.
+        assert_eq!(
+            held.get(&fold_name("madeon")),
+            Some(&(FilterField::Artist, "Madeon".to_string()))
+        );
+        assert_eq!(
+            held.get(&fold_name("Mat Zo and Porter Robinson")),
+            None,
+            "an ampersand and an 'and' are different names"
+        );
+        assert_eq!(
+            held.get(&fold_name("doss")),
+            Some(&(FilterField::AlbumArtist, "Doss".to_string()))
+        );
+        assert!(
+            !held.contains_key(""),
+            "an empty symbol never counts as held"
+        );
+        assert_eq!(held.len(), 3);
     }
 
     #[test]

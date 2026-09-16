@@ -5,8 +5,8 @@
 //! shared so the knob reads the same in every customize window.
 
 use gpui::{App, Context, Div, Entity, Window};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::Side;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use serde::{Deserialize, Serialize};
 
 use crate::panel::{self, AppState};

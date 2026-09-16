@@ -12,8 +12,8 @@
 //! cover editor.
 
 use gpui::{
-    div, prelude::*, px, size, AnyWindowHandle, App, Bounds, Context, Div, Entity, EntityId,
-    Global, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, WindowHandle,
+    AnyWindowHandle, App, Bounds, Context, Div, Entity, EntityId, Global, ScrollHandle,
+    SharedString, Subscription, Task, WeakEntity, Window, WindowHandle, div, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Root, Sizable as _};
@@ -22,13 +22,13 @@ use rox_library::cue::TrackKey;
 use rox_library::writer::{self, Change, Edit, Field};
 
 use crate::matching::{
-    confidence_badge, confidence_bar, note, open_or_focus, Phase, WindowRegistry,
+    Phase, WindowRegistry, confidence_badge, confidence_bar, note, open_or_focus,
 };
 use crate::tags::editor::TagEditor;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_net::providers::{self, MetadataCandidate, TrackQuery};
-use rox_panel_kit::ui::{self as settings_ui, section, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
 use rox_services::player::fmt_time;

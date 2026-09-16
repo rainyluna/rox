@@ -5,9 +5,9 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    anchored, canvas, deferred, div, prelude::*, px, svg, AnyElement, App, Context, DismissEvent,
-    Div, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, Pixels, Point, Stateful,
-    Subscription, WeakEntity, Window,
+    AnyElement, App, Context, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    MouseButton, Pixels, Point, Stateful, Subscription, WeakEntity, Window, anchored, canvas,
+    deferred, div, prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Side};
@@ -22,14 +22,14 @@ use crate::catalog::LibraryEvent;
 use crate::continuation;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, align_row, justify, Align, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, Align, AppState, PanelChrome, PanelSettings, ScrubState, align_row, justify,
 };
 use crate::panel_settings;
-use crate::player::{fmt_time, observe_view, AbState};
+use crate::player::{AbState, fmt_time, observe_view};
 use crate::rating_ui;
 use crate::settings::ShuffleMode;
 use crate::source::TrackSource;
-use rox_panel_api::actions::{TogglePlayback, PLAYBACK_TIP_SCOPE};
+use rox_panel_api::actions::{PLAYBACK_TIP_SCOPE, TogglePlayback};
 
 use super::{default_true, transport_panel};
 
@@ -1427,10 +1427,10 @@ impl TransportPanel {
         if fade.is_some() {
             self.outro = None;
             self.last_fade = fade;
-        } else if let Some(last) = self.last_fade.take() {
-            if last.progress() >= OUTRO_FROM {
-                self.outro = Some((Instant::now(), last.back));
-            }
+        } else if let Some(last) = self.last_fade.take()
+            && last.progress() >= OUTRO_FROM
+        {
+            self.outro = Some((Instant::now(), last.back));
         }
         // The afterglow's strength this frame: the flash starts at full and
         // the square falls it away, most of the dissolve in the front half.
@@ -1799,7 +1799,7 @@ transport_panel!(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_length, length_label, PlaybackItem, RandomMode, TransportConfig, CROSSFADE_LENGTHS,
+        CROSSFADE_LENGTHS, PlaybackItem, RandomMode, TransportConfig, is_length, length_label,
     };
 
     /// The hold menu has to be able to mark a length the Audio page's scrub
@@ -1818,9 +1818,11 @@ mod tests {
 
         assert!(is_length(4.0, 4.0));
         assert!(!is_length(4.0, 4.3));
-        assert!(!CROSSFADE_LENGTHS
-            .iter()
-            .any(|preset| is_length(*preset, 4.3)));
+        assert!(
+            !CROSSFADE_LENGTHS
+                .iter()
+                .any(|preset| is_length(*preset, 4.3))
+        );
     }
 
     /// A layout with no button fields at all decodes to the stock strip:

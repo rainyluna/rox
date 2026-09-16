@@ -156,10 +156,10 @@ fn strip_tail(title: &str) -> Option<&str> {
 /// inside it), or None when the title doesn't end in one.
 fn trailing_group(title: &str) -> Option<(&str, &str)> {
     for (open, close) in [('(', ')'), ('[', ']')] {
-        if let Some(rest) = title.strip_suffix(close) {
-            if let Some(at) = rest.rfind(open) {
-                return Some((&rest[..at], &rest[at + open.len_utf8()..]));
-            }
+        if let Some(rest) = title.strip_suffix(close)
+            && let Some(at) = rest.rfind(open)
+        {
+            return Some((&rest[..at], &rest[at + open.len_utf8()..]));
         }
     }
     None

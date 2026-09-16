@@ -561,7 +561,7 @@ pub fn set_favourite(
         .optional()?
         .is_some();
     match (on, member) {
-        (true, false) => add(conn, fav, &[track_id], now),
+        (true, false) => add(conn, fav, &[track_id], now).map(|_| ()),
         (false, true) => {
             conn.execute(
                 "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
@@ -581,14 +581,20 @@ pub fn set_favourite(
 /// tags from the live catalog. Duplicates are kept: a track already in the
 /// playlist gets a second member row. The favourites playlist is the one
 /// exception, per [`dedupe_favourite_members`]. Stamps the playlist updated.
+///
+/// Returns the member ids of the rows that landed, in insertion order. A
+/// track id with no catalog row contributes nothing, and on favourites the
+/// dedupe below can drop a row this call just made, so the list is what
+/// survived the transaction, not one id per input. That's what a drop from
+/// elsewhere needs to hand [`place_members`] to position the new block.
 pub fn add(
     conn: &mut Connection,
     playlist_id: i64,
     track_ids: &[i64],
     now: i64,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Vec<i64>> {
     if track_ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let tx = conn.transaction()?;
     let mut next: i64 = tx
@@ -598,6 +604,7 @@ pub fn add(
             |row| row.get(0),
         )
         .unwrap_or(0);
+    let mut added_ids: Vec<i64> = Vec::with_capacity(track_ids.len());
     {
         let mut insert = tx.prepare_cached(
             "INSERT INTO playlist_tracks
@@ -610,6 +617,7 @@ pub fn add(
             // Only advance the position when a row actually landed, so a track
             // id with no catalog row (nothing to snapshot) leaves no gap.
             if added > 0 {
+                added_ids.push(tx.last_insert_rowid());
                 next += 1;
             }
         }
@@ -618,12 +626,24 @@ pub fn add(
     // the heart reads the same before and after and one click still clears it.
     if favourites_id(&tx)? == Some(playlist_id) {
         dedupe_favourite_members(&tx, playlist_id)?;
+
+        // The dedupe keeps the older row, so some of the ids just collected
+        // are gone. Ask the table which ones are still there rather than
+        // guessing from what was inserted.
+        let alive: std::collections::HashSet<i64> = {
+            let mut stmt = tx.prepare("SELECT id FROM playlist_tracks WHERE playlist_id = ?1")?;
+            let rows = stmt.query_map([playlist_id], |row| row.get::<_, i64>(0))?;
+            rows.filter_map(Result::ok).collect()
+        };
+        added_ids.retain(|id| alive.contains(id));
     }
     tx.execute(
         "UPDATE playlists SET updated = ?2 WHERE id = ?1",
         rusqlite::params![playlist_id, now],
     )?;
-    tx.commit()
+    tx.commit()?;
+
+    Ok(added_ids)
 }
 
 /// Remove one member from a playlist by its row id. Leaves the remaining
@@ -736,10 +756,11 @@ pub fn place_members(
         let mut src = tx.prepare("SELECT playlist_id FROM playlist_tracks WHERE id = ?1")?;
         let mut mv = tx.prepare("UPDATE playlist_tracks SET playlist_id = ?2 WHERE id = ?1")?;
         for &member in members {
-            if let Ok(from) = src.query_row([member], |row| row.get::<_, i64>(0)) {
-                if from != playlist_id && !touched.contains(&from) {
-                    touched.push(from);
-                }
+            if let Ok(from) = src.query_row([member], |row| row.get::<_, i64>(0))
+                && from != playlist_id
+                && !touched.contains(&from)
+            {
+                touched.push(from);
             }
             mv.execute(rusqlite::params![member, playlist_id])?;
         }
@@ -796,10 +817,10 @@ pub fn remove_members(conn: &mut Connection, member_ids: &[i64], now: i64) -> ru
         let mut src = tx.prepare("SELECT playlist_id FROM playlist_tracks WHERE id = ?1")?;
         let mut del = tx.prepare("DELETE FROM playlist_tracks WHERE id = ?1")?;
         for &member in member_ids {
-            if let Ok(from) = src.query_row([member], |row| row.get::<_, i64>(0)) {
-                if !touched.contains(&from) {
-                    touched.push(from);
-                }
+            if let Ok(from) = src.query_row([member], |row| row.get::<_, i64>(0))
+                && !touched.contains(&from)
+            {
+                touched.push(from);
             }
             del.execute([member])?;
         }
@@ -906,7 +927,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::{store, TrackRow};
+    use crate::{TrackRow, store};
 
     fn track(path: &str, title: &str, artist: &str, album: &str) -> TrackRow {
         TrackRow {
@@ -1182,6 +1203,31 @@ mod tests {
         assert_eq!(ids(&conn, pl).unwrap(), [2, 1]);
     }
 
+    /// The ids an add hands back are the rows it just made, in order. A drop
+    /// from elsewhere feeds them straight to `place_members`, so a stale or
+    /// reordered list would land the block wrong.
+    #[test]
+    fn add_returns_the_member_ids_it_made() {
+        let mut conn = seed();
+        let pl = create(&conn, "A", 100).unwrap();
+
+        let first = add(&mut conn, pl, &[1, 2], 100).unwrap();
+        let members: Vec<i64> = tracks(&conn, pl)
+            .unwrap()
+            .iter()
+            .map(|m| m.member_id)
+            .collect();
+        assert_eq!(first, members, "the new rows, in insertion order");
+
+        // A second add reports its own row only, not the ones already there.
+        let second = add(&mut conn, pl, &[3], 110).unwrap();
+        let after = tracks(&conn, pl).unwrap();
+        assert_eq!(second, [after[2].member_id]);
+
+        // An id with no catalog row behind it inserts nothing to report.
+        assert!(add(&mut conn, pl, &[404], 120).unwrap().is_empty());
+    }
+
     #[test]
     fn reorder_and_move_between_playlists() {
         let mut conn = seed();
@@ -1259,6 +1305,30 @@ mod tests {
         // One click clears it, which is the whole point of holding the line.
         set_favourite(&mut conn, 1, false, 120).unwrap();
         assert!(!is_favourite(&conn, 1).unwrap());
+    }
+
+    /// An add onto favourites over a track it already holds keeps the older
+    /// row, so the ids handed back are the survivors. Reporting the id it
+    /// inserted would point the caller at a row the dedupe just deleted.
+    #[test]
+    fn add_to_favourites_reports_only_the_rows_that_survived() {
+        let mut conn = seed();
+        let fav = ensure_favourites(&conn, 100).unwrap();
+        set_favourite(&mut conn, 1, true, 110).unwrap();
+        let kept = tracks(&conn, fav).unwrap()[0].member_id;
+
+        let landed = add(&mut conn, fav, &[1, 2], 111).unwrap();
+        let members = tracks(&conn, fav).unwrap();
+        assert_eq!(members.len(), 2, "track 1 is in there once");
+        assert_eq!(
+            members[0].member_id, kept,
+            "and it is the row the heart already had"
+        );
+        assert_eq!(
+            landed,
+            [members[1].member_id],
+            "only the row for the new track comes back"
+        );
     }
 
     #[test]

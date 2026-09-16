@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use gpui::{
-    div, prelude::*, px, svg, uniform_list, App, Context, Div, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, ScrollStrategy, SharedString,
-    Subscription, UniformListScrollHandle, WeakEntity, Window,
+    App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::*, px, svg, uniform_list,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
@@ -291,10 +291,10 @@ impl FilterPanel {
                 self.set_cursor(last, cx);
             }
             "enter" => {
-                if let Some(ix) = self.cursor {
-                    if let Some(value) = self.value_at(self.active_col, ix) {
-                        self.toggle(self.active_col, value, cx);
-                    }
+                if let Some(ix) = self.cursor
+                    && let Some(value) = self.value_at(self.active_col, ix)
+                {
+                    self.toggle(self.active_col, value, cx);
                 }
             }
             _ => {
@@ -696,7 +696,12 @@ impl FilterPanel {
     /// drops the kind pick, clear, and remove, then a grip to reorder by.
     /// The whole header is a drop target, so a column dragged by its grip
     /// can be dropped anywhere on it.
-    fn header(&self, col: usize, kind: ColumnKind, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(
+        &self,
+        col: usize,
+        kind: ColumnKind,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let weak = cx.entity().downgrade();
         let picked = !self
             .state
@@ -793,7 +798,7 @@ impl FilterPanel {
     /// trailing the strip and, labelled, in the empty state, so a column
     /// can be added without the panel menu. Twins are fine here, matching a
     /// header's kind pick.
-    fn add_button(&self, labelled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn add_button(&self, labelled: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let weak = cx.entity().downgrade();
         let button = Button::new("filter-add")
             .icon(Icon::default().path(icons::PLUS))
@@ -1570,7 +1575,7 @@ fn move_slot<T>(slots: &mut Vec<T>, from: usize, dest: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rox_library::{store, TrackRow};
+    use rox_library::{TrackRow, store};
 
     fn track(path: &str, artist: &str, year: u16) -> TrackRow {
         TrackRow {

@@ -12,12 +12,12 @@ use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, App, Context, Div, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, SharedString, Stateful,
-    Subscription, UniformListScrollHandle, WeakEntity, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, SharedString, Stateful, Subscription, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::Icon;
+use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use rox_core::fmt::{fmt_ago, fmt_time};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::bookmarks::{Bookmark, BookmarkRow};

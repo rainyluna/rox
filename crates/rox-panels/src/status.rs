@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, AnyView, App, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, Pixels, SharedString, Subscription, WeakEntity, Window,
+    AnyElement, AnyView, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -20,7 +20,7 @@ use crate::assets::icons;
 use crate::catalog::{Library, LibraryEvent};
 use crate::design::{palette, tokens};
 use crate::group_head;
-use crate::panel::{self, align_row, justify, Align, AppState, PanelChrome, PanelSettings};
+use crate::panel::{self, Align, AppState, PanelChrome, PanelSettings, align_row, justify};
 use crate::panel_settings;
 use crate::selection::{Selection, SelectionEvent};
 use crate::transport::transport_panel;

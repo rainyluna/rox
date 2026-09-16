@@ -16,7 +16,7 @@ use std::sync::{Mutex, OnceLock, RwLock};
 
 pub use fluent_bundle::FluentArgs;
 use fluent_bundle::FluentResource;
-use fluent_langneg::{negotiate_languages, NegotiationStrategy};
+use fluent_langneg::{NegotiationStrategy, negotiate_languages};
 use gpui::SharedString;
 use unic_langid::LanguageIdentifier;
 

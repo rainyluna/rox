@@ -8,11 +8,11 @@
 use std::path::PathBuf;
 
 use gpui::{
-    div, img, prelude::*, px, svg, AnyElement, Context, Div, Entity, MouseButton, ObjectFit,
-    Pixels, SharedString, Stateful, Window,
+    AnyElement, Context, Div, Entity, MouseButton, ObjectFit, Pixels, SharedString, Stateful,
+    Window, div, img, prelude::*, px, svg,
 };
-use gpui_component::menu::PopupMenu;
 use gpui_component::Side;
+use gpui_component::menu::PopupMenu;
 use rox_core::fmt::fmt_ms;
 
 use crate::group_head::{self, HeadPiece, Headers};

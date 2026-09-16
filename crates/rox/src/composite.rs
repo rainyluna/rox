@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, prelude::*, px, svg, Along, App, Axis, Bounds, Context, Div, EntityId, Global,
-    MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, WeakEntity, Window,
+    Along, App, Axis, Bounds, Context, Div, EntityId, Global, MouseButton, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, SharedString, WeakEntity, Window, div, prelude::*, px, svg,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};

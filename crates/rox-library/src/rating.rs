@@ -6,7 +6,7 @@
 //! those shapes, so the writer, the scanner, and the store agree on one
 //! set of thresholds: lofty's MusicBee mapping, the de-facto default.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use lofty::file::{AudioFile, FileType};
@@ -184,10 +184,10 @@ pub fn from_id3v2(tag: &Id3v2Tag) -> Option<u8> {
 pub fn from_vorbis(tag: &VorbisComments) -> Option<u8> {
     let mut popm = None;
     for (key, value) in tag.items() {
-        if key.eq_ignore_ascii_case(FMPS_KEY) {
-            if let Some(value) = parse_fmps(value) {
-                return Some(value);
-            }
+        if key.eq_ignore_ascii_case(FMPS_KEY)
+            && let Some(value) = parse_fmps(value)
+        {
+            return Some(value);
         }
         // The bare key and the RATING:email convention both count;
         // provider-specific email scales (Picard's 0-25) are rare

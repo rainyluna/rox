@@ -165,6 +165,8 @@ offers them once you turn on Include Release Candidates under Settings > Applica
 
 - **Linux**
   - **Arch Linux** - Available on the AUR as [`rox-player`](https://aur.archlinux.org/packages/rox-player).
+  - **Flatpak** - Download the `.flatpak` bundle from the release and run `flatpak install rox-v*.flatpak`; the runtime comes from Flathub.
+  - **AppImage** - Download it, `chmod +x` it, and run it. The first launch offers a menu entry.
   - **Tarball** - Unpack the tarball and run `./rox`.
 - **macOS** - Open the DMG and drag `rox` into Applications.
 - **Windows** - Run the setup, and rox lands in your Start menu. Prefer portable? Unzip

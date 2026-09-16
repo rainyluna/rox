@@ -19,11 +19,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, hsla, img, point, prelude::*, px, relative, size, svg, Along, AnyElement, App,
-    Axis, Bounds, BoxShadow, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    ImageSource, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, RenderImage, ScrollWheelEvent, SharedString, Size, Subscription, WeakEntity,
-    Window,
+    Along, AnyElement, App, Axis, Bounds, BoxShadow, Context, Div, Entity, EventEmitter,
+    FocusHandle, Focusable, ImageSource, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, Pixels, RenderImage, ScrollWheelEvent, SharedString, Size,
+    Subscription, WeakEntity, Window, canvas, div, hsla, img, point, prelude::*, px, relative,
+    size, svg,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Side};
@@ -31,10 +31,10 @@ use image::Frame;
 use rox_core::QUEUE_CAP;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
-use rox_library::projection::{Projection, QueryField, QUERY_FIELDS};
+use rox_library::projection::{Projection, QUERY_FIELDS, QueryField};
 use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
 use rox_panel_kit::config::{default_true, is_zero};
-use rox_panel_kit::wall::{default_dim, TILE_DIM_MAX};
+use rox_panel_kit::wall::{TILE_DIM_MAX, default_dim};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -43,8 +43,8 @@ use crate::design::{palette, tokens};
 use crate::discs::{self, DiscCache, DiscShape, DiscStyle};
 use crate::grid::LetterSide;
 use crate::panel::{
-    self, setting_row, toggle, AppState, FlickState, PanelChrome, PanelSettings, ResumeIdle,
-    ScrubState,
+    self, AppState, FlickState, PanelChrome, PanelSettings, ResumeIdle, ScrubState, setting_row,
+    toggle,
 };
 use crate::panel_settings;
 use crate::query::search::{SearchBox, SearchEvent};
@@ -2155,7 +2155,7 @@ impl ArtPanel {
 
     /// Solo or popped out there's no title bar to host the search, so it
     /// renders as a toolbar row above the shelf instead, the library's move.
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex_none()
             .h(px(36.))

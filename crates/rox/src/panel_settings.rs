@@ -12,6 +12,7 @@ use rox_panel_api::panel::PanelSettings;
 
 use rox_panel_api::panel_settings::open;
 
+use crate::panels::controls::ControlsPanel;
 use crate::panels::drawer::DrawerPanel;
 use crate::panels::group::GroupPanel;
 use crate::panels::menu::MenuPanel;
@@ -79,6 +80,7 @@ macro_rules! with_settings_panel {
             BiographyPanel,
             TrackInfoPanel,
             TransportPanel,
+            ControlsPanel,
             SeekStripPanel,
             VolumePanel,
             QueueWidgetPanel,

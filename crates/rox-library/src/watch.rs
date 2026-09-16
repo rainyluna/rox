@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{EventKind, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 
 use crate::writer;
 
@@ -79,21 +79,20 @@ impl LibraryWatcher {
                 if matches!(
                     event.kind,
                     EventKind::Modify(ModifyKind::Name(RenameMode::Both))
-                ) {
-                    if let [from, to] = event.paths.as_slice() {
-                        // The writer's commit renames its working clone
-                        // over the original. That pair is a modify of the
-                        // target, not a real rename, so it goes in `paths`
-                        // where the library's self-write filter can drop
-                        // it; passed on as a rename it would slip past the
-                        // filter and force a reload per written file.
-                        if writer::is_clone_path(from) {
-                            paths.push(to.clone());
-                        } else {
-                            renames.push((from.clone(), to.clone()));
-                        }
-                        continue;
+                ) && let [from, to] = event.paths.as_slice()
+                {
+                    // The writer's commit renames its working clone
+                    // over the original. That pair is a modify of the
+                    // target, not a real rename, so it goes in `paths`
+                    // where the library's self-write filter can drop
+                    // it; passed on as a rename it would slip past the
+                    // filter and force a reload per written file.
+                    if writer::is_clone_path(from) {
+                        paths.push(to.clone());
+                    } else {
+                        renames.push((from.clone(), to.clone()));
                     }
+                    continue;
                 }
                 // The writer's clones themselves (created, written,
                 // removed on a failed commit) are never library rows;

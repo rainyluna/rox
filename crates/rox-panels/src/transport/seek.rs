@@ -5,9 +5,9 @@
 use std::sync::{Arc, LazyLock};
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, size, AnyElement, App, Bounds, Context, Div,
-    EventEmitter, FocusHandle, Focusable, FontFeatures, MouseButton, Pixels, Subscription,
-    WeakEntity, Window,
+    AnyElement, App, Bounds, Context, Div, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    MouseButton, Pixels, Subscription, WeakEntity, Window, canvas, div, fill, point, prelude::*,
+    px, size,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -888,7 +888,7 @@ transport_panel!(
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_rows, split_rows, SeekConfig, SeekItem};
+    use super::{SeekConfig, SeekItem, editor_rows, split_rows};
 
     /// A layout with no fields decodes to the stock row, and the retired
     /// timings toggle still reads: off leaves the strip alone.

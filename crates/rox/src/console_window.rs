@@ -17,10 +17,12 @@
 use std::time::Duration;
 
 use gpui::{
-    div, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, Div, EntityId, Global,
-    MouseButton, MouseDownEvent, Rgba, ScrollHandle, SharedString, Window, WindowHandle,
+    App, Bounds, ClipboardItem, Context, Div, EntityId, Global, MouseButton, MouseDownEvent,
+    Pixels, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Window, WindowHandle, div, point,
+    prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{Icon, Root, Sizable as _};
 use log::Level;
 
@@ -34,6 +36,10 @@ use rox_panel_kit::ui as settings_ui;
 /// How often the open window checks the ring for new lines. Fast enough to
 /// read live, slow enough that an idle console never shows up in a profile.
 const POLL: Duration = Duration::from_millis(250);
+
+/// The scrollbar's lane: the width the bar paints in, kept clear of the log
+/// text on the right so the thumb never sits over a message.
+const LANE: Pixels = px(16.);
 
 /// The open console window, if any: opening again focuses it instead of
 /// stacking a second one, the stats window's move.
@@ -127,8 +133,10 @@ struct ConsoleWindow {
     /// The ring sequence the shown lines were read at, so the poll repaints
     /// only when it moved.
     seen: u64,
-    /// Pin to the newest line as it arrives. On while reading live; flip it off
-    /// to scroll back through history without the tail yanking the view down.
+    /// Pin to the newest line as it arrives. On while reading live; scrolling
+    /// the pane or grabbing the scrollbar turns it off, so reading back through
+    /// history doesn't fight the tail. The toolbar toggle turns it on again and
+    /// jumps to the newest line.
     follow: bool,
     /// The level filter: each toggle hides its level from the pane. All on by
     /// default, so the console opens showing everything.
@@ -153,18 +161,20 @@ impl ConsoleWindow {
             });
             true
         });
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(POLL).await;
-            let alive = view.update(cx, |this, cx| {
-                let seq = logging::seq();
-                if seq != this.seen {
-                    this.seen = seq;
-                    this.lines = logging::snapshot();
-                    cx.notify();
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+                let alive = view.update(cx, |this, cx| {
+                    let seq = logging::seq();
+                    if seq != this.seen {
+                        this.seen = seq;
+                        this.lines = logging::snapshot();
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
                 }
-            });
-            if alive.is_err() {
-                break;
             }
         })
         .detach();
@@ -330,8 +340,9 @@ impl ConsoleWindow {
     }
 
     /// The scrolling log body: one row per shown line, the time muted and the
-    /// message colored by level. Pinned to the bottom while Follow is on.
-    fn body(&mut self) -> gpui::AnyElement {
+    /// message colored by level. Pinned to the bottom while Follow is on, with
+    /// the same idle-fading scrollbar the panels use over the rows.
+    fn body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let shown = self.shown();
         if shown.is_empty() {
             let empty = if self.lines.is_empty() {
@@ -352,20 +363,62 @@ impl ConsoleWindow {
             .flex_col()
             .w_full()
             .p(tokens::SPACE_MD)
+            // Room for the bar's lane, so a long message never runs under the
+            // thumb.
+            .pr(tokens::SPACE_MD + LANE)
             .text_xs()
             .children(shown.into_iter().map(line_row));
         // A huge negative offset scrolls to the bottom: the scroll container
         // clamps it to the real maximum at paint, so Follow pins the tail
-        // without measuring the content height here.
+        // without measuring the content height here. The pin runs every frame
+        // while Follow is on, which is why both gestures below drop Follow
+        // before the view moves.
         if self.follow {
             self.scroll.set_offset(point(px(0.), px(-1_000_000.)));
         }
         div()
-            .id("console-body")
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(rows)
+            .relative()
+            .child(
+                div()
+                    .id("console-body")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    // A wheel over the pane is the user taking the view: drop
+                    // the pin in the same dispatch that scrolls, so the notch
+                    // lands instead of being yanked back on the next frame.
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        if !this.follow || event.delta.pixel_delta(window.line_height()).y == px(0.)
+                        {
+                            return;
+                        }
+                        this.follow = false;
+                        cx.notify();
+                    }))
+                    .child(rows),
+            )
+            .child(
+                // The bar's own bounds: the lane at the right edge rather than
+                // the whole pane, so only a grab on the scrollbar drops Follow.
+                // On the capture phase, because the bar stops propagation on
+                // its own mouse down and a bubble listener here would never
+                // see the grab that starts a drag.
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(LANE)
+                    .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        if event.button != MouseButton::Left || !this.follow {
+                            return;
+                        }
+                        this.follow = false;
+                        cx.notify();
+                    }))
+                    .child(Scrollbar::vertical(&self.scroll)),
+            )
             .into_any_element()
     }
 }
@@ -385,7 +438,7 @@ impl Render for ConsoleWindow {
                 .text_color(palette::text_bright())
                 .text_sm()
                 .child(self.toolbar(cx))
-                .child(self.body())
+                .child(self.body(cx))
                 .into_any_element()
         })
     }

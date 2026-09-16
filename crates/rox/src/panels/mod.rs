@@ -5,6 +5,7 @@
 //! the binary: the drawer, the group and overlay hosts, the slide and mini
 //! frames, the menu panel, the window controls, and the queue widget.
 
+pub mod controls;
 pub mod drawer;
 pub mod group;
 pub mod menu;

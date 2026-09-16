@@ -190,11 +190,11 @@ pub fn start(library: Entity<Library>, retry_refused: bool, cx: &mut App) {
             // like the other two paces, so the prompt can price any worker
             // count against it. Only off a decent stretch: a pass over a
             // handful of tracks measures its own startup, not the rate.
-            if progress.done() >= PACE_FLOOR {
-                if let Some(per) = progress.secs_per_track() {
-                    let pace = (per * workers as f64) as f32;
-                    Settings::update(move |s| s.session.tempo_pace = pace);
-                }
+            if progress.done() >= PACE_FLOOR
+                && let Some(per) = progress.secs_per_track()
+            {
+                let pace = (per * workers as f64) as f32;
+                Settings::update(move |s| s.session.tempo_pace = pace);
             }
             match written {
                 Ok(0) => {}
@@ -374,11 +374,11 @@ fn run(
                         }
                     }
                     progress.done.fetch_add(1, Ordering::Relaxed);
-                    if batch.len() >= BATCH || refused.len() >= BATCH {
-                        if let Err(e) = flush(&mut batch, &mut refused, &conn, &written) {
-                            *failure.lock().unwrap() = Some(e);
-                            return;
-                        }
+                    if (batch.len() >= BATCH || refused.len() >= BATCH)
+                        && let Err(e) = flush(&mut batch, &mut refused, &conn, &written)
+                    {
+                        *failure.lock().unwrap() = Some(e);
+                        return;
                     }
                 }
                 // Whatever the worker was still holding when it ran out of

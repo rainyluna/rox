@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use rox_core::settings::Settings;
 
-use super::{agent, net_reason, string, ArtCandidate, ArtProvider, TrackQuery};
+use super::{ArtCandidate, ArtProvider, TrackQuery, agent, net_reason, string};
 
 const API: &str = "https://ws.audioscrobbler.com/2.0/";
 
@@ -418,12 +418,12 @@ fn parse_wiki(html: &str) -> (String, Vec<BioLink>) {
             let lower = tag.to_ascii_lowercase();
             if lower.starts_with("a ") || lower == "a" {
                 open = href(tag).map(|url| (url, out.len()));
-            } else if lower == "/a" {
-                if let Some((url, start)) = open.take() {
-                    let end = out.trim_end().len().max(start);
-                    if end > start {
-                        links.push(BioLink { start, end, url });
-                    }
+            } else if lower == "/a"
+                && let Some((url, start)) = open.take()
+            {
+                let end = out.trim_end().len().max(start);
+                if end > start {
+                    links.push(BioLink { start, end, url });
                 }
             }
             continue;

@@ -11,19 +11,19 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, prelude::*, px, uniform_list, App, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ScrollStrategy, SharedString,
-    Stateful, Subscription, UniformListScrollHandle, WeakEntity, Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, ScrollStrategy, SharedString, Stateful, Subscription,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
+use gpui_component::Icon;
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::Icon;
-use rox_core::fmt::fmt_ago;
 use rox_core::QUEUE_CAP;
+use rox_core::fmt::fmt_ago;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
 use rox_library::listens::{NeverOrder, TrackPlays};
-use rox_library::projection::{parse_query, track_matches, FilterSet, TrackFields};
+use rox_library::projection::{FilterSet, TrackFields, parse_query, track_matches};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;

@@ -10,9 +10,9 @@
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, point, prelude::*, px, rems, svg, AnyElement, App, Context, Div, EntityId,
-    EventEmitter, FocusHandle, Focusable, MouseButton, Pixels, Rgba, ScrollHandle, SharedString,
-    Stateful, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, Div, EntityId, EventEmitter, FocusHandle, Focusable, MouseButton,
+    Pixels, Rgba, ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window, canvas,
+    div, point, prelude::*, px, rems, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -27,7 +27,7 @@ use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::group_head;
 use crate::panel::{
-    self, align_row, justify, Align, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, Align, AppState, PanelChrome, PanelSettings, ScrubState, align_row, justify,
 };
 use crate::panel_settings;
 use crate::player::{fmt_time, observe_view};
@@ -1504,13 +1504,11 @@ impl TrackInfoPanel {
             .collect();
         // The end-of-queue note trails the first row's last run, where
         // the single line has always worn it.
-        if ended {
-            if let Some((_, bits)) = plans.first_mut() {
-                let note = ("(queue finished)".to_string(), true);
-                match bits.last_mut() {
-                    Some(RowBit::Run(run)) => run.push(note),
-                    _ => bits.push(RowBit::Run(vec![note])),
-                }
+        if ended && let Some((_, bits)) = plans.first_mut() {
+            let note = ("(queue finished)".to_string(), true);
+            match bits.last_mut() {
+                Some(RowBit::Run(run)) => run.push(note),
+                _ => bits.push(RowBit::Run(vec![note])),
             }
         }
         // Each row's slice of the crawl states, so the cycle can read and
@@ -1850,7 +1848,7 @@ transport_panel!(
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_rows, row_bits, InfoPiece, PieceTexts, RowBit, TrackInfoConfig};
+    use super::{InfoPiece, PieceTexts, RowBit, TrackInfoConfig, editor_rows, row_bits};
     use crate::panel::Align;
 
     fn texts() -> PieceTexts {

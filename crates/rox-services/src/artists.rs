@@ -262,10 +262,8 @@ pub fn get(name: &str, force: bool) -> Result<Option<Artist>, String> {
     let Some(mut entry) = entry else {
         return Ok(None);
     };
-    if online {
-        if let Some(info) = entry.info.as_mut() {
-            dirty |= complete(info, &mut entry.profile, &files, force);
-        }
+    if online && let Some(info) = entry.info.as_mut() {
+        dirty |= complete(info, &mut entry.profile, &files, force);
     }
     if dirty {
         let _ = fs::create_dir_all(artists_dir());
@@ -489,10 +487,10 @@ fn soft_for(file: &Path, bytes: &[u8]) -> Option<Arc<Image>> {
     let mut soft_file = file.as_os_str().to_owned();
     soft_file.push(".soft");
     let soft_file = PathBuf::from(soft_file);
-    if let Ok(png) = fs::read(&soft_file) {
-        if !png.is_empty() {
-            return Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
-        }
+    if let Ok(png) = fs::read(&soft_file)
+        && !png.is_empty()
+    {
+        return Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
     }
     let full = image::load_from_memory(bytes).ok()?;
     let small = full.thumbnail(SOFT_SIZE, SOFT_SIZE).blur(SOFT_SIGMA);

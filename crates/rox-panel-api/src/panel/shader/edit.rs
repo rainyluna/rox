@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use gpui::{App, EntityId, SharedString};
 
-use super::{approve, ProgramCtx};
+use super::{ProgramCtx, approve};
 
 /// How an applied source reaches its surface. Takes the text and the app
 /// handle a window action has.

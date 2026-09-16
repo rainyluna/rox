@@ -19,15 +19,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, size, svg, AnyElement,
-    App, Bounds, Context, Div, FontWeight, Global, Image, ObjectFit, ScrollHandle, SharedString,
-    Stateful, Subscription, Window, WindowHandle,
+    AnyElement, App, Bounds, Context, Div, FontWeight, Global, Image, ObjectFit, ScrollHandle,
+    SharedString, Stateful, Subscription, Window, WindowHandle, div, img, linear_color_stop,
+    linear_gradient, prelude::*, px, relative, size, svg,
 };
-use gpui_component::scroll::Scrollbar;
 use gpui_component::Root;
+use gpui_component::scroll::Scrollbar;
 
-use rox_core::fmt::{fmt_ago, fmt_date};
 use rox_core::QUEUE_CAP;
+use rox_core::fmt::{fmt_ago, fmt_date};
 use rox_library::listens::{NamePlays, Rollup, TrackPlays};
 use rox_panel_kit::motif;
 use rox_playback::engine::shuffle_slice;
@@ -37,7 +37,7 @@ use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::charts;
 use rox_panel_api::panel::{self, AppState};
-use rox_panel_kit::ui::{self as settings_ui, section, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 use rox_services::backdrop::WindowBackdrop;
 use rox_services::catalog::LibraryEvent;
 use rox_services::history::HistoryEvent;

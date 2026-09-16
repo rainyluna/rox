@@ -269,7 +269,7 @@ fn publish(percent: Option<u8>, cx: &mut App) {
 /// which leaves the app running without a bar rather than retrying forever.
 #[cfg(target_os = "windows")]
 fn create_list() -> Option<windows::Win32::UI::Shell::ITaskbarList3> {
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
 
     unsafe {

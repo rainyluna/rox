@@ -8,18 +8,19 @@
 use std::time::Duration;
 
 use gpui::{
-    canvas, div, img, point, prelude::*, px, size, svg, Animation, AnimationExt, AnyElement, App,
-    Bounds, Context, Div, FocusHandle, Global, KeyDownEvent, MouseButton, ObjectFit, Pixels,
-    ScrollHandle, SharedString, Subscription, Window, WindowHandle,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, Div, FocusHandle, Global,
+    KeyDownEvent, MouseButton, ObjectFit, Pixels, ScrollHandle, SharedString, Subscription, Window,
+    WindowHandle, canvas, div, img, point, prelude::*, px, size, svg,
 };
-use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::Root;
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
-use rox_core::settings::{app_font, set_language, Settings};
+use crate::startup::desktop_integration::{self, Status as MenuStatus};
+use rox_core::settings::{Settings, app_font, set_language};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState};
-use rox_panel_kit::ui::{chord, kbd_line, small_button, Seg, SECTION_GAP};
+use rox_panel_kit::ui::{SECTION_GAP, Seg, chord, kbd_line, small_button};
 use rox_services::backdrop::WindowBackdrop;
 
 /// The open welcome window, if any: opening again focuses it instead of
@@ -108,6 +109,13 @@ struct WelcomeWindow {
     /// settings window copies it: the tour is often the first thing a
     /// new install shows, so the switch is right on it.
     language: Option<String>,
+    /// Where the AppImage's menu entry stands, read on open and again once
+    /// the offer is answered: a fresh AppImage shows the offer above the
+    /// cards, and every other channel reads Unavailable, which hides it.
+    menu: MenuStatus,
+    /// Why the last attempt to write the entry failed, shown in the offer's
+    /// place until the next attempt.
+    menu_error: Option<String>,
     /// The stage body's scroll position, shared with its scrollbar. One
     /// handle for every stage, wound back to the top on each step so a long
     /// stage can't hand the next one its own offset.
@@ -155,6 +163,8 @@ impl WelcomeWindow {
             tiles_width: 458.,
             stage: 0,
             language: Settings::load().language.clone(),
+            menu: desktop_integration::status(),
+            menu_error: None,
             scroll: ScrollHandle::new(),
             focus,
             _backdrop_changed,
@@ -170,6 +180,69 @@ impl WelcomeWindow {
         self.language = language.clone();
         Settings::update(move |s| s.language = language);
         cx.notify();
+    }
+
+    /// The offer's yes: write the entry. The banner goes away on success
+    /// and turns into the reason on failure, buttons still up for a retry.
+    fn add_menu_entry(&mut self, cx: &mut Context<Self>) {
+        self.menu_error = desktop_integration::install().err();
+        self.menu = desktop_integration::status();
+        cx.notify();
+    }
+
+    /// The offer's no, kept in the session file so the window doesn't ask
+    /// again; the settings row stays as the way back.
+    fn decline_menu_entry(&mut self, cx: &mut Context<Self>) {
+        Settings::update(|s| s.session.appimage_menu_declined = true);
+        self.menu = MenuStatus::Declined;
+        cx.notify();
+    }
+
+    /// The AppImage offer, above the cards while it's unanswered: the
+    /// banner says what gets written, the two buttons answer it.
+    fn menu_offer(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.menu != MenuStatus::NotOffered {
+            return None;
+        }
+
+        let banner = match &self.menu_error {
+            Some(reason) => panel::banner_flow(
+                panel::Tone::Bad,
+                rox_i18n::t!("welcome-menu-failed"),
+                vec![reason.clone().into()],
+            ),
+            None => panel::banner_flow(
+                panel::Tone::Info,
+                rox_i18n::t!("welcome-menu-title"),
+                vec![rox_i18n::t!("welcome-menu-note")],
+            ),
+        };
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(tokens::SPACE_SM)
+                .child(banner)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(tokens::SPACE_SM)
+                        .child(small_button(
+                            rox_i18n::t!("welcome-menu-add"),
+                            icons::PLUS,
+                            false,
+                            cx.listener(|this, _, _, cx| this.add_menu_entry(cx)),
+                        ))
+                        .child(small_button(
+                            rox_i18n::t!("welcome-menu-not-now"),
+                            icons::CLOSE,
+                            false,
+                            cx.listener(|this, _, _, cx| this.decline_menu_entry(cx)),
+                        )),
+                ),
+        )
     }
 
     /// Move the tour by `delta` stages, stopping at either end.
@@ -456,6 +529,7 @@ impl WelcomeWindow {
                             Seg::Text(rox_i18n::t!("welcome-step-hint-after")),
                         ]))),
                 )
+                .when_some(self.menu_offer(cx), |d, offer| d.child(offer))
                 .child(cards([
                     card(
                         icons::MUSIC,

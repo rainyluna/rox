@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    WeakEntity, Window, div, prelude::*, px, svg,
 };
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::Icon;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
 use serde::{Deserialize, Serialize};

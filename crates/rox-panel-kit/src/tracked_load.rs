@@ -114,10 +114,10 @@ impl TrackedImage {
     /// reuses.
     fn retire(&self, old: Option<Arc<Image>>, cx: &mut App) {
         let Some(old) = old else { return };
-        if let Some((_, Some(current))) = &self.art {
-            if current.id() == old.id() {
-                return;
-            }
+        if let Some((_, Some(current))) = &self.art
+            && current.id() == old.id()
+        {
+            return;
         }
         old.remove_asset(cx);
     }

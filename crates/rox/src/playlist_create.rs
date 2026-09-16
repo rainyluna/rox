@@ -4,15 +4,15 @@
 //! window.
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle, Focusable,
-    KeyBinding, SharedString, Subscription, Window,
+    App, Bounds, Context, Div, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
+    Subscription, Window, actions, div, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{kbd_line, section, small_button, Seg};
+use rox_panel_kit::ui::{Seg, kbd_line, section, small_button};
 use rox_services::backdrop::WindowBackdrop;
 
 actions!(playlist_create, [Save]);
@@ -125,10 +125,10 @@ impl PlaylistNameWindow {
             .library
             .update(cx, |library, cx| match &self.action {
                 Action::Create(ids) => {
-                    if let Some(id) = library.create_playlist(&name, cx) {
-                        if !ids.is_empty() {
-                            library.add_to_playlist(id, ids, cx);
-                        }
+                    if let Some(id) = library.create_playlist(&name, cx)
+                        && !ids.is_empty()
+                    {
+                        library.add_to_playlist(id, ids, cx);
                     }
                 }
                 Action::Rename(id) => library.rename_playlist(*id, &name, cx),

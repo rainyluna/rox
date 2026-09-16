@@ -21,9 +21,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Focusable as _, Global,
-    KeyBinding, PathPromptOptions, ScrollHandle, SharedString, Subscription, Task, Window,
-    WindowHandle,
+    App, Bounds, Context, Div, Entity, Focusable as _, Global, KeyBinding, PathPromptOptions,
+    ScrollHandle, SharedString, Subscription, Task, Window, WindowHandle, actions, div, prelude::*,
+    px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -35,11 +35,11 @@ use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_library::writer::Field;
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, Seg};
+use rox_panel_kit::ui::{self as settings_ui, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 
 use crate::convert::{self, Custom, Entry, Format, Preset, Row, Span};
-use crate::matching::{open_or_focus, WindowRegistry};
+use crate::matching::{WindowRegistry, open_or_focus};
 use crate::tags::guess;
 
 /// The open convert dialogs, keyed by their selection.
@@ -551,14 +551,14 @@ impl ConvertDialog {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = rx.await {
-                if let Some(dir) = paths.pop() {
-                    this.update(cx, |this, cx| {
-                        this.dest = Some(dir);
-                        this.replan(cx);
-                    })
-                    .ok();
-                }
+            if let Ok(Ok(Some(mut paths))) = rx.await
+                && let Some(dir) = paths.pop()
+            {
+                this.update(cx, |this, cx| {
+                    this.dest = Some(dir);
+                    this.replan(cx);
+                })
+                .ok();
             }
         })
         .detach();

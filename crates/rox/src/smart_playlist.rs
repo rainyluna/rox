@@ -18,24 +18,24 @@
 //! would lose work the query text can't express.
 
 use gpui::{
-    actions, div, prelude::*, px, size, uniform_list, App, Bounds, Context, Div, Entity,
-    FocusHandle, Focusable, KeyBinding, MouseButton, MouseDownEvent, Pixels, SharedString,
-    Subscription, UniformListScrollHandle, Window,
+    App, Bounds, Context, Div, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
+    MouseDownEvent, Pixels, SharedString, Subscription, UniformListScrollHandle, Window, actions,
+    div, prelude::*, px, size, uniform_list,
 };
+use gpui_component::Sizable;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::Sizable;
 
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_library::playlists::SmartDef;
-use rox_library::projection::{SortKey, QUERY_FIELDS};
+use rox_library::projection::{QUERY_FIELDS, SortKey};
 use rox_panel_api::panel::AppState;
 use rox_panel_api::query::search::{SearchBox, SearchEvent};
 use rox_panel_api::suggest;
-use rox_panel_kit::ui::{self as settings_ui, checkbox, kbd_line, section, small_button, Seg};
+use rox_panel_kit::ui::{self as settings_ui, Seg, checkbox, kbd_line, section, small_button};
 use rox_services::backdrop::WindowBackdrop;
 
 /// The definition column's width: room for a label and its field, and no

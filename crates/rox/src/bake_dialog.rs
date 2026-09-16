@@ -21,16 +21,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Global, KeyBinding,
-    SharedString, Stateful, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, Global, KeyBinding, SharedString, Stateful, Subscription,
+    Window, WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::Root;
 
-use rox_core::settings::{lyrics_dir, LayoutSize, Settings};
+use rox_core::settings::{LayoutSize, Settings, lyrics_dir};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_library::bake::{self, Candidate, Counts, Source};
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, Seg};
+use rox_panel_kit::ui::{self as settings_ui, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
 
@@ -174,14 +174,16 @@ impl BakeDialog {
         .detach();
         // No entity behind a background survey, so nothing would repaint the
         // count on its own.
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(TICK).await;
-            let live = this.update(cx, |this, cx| {
-                cx.notify();
-                this.survey.is_some()
-            });
-            if !matches!(live, Ok(true)) {
-                break;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TICK).await;
+                let live = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.survey.is_some()
+                });
+                if !matches!(live, Ok(true)) {
+                    break;
+                }
             }
         })
         .detach();

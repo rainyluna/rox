@@ -4,7 +4,7 @@
 //! preview and a large image off the same source, so one result yields
 //! both without a second lookup.
 
-use super::{agent, net_reason, string, ArtCandidate, ArtProvider, TrackQuery};
+use super::{ArtCandidate, ArtProvider, TrackQuery, agent, net_reason, string};
 
 const API: &str = "https://itunes.apple.com/search";
 

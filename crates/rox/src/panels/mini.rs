@@ -6,8 +6,8 @@
 //! same gate every mini toggle shows behind.
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable,
-    MouseButton, Pixels, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, MouseButton, Pixels,
+    Subscription, WeakEntity, Window, div, prelude::*, px, svg,
 };
 use gpui_component::menu::PopupMenu;
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -18,7 +18,7 @@ use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, PanelChrome, PanelSettings};
 use rox_panel_api::panel_settings;
-use rox_panel_kit::{align_row, justify, Align};
+use rox_panel_kit::{Align, align_row, justify};
 
 /// The mini toggle panel's per-view config: what a saved layout restores,
 /// and what the settings window edits.

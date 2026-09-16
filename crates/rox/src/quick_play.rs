@@ -17,14 +17,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, relative, svg, uniform_list, Action, App, Context, DismissEvent, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton,
-    MouseDownEvent, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
+    Action, App, Context, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, relative, svg,
+    uniform_list,
 };
 use gpui_component::input::{MoveDown, MovePageDown, MovePageUp, MoveUp, SelectAll};
 use gpui_component::menu::ContextMenuExt;
-use rox_core::fmt::fmt_ms;
 use rox_core::QUEUE_CAP;
+use rox_core::fmt::fmt_ms;
 use rox_library::projection::{FilterSet, Projection, QUERY_FIELDS};
 use rox_playback::engine::shuffle_slice;
 
@@ -1436,7 +1437,7 @@ impl Render for QuickPlay {
 mod tests {
     use super::*;
     use rox_library::rusqlite::Connection;
-    use rox_library::{store, TrackRow};
+    use rox_library::{TrackRow, store};
 
     /// One scanned row with just the fields the seed reads set.
     fn track(path: &str, album_artist: &str, album: &str) -> TrackRow {

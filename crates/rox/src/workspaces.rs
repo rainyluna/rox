@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{App, SharedString};
 
-use rox_core::settings::{self, NamedShader, Settings, WorkspaceBundle, WORKSPACE_VERSION};
+use rox_core::settings::{self, NamedShader, Settings, WORKSPACE_VERSION, WorkspaceBundle};
 use rox_design::assets;
 use rox_design::palette::{self, Palette};
 use rox_panel_api::panel::shader;
@@ -725,10 +725,10 @@ pub fn remove(name: &str) {
 
 fn remove_in(dir: &Path, name: &str) {
     let path = file_of_in(dir, name);
-    if let Err(e) = std::fs::remove_file(&path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("workspace: deleting {}: {e}", path.display());
-        }
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("workspace: deleting {}: {e}", path.display());
     }
 }
 
@@ -875,7 +875,7 @@ const WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500
 /// rox running without the reload.
 pub(crate) fn watch(cx: &mut App) {
     use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-    use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+    use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 
     let dir = settings::workspaces_dir();
     // The folder may predate the first save; watching needs it to exist,
@@ -1382,9 +1382,11 @@ mod tests {
 
         // A saved panel's shader counts as one the look runs, and shows on
         // the confirm like a layout's does.
-        assert!(unapproved_shaders(&bundle)
-            .iter()
-            .any(|pending| pending.source == "// a preset's own"));
+        assert!(
+            unapproved_shaders(&bundle)
+                .iter()
+                .any(|pending| pending.source == "// a preset's own")
+        );
 
         let bare = without_shaders(&bundle);
         assert!(!wears_shaders(&bare));

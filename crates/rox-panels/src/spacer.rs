@@ -5,8 +5,8 @@
 //! renamed, themed, and locked like any other panel.
 
 use gpui::{
-    div, prelude::*, App, Context, Div, EventEmitter, FocusHandle, Focusable, Pixels, WeakEntity,
-    Window,
+    App, Context, Div, EventEmitter, FocusHandle, Focusable, Pixels, WeakEntity, Window, div,
+    prelude::*,
 };
 use gpui_component::menu::PopupMenu;
 use rox_dock::{Panel, PanelEvent, TabPanel};

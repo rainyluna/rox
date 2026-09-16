@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, prelude::*, px, rems, AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, KeyDownEvent, ModifiersChangedEvent, MouseButton, ScrollStrategy,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle,
+    AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, ModifiersChangedEvent, MouseButton, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle, div, prelude::*, px,
+    rems,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
@@ -26,7 +27,7 @@ use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
 use rox_core::fmt::{fmt_ago, fmt_ms, fmt_num};
 use rox_core::{QUEUE_CAP, SHUFFLE_SEED};
 use rox_library::cue::TrackKey;
-use rox_library::projection::{Projection, QueryField, QUERY_FIELDS};
+use rox_library::projection::{Projection, QUERY_FIELDS, QueryField};
 use rox_library::view::{self, Group, Grouping, Row, ViewSpec};
 use rox_services::backdrop::WindowBackdrop;
 
@@ -35,15 +36,15 @@ use crate::catalog::LibraryEvent;
 use crate::continuation;
 use crate::design::{palette, tokens};
 use crate::group_head::{
-    self, effective_head_lines, ArtSide, HeadPiece, Headers, TileFace, MOSAIC,
+    self, ArtSide, HeadPiece, Headers, MOSAIC, TileFace, effective_head_lines,
 };
 use crate::panel::{self, AppState, PanelChrome, ResumeIdle, ScrubState};
 use crate::panel_settings;
 use crate::query::search::{SearchBox, SearchEvent};
 use crate::query::shared_query::{QueryFilter, QuerySource, SharedQueryEvent};
 use crate::selection::SelectionEvent;
-use crate::settings::ui as settings_ui;
 use crate::settings::GainModeSetting;
+use crate::settings::ui as settings_ui;
 use crate::thumbs::Thumb;
 use crate::track_ui::track_cells;
 use crate::track_ui::track_drag::{PlayDrag, PlayDragPreview};
@@ -384,8 +385,12 @@ struct TrackTable {
     /// change and shared behind an Arc. A grab inside the selection hands every
     /// visible selected row this same Arc instead of rebuilding the whole set
     /// per row per frame.
-    drag_set: Option<(u64, Arc<[TrackKey]>)>,
+    drag_set: Option<DragSet>,
 }
+
+/// A cached multi-selection drag: the generation that built it, the keys a
+/// drop plays, and the catalog ids a playlist drop stores.
+type DragSet = (u64, Arc<[TrackKey]>, Arc<[i64]>);
 
 impl TrackTable {
     /// Take a header sort: mark the clicked column, remember what the
@@ -508,41 +513,49 @@ impl TrackTable {
         // A grab inside a multi-selection takes the whole set in view order,
         // built once per selection change and shared behind an Arc so it costs
         // a refcount bump per row, not a rebuild. Outside it, just this row.
-        let keys: Arc<[TrackKey]> = if self.selected.len() > 1 && self.selected.contains(&ix) {
-            if self.drag_set.as_ref().map(|(gen, _)| *gen) != Some(self.sel_gen) {
+        let (keys, ids): (Arc<[TrackKey]>, Arc<[i64]>) = if self.selected.len() > 1
+            && self.selected.contains(&ix)
+        {
+            if self.drag_set.as_ref().map(|(generation, ..)| *generation) != Some(self.sel_gen) {
                 let mut rows: Vec<usize> = self.selected.iter().copied().collect();
                 rows.sort_unstable();
-                let set: Arc<[TrackKey]> = self.resolve_drag_keys(&rows, &projection, cx).into();
-                self.drag_set = Some((self.sel_gen, set));
+                let (set, ids) = self.resolve_drag_keys(&rows, &projection, cx);
+                self.drag_set = Some((self.sel_gen, set.into(), ids.into()));
             }
-            self.drag_set.as_ref().map(|(_, set)| set.clone())?
+            self.drag_set
+                .as_ref()
+                .map(|(_, set, ids)| (set.clone(), ids.clone()))?
         } else {
-            self.resolve_drag_keys(&[ix], &projection, cx).into()
+            let (set, ids) = self.resolve_drag_keys(&[ix], &projection, cx);
+            (set.into(), ids.into())
         };
         if keys.is_empty() {
             return None;
         }
         Some(PlayDrag {
             keys,
+            ids,
             title: title.into(),
         })
     }
 
     /// Resolve view rows to their tracks in row order, through a per-id cache
-    /// so a drag never re-queries the catalog once a track is known.
+    /// so a drag never re-queries the catalog once a track is known. Hands
+    /// back the catalog ids too, since the payload carries both and the ids
+    /// are what the lookup started from.
     fn resolve_drag_keys(
         &mut self,
         rows: &[usize],
         projection: &Projection,
         cx: &App,
-    ) -> Vec<TrackKey> {
+    ) -> (Vec<TrackKey>, Vec<i64>) {
         let ids: Vec<i64> = rows
             .iter()
             .filter_map(|&i| self.track_at(i))
             .map(|row| projection.db_id[row as usize])
             .collect();
         let mut keys = Vec::with_capacity(ids.len());
-        for id in ids {
+        for &id in &ids {
             let key = match self.drag_keys.get(&id) {
                 Some(key) => key.clone(),
                 None => {
@@ -561,7 +574,8 @@ impl TrackTable {
                 keys.push(key);
             }
         }
-        keys
+
+        (keys, ids)
     }
 
     /// The nearest track row from `ix` heading `forward`, bouncing off the
@@ -650,11 +664,7 @@ impl TrackTable {
     /// app font size or panel override.
     fn tile_side(&self) -> gpui::Pixels {
         let side = self.line_px() * self.head_lines.len() as f32 - self.art_margin_px() * 2.;
-        if side < px(0.) {
-            px(0.)
-        } else {
-            side
-        }
+        if side < px(0.) { px(0.) } else { side }
     }
 
     /// Whether the tiles use the artist wall's full circle: grouped by
@@ -2609,10 +2619,10 @@ impl LibraryPanel {
     /// [`panel::type_ahead_overlay`]'s own emptiness check still hides
     /// the badge.
     fn type_ahead_display(&self) -> String {
-        if let Some((field, needle)) = TrackTable::type_ahead_pin(&self.type_ahead) {
-            if let Some(column) = columns::columns().iter().find(|c| c.key == field) {
-                return format!("({}) {}", column.label, needle);
-            }
+        if let Some((field, needle)) = TrackTable::type_ahead_pin(&self.type_ahead)
+            && let Some(column) = columns::columns().iter().find(|c| c.key == field)
+        {
+            return format!("({}) {}", column.label, needle);
         }
         self.type_ahead.clone()
     }
@@ -2834,14 +2844,14 @@ impl LibraryPanel {
         // that shows them, even if the panel is in a background tab
         // until then. Earlier refreshes (the empty initial load) keep it
         // pending.
-        if let Some(row) = self.restore_scroll {
-            if !self.table.read(cx).delegate().view.is_empty() {
-                self.restore_scroll = None;
-                self.table
-                    .read(cx)
-                    .vertical_scroll_handle
-                    .scroll_to_item_strict(row, ScrollStrategy::Top);
-            }
+        if let Some(row) = self.restore_scroll
+            && !self.table.read(cx).delegate().view.is_empty()
+        {
+            self.restore_scroll = None;
+            self.table
+                .read(cx)
+                .vertical_scroll_handle
+                .scroll_to_item_strict(row, ScrollStrategy::Top);
         }
         // The catalog load's follow waited for the rows, so it runs here:
         // the playing row's index only exists once the view holding it is
@@ -3567,7 +3577,7 @@ impl LibraryPanel {
     /// The popped-out window has no title bar to host the controls, so it
     /// keeps them as a toolbar row above the list. The catalog status shows
     /// in the workspace menubar; only a panel-local error shows here.
-    fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex_none()
             .h(px(36.))
@@ -3592,7 +3602,7 @@ impl LibraryPanel {
             })
     }
 
-    fn track_list(&self) -> impl IntoElement {
+    fn track_list(&self) -> impl IntoElement + use<> {
         Table::new(&self.table)
             .stripe(self.stripes)
             .row_borders(self.row_borders)
@@ -3884,7 +3894,7 @@ impl LibraryPanel {
             .into_any_element()
     }
 
-    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .id("library-empty")
             .size_full()
@@ -4938,7 +4948,7 @@ impl Render for ColumnRenameWindow {
 mod tests {
     use super::*;
     use rox_library::projection::FilterSet;
-    use rox_library::{store, TrackRow};
+    use rox_library::{TrackRow, store};
 
     /// A track row carrying only what the view pass and the windowing
     /// read; everything else stays at its neutral default.

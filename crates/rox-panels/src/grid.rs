@@ -21,30 +21,30 @@ use std::time::Instant;
 use std::rc::Rc;
 
 use gpui::{
-    canvas, div, img, prelude::*, px, size, svg, Along, AnyElement, App, Axis, Context, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Size, Subscription, WeakEntity, Window,
+    Along, AnyElement, App, Axis, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels,
+    ScrollStrategy, ScrollWheelEvent, SharedString, Size, Subscription, WeakEntity, Window, canvas,
+    div, img, prelude::*, px, size, svg,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::{h_virtual_list, v_virtual_list, Icon, Side, VirtualListScrollHandle};
+use gpui_component::{Icon, Side, VirtualListScrollHandle, h_virtual_list, v_virtual_list};
 use rox_core::QUEUE_CAP;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
-use rox_library::projection::{Projection, QueryField, QUERY_FIELDS};
+use rox_library::projection::{Projection, QUERY_FIELDS, QueryField};
 use rox_library::sort::natural_cmp;
 use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
 use rox_panel_kit::config::{default_true, is_zero};
-use rox_panel_kit::wall::{default_dim, WallLayout, TILE_DIM_MAX, TILE_LABEL_H};
+use rox_panel_kit::wall::{TILE_DIM_MAX, TILE_LABEL_H, WallLayout, default_dim};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, setting_row, toggle, AppState, FlickState, PanelChrome, PanelSettings, ResumeIdle,
-    ScrubState,
+    self, AppState, FlickState, PanelChrome, PanelSettings, ResumeIdle, ScrubState, setting_row,
+    toggle,
 };
 use crate::panel_settings;
 use crate::query::search::{SearchBox, SearchEvent};
@@ -1592,7 +1592,7 @@ impl GridPanel {
 
     /// Solo or popped out there is no title bar to host the search, so it
     /// renders as a toolbar row above the wall instead, the library's move.
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex_none()
             .h(px(36.))
@@ -2321,12 +2321,14 @@ impl GridPanel {
         // cell -> line map depends on it, so restoring any earlier would aim
         // at the fallback grid. Skipped while a follow glide runs, which owns
         // the position.
-        if let Some(cell) = self.restore {
-            if self.glide_to.is_none() && !self.cells.is_empty() && self.cross > px(0.) {
-                let line = (cell / lanes).min(line_count.saturating_sub(1));
-                self.scroll.scroll_to_item(line, ScrollStrategy::Top);
-                self.restore = None;
-            }
+        if let Some(cell) = self.restore
+            && self.glide_to.is_none()
+            && !self.cells.is_empty()
+            && self.cross > px(0.)
+        {
+            let line = (cell / lanes).min(line_count.saturating_sub(1));
+            self.scroll.scroll_to_item(line, ScrollStrategy::Top);
+            self.restore = None;
         }
         // The dim fade: every painted tile's opacity eases toward its target,
         // the glide's exponential approach. Gated on `dim_fading` so a settled
@@ -2656,13 +2658,12 @@ impl GridPanel {
             Some(gutter) => {
                 let row = self.axis() == Axis::Vertical;
                 let start = self.config.letters_side == LetterSide::Start;
-                let base = div().flex_1().min_h_0().min_w_0().flex().map(|d| {
-                    if row {
-                        d.flex_row()
-                    } else {
-                        d.flex_col()
-                    }
-                });
+                let base = div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .map(|d| if row { d.flex_row() } else { d.flex_col() });
                 let wall = div().flex_1().min_w_0().min_h_0().flex().child(content);
                 if start {
                     base.child(gutter).child(wall)

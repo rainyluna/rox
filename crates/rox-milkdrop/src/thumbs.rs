@@ -143,7 +143,7 @@ struct Inner {
     state: Mutex<State>,
     wake: Condvar,
     /// Moves when a thumbnail lands, for a view to poll.
-    gen: AtomicU64,
+    generation: AtomicU64,
 }
 
 /// The thumbnail service. Cheap to clone; every clone is the same queue
@@ -172,7 +172,7 @@ impl Thumbnailer {
                     jobs: 0,
                 }),
                 wake: Condvar::new(),
-                gen: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
             }),
         }
     }
@@ -263,8 +263,8 @@ impl Thumbnailer {
 
     /// Moves every time a thumbnail lands. A view polls it and repaints
     /// when it moved.
-    pub fn gen(&self) -> u64 {
-        self.inner.gen.load(Ordering::Acquire)
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Acquire)
     }
 }
 
@@ -436,7 +436,7 @@ fn run(inner: Arc<Inner>, index: usize) {
                         state.active.remove(&preset);
                         state.ready.insert(preset);
                         note_job(&inner, &mut state, frames);
-                        inner.gen.fetch_add(1, Ordering::Release);
+                        inner.generation.fetch_add(1, Ordering::Release);
                     }
                     Err(message) => {
                         log::warn!(
@@ -462,7 +462,7 @@ fn run(inner: Arc<Inner>, index: usize) {
                 let mut state = inner.state.lock().unwrap();
                 state.active.remove(&preset);
                 state.failed.insert(preset, message);
-                inner.gen.fetch_add(1, Ordering::Release);
+                inner.generation.fetch_add(1, Ordering::Release);
             }
         }
     }

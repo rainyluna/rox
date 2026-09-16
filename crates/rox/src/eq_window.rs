@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, relative, size, App, Bounds, Context, Div, Global,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, Point,
-    ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, WindowHandle,
+    App, Bounds, Context, Div, Global, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Path, Pixels, Point, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window,
+    WindowHandle, canvas, div, fill, point, prelude::*, px, relative, size,
 };
 use gpui_component::Root;
 
@@ -29,8 +29,8 @@ use rox_core::settings::{AnalyzerStyle, LayoutSize, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState};
-use rox_panel_kit::ui::{self as settings_ui, small_button};
 use rox_panel_kit::ScrubState;
+use rox_panel_kit::ui::{self as settings_ui, small_button};
 use rox_services::player;
 
 /// The plot's dB range either side of flat. Wider than a single band's
@@ -102,11 +102,7 @@ fn smoothed(bars: &[f32]) -> Vec<f32> {
                 sum += level * w;
                 weight += w;
             }
-            if weight > 0.0 {
-                sum / weight
-            } else {
-                0.0
-            }
+            if weight > 0.0 { sum / weight } else { 0.0 }
         })
         .collect()
 }
@@ -536,7 +532,7 @@ impl EqWindow {
     /// handle per band that drags in both axes at once. The response comes
     /// from the same coefficients the node runs, so what's drawn is what's
     /// being heard rather than a sketch of the intent.
-    fn plot(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn plot(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let player = self.state.as_ref().map(|state| state.player.clone());
         // Sampled once per frame off the live parameters, then handed to the
         // paint closure. Doing it here rather than inside the closure keeps
@@ -780,7 +776,7 @@ impl EqWindow {
     /// One band's handle on the plot: a dot at its center and gain, with
     /// its own number so a curve with ten bells can still be read. The press
     /// is the plot's job, so this is what a band looks like, nothing more.
-    fn handle(&self, band: usize) -> impl IntoElement {
+    fn handle(&self, band: usize) -> impl IntoElement + use<> {
         let gain = player::eq_gain(band);
         let held = self.grabbed == Some(band);
         let selected = self.selected == band;

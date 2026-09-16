@@ -29,14 +29,14 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, img, prelude::*, px, svg, AnyElement, App, ClipboardItem, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, Image, ImageFormat, KeyDownEvent, MouseButton,
-    MouseDownEvent, ObjectFit, SharedString, Stateful, Subscription, WeakEntity, Window,
+    AnyElement, App, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    Image, ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, SharedString,
+    Stateful, Subscription, WeakEntity, Window, div, img, prelude::*, px, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
@@ -47,9 +47,9 @@ use rox_library::cue::TrackKey;
 use rox_library::listens::TrackSummary;
 use rox_library::projection::FilterField;
 use rox_library::writer::{self, Change, Field};
+use rox_net::providers::TrackQuery;
 use rox_net::providers::lastfm::TrackStats;
 use rox_net::providers::musicbrainz::ReleaseFacts;
-use rox_net::providers::TrackQuery;
 use rox_romanize::{Japanese, Reading};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -58,8 +58,8 @@ use crate::assets::icons;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, align_row, justify, justify_v, valign_row, Align, AppState, PanelChrome, PanelSettings,
-    ScrubState, VAlign,
+    self, Align, AppState, PanelChrome, PanelSettings, ScrubState, VAlign, align_row, justify,
+    justify_v, valign_row,
 };
 use crate::panel_settings;
 use crate::player::fmt_time;
@@ -1390,11 +1390,11 @@ impl MetadataPanel {
                             .update(cx, |library, cx| library.apply_edit(&key, &changes, cx));
                     }
                     Err(e) => {
-                        if let Some(edit) = &mut this.edit {
-                            if edit.key == key {
-                                edit.saving = false;
-                                edit.error = Some(e.into());
-                            }
+                        if let Some(edit) = &mut this.edit
+                            && edit.key == key
+                        {
+                            edit.saving = false;
+                            edit.error = Some(e.into());
                         }
                     }
                 }
@@ -2505,7 +2505,7 @@ impl MetadataPanel {
     /// Solo or popped out there is no title bar to host the edit toggle,
     /// so it renders as a toolbar row above the sheet instead, the
     /// library's move.
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let editing = self.edit.is_some();
         let weak = cx.entity().downgrade();
         div()
@@ -2630,20 +2630,20 @@ impl MetadataPanel {
         let fields_on = self.config.fields.clone();
         let shown = |k: &str| fields_on.iter().any(|f| f == k);
         let global_rows = self.config.fields.iter().any(|k| k.starts_with("lastfm_"));
-        if global_rows {
-            if let Some(d) = details.as_ref() {
-                if !d.artist.is_empty() && !d.title.is_empty() {
-                    self.ensure_stats(&key, d, cx);
-                }
-            }
+        if global_rows
+            && let Some(d) = details.as_ref()
+            && !d.artist.is_empty()
+            && !d.title.is_empty()
+        {
+            self.ensure_stats(&key, d, cx);
         }
         let release_rows = fields_on.iter().any(|k| k.starts_with("mb_"));
-        if release_rows {
-            if let Some(d) = details.as_ref() {
-                if !d.artist.is_empty() && !d.title.is_empty() {
-                    self.ensure_release(&key, d, cx);
-                }
-            }
+        if release_rows
+            && let Some(d) = details.as_ref()
+            && !d.artist.is_empty()
+            && !d.title.is_empty()
+        {
+            self.ensure_release(&key, d, cx);
         }
         // A release row: the fact once it landed, a spinner while the
         // lookup runs, "n/a" after a settled miss or for a fact the
@@ -3329,8 +3329,8 @@ impl MetadataPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_baseline, edit_fields, fields, sort_fill, sort_targets, Fill, MetadataConfig,
-        MetadataSource,
+        Fill, MetadataConfig, MetadataSource, diff_baseline, edit_fields, fields, sort_fill,
+        sort_targets,
     };
     use rox_library::writer::Field;
     use rox_romanize::Reading;

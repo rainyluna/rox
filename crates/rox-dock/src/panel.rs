@@ -132,6 +132,17 @@ pub trait Panel: EventEmitter<PanelEvent> + Render + Focusable {
         gpui::size(Pixels::MAX, Pixels::MAX)
     }
 
+    /// Whether the drag in flight would land somewhere on this panel's body.
+    /// Read the drag's type off `cx.active_drag_is`; the value itself stays
+    /// inside gpui. The workspace asks this every frame of a drag to keep
+    /// its own drop zones from covering a panel that wants the drop, so
+    /// keep it fast. Default is `false`: most panels have no use for a
+    /// dropped track.
+    fn accepts_drop(&self, cx: &App) -> bool {
+        let _ = cx;
+        false
+    }
+
     /// Set active state of the panel.
     ///
     /// This method will be called when the panel is active or inactive.
@@ -222,6 +233,7 @@ pub trait PanelView: 'static + Send + Sync {
     fn visible(&self, cx: &App) -> bool;
     fn min_size(&self, cx: &App) -> Size<Pixels>;
     fn max_size(&self, cx: &App) -> Size<Pixels>;
+    fn accepts_drop(&self, cx: &App) -> bool;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn on_added_to(&self, tab_panel: WeakEntity<TabPanel>, window: &mut Window, cx: &mut App);
@@ -286,6 +298,10 @@ impl<T: Panel> PanelView for Entity<T> {
 
     fn max_size(&self, cx: &App) -> Size<Pixels> {
         self.read(cx).max_size(cx)
+    }
+
+    fn accepts_drop(&self, cx: &App) -> bool {
+        self.read(cx).accepts_drop(cx)
     }
 
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App) {

@@ -213,11 +213,13 @@ mod tests {
             ..ReplayGain::default()
         };
         assert!(!peaks_only.any(), "a peak bounds a gain, it isn't one");
-        assert!(ReplayGain {
-            album_db: Some(-6.0),
-            ..ReplayGain::default()
-        }
-        .any());
+        assert!(
+            ReplayGain {
+                album_db: Some(-6.0),
+                ..ReplayGain::default()
+            }
+            .any()
+        );
     }
 
     #[test]

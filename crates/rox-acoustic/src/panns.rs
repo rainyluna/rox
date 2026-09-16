@@ -45,7 +45,7 @@
 
 use std::path::Path;
 
-use candle_core::{DType, Device, Tensor, D};
+use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{BatchNorm, Conv2d, Conv2dConfig, Linear, Module, ModuleT, VarBuilder};
 
 use crate::mel::Mel;

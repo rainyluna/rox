@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use rox_ipc::client::Client;
 
@@ -373,10 +373,10 @@ fn run(
 
     // The drive commands all take an optional window target; the flag is
     // parsed up front so each command doesn't reparse it.
-    if let Some(id) = window {
-        if method.starts_with("debug.") {
-            params["window"] = json!(id);
-        }
+    if let Some(id) = window
+        && method.starts_with("debug.")
+    {
+        params["window"] = json!(id);
     }
 
     let result = client

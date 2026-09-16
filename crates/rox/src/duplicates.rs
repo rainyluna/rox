@@ -22,8 +22,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui::{
-    div, img, prelude::*, px, size, svg, uniform_list, App, Bounds, Context, Div, Entity, Global,
-    ObjectFit, SharedString, Stateful, Subscription, UniformListScrollHandle, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, Global, ObjectFit, SharedString, Stateful, Subscription,
+    UniformListScrollHandle, Window, WindowHandle, div, img, prelude::*, px, size, svg,
+    uniform_list,
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -36,7 +37,7 @@ use rox_library::duplicates::match_duplicates;
 
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
-use rox_panel_kit::ui::{block_header, checkbox, section, small_button, MIN_SIZE};
+use rox_panel_kit::ui::{MIN_SIZE, block_header, checkbox, section, small_button};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
 use rox_services::thumbs::{Thumb, Thumbs};
@@ -125,13 +126,12 @@ pub fn open(
     now_art: Entity<NowPlayingArt>,
     cx: &mut App,
 ) {
-    if let Some(handle) = cx.try_global::<OpenDuplicates>().and_then(|o| o.0) {
-        if handle
+    if let Some(handle) = cx.try_global::<OpenDuplicates>().and_then(|o| o.0)
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let bounds = Bounds::centered(None, size(px(760.), px(600.)), cx);
     let handle = rox_panel_api::panel::open_child_window(

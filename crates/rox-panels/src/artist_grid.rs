@@ -30,21 +30,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, img, prelude::*, px, size, svg, Along, AnyElement, App, Axis, Context, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, Image, KeyDownEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Size, Subscription, WeakEntity, Window,
+    Along, AnyElement, App, Axis, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    Image, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels,
+    ScrollStrategy, ScrollWheelEvent, SharedString, Size, Subscription, WeakEntity, Window, canvas,
+    div, img, prelude::*, px, size, svg,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::{h_virtual_list, v_virtual_list, Icon, Side, VirtualListScrollHandle};
+use gpui_component::{Icon, Side, VirtualListScrollHandle, h_virtual_list, v_virtual_list};
 use rox_core::QUEUE_CAP;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
 use rox_library::projection::{FilterField, FilterSet, Projection, SortKey, SymTable};
 use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
 use rox_panel_kit::config::{default_true, is_zero};
-use rox_panel_kit::wall::{default_dim, default_gap, WallLayout, TILE_DIM_MAX, TILE_LABEL_H};
+use rox_panel_kit::wall::{TILE_DIM_MAX, TILE_LABEL_H, WallLayout, default_dim, default_gap};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -52,8 +52,8 @@ use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::grid::{LetterSide, TitleAlign};
 use crate::panel::{
-    self, setting_row, toggle, AppState, FlickState, PanelChrome, PanelSettings, ResumeIdle,
-    ScrubState,
+    self, AppState, FlickState, PanelChrome, PanelSettings, ResumeIdle, ScrubState, setting_row,
+    toggle,
 };
 use crate::panel_settings;
 use crate::query::search::{SearchBox, SearchEvent};
@@ -1690,7 +1690,7 @@ impl ArtistGridPanel {
 
     /// Solo or popped out there is no title bar to host the search, so it
     /// renders as a toolbar row above the wall instead, the library's move.
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex_none()
             .h(px(36.))
@@ -2480,12 +2480,14 @@ impl ArtistGridPanel {
         // extent: the lane count is only known after the first paint, and the
         // cell -> line map depends on it. Skipped while a follow glide runs,
         // which owns the position.
-        if let Some(cell) = self.restore {
-            if self.glide_to.is_none() && !self.cells.is_empty() && self.cross > px(0.) {
-                let line = (cell / lanes).min(line_count.saturating_sub(1));
-                self.scroll.scroll_to_item(line, ScrollStrategy::Top);
-                self.restore = None;
-            }
+        if let Some(cell) = self.restore
+            && self.glide_to.is_none()
+            && !self.cells.is_empty()
+            && self.cross > px(0.)
+        {
+            let line = (cell / lanes).min(line_count.saturating_sub(1));
+            self.scroll.scroll_to_item(line, ScrollStrategy::Top);
+            self.restore = None;
         }
         // The two per-tile fades: the dim mode's opacity, and the crossfade
         // that swaps an album cover for the artist's face once it arrives.
@@ -2508,17 +2510,13 @@ impl ArtistGridPanel {
                 }
             };
             for ix in 0..self.cells.len() {
-                if dim_on {
-                    if let Some(current) = self.cells[ix].dim {
-                        let target = self.dim_target(ix);
-                        self.cells[ix].dim = Some(settle(current, target, &mut dimming));
-                    }
+                if dim_on && let Some(current) = self.cells[ix].dim {
+                    let target = self.dim_target(ix);
+                    self.cells[ix].dim = Some(settle(current, target, &mut dimming));
                 }
-                if face_on {
-                    if let Some(current) = self.cells[ix].face {
-                        let target = if self.cells[ix].faced { 1. } else { 0. };
-                        self.cells[ix].face = Some(settle(current, target, &mut fading));
-                    }
+                if face_on && let Some(current) = self.cells[ix].face {
+                    let target = if self.cells[ix].faced { 1. } else { 0. };
+                    self.cells[ix].face = Some(settle(current, target, &mut fading));
                 }
             }
             self.dim_fading = dimming;
@@ -2799,13 +2797,12 @@ impl ArtistGridPanel {
             Some(gutter) => {
                 let row = self.axis() == Axis::Vertical;
                 let start = self.config.letters_side == LetterSide::Start;
-                let base = div().flex_1().min_h_0().min_w_0().flex().map(|d| {
-                    if row {
-                        d.flex_row()
-                    } else {
-                        d.flex_col()
-                    }
-                });
+                let base = div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .map(|d| if row { d.flex_row() } else { d.flex_col() });
                 let wall = div().flex_1().min_w_0().min_h_0().flex().child(content);
                 if start {
                     base.child(gutter).child(wall)

@@ -18,15 +18,15 @@
 
 use std::time::Duration;
 
-use gpui::{div, prelude::*, px, Context, Div, Entity, KeyDownEvent, SharedString, Window};
+use gpui::{Context, Div, Entity, KeyDownEvent, SharedString, Window, div, prelude::*, px};
 
 use crate::{embeddings, replaygain_job, romanize_job, sortnames_job, tempo_job};
 use rox_core::settings::{AcousticSave, ReplayGainSave, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel;
-use rox_panel_kit::ui::{self as settings_ui, dialog_button, dialog_icon_button};
 use rox_panel_kit::ScrubState;
+use rox_panel_kit::ui::{self as settings_ui, dialog_button, dialog_icon_button};
 use rox_services::catalog::Library;
 
 /// How long a worker drag settles before the count is written. A scrub
@@ -851,10 +851,10 @@ fn set_workers<V: Host>(this: &mut V, value: f32, cx: &mut Context<V>) {
         this.update(cx, |this, _| {
             // Re-read at fire time rather than trusting a capture, so the
             // last tick of a burst writes what the slider actually ended on.
-            if let Some(prompt) = this.prompt() {
-                if prompt.generation == generation {
-                    prompt.persist();
-                }
+            if let Some(prompt) = this.prompt()
+                && prompt.generation == generation
+            {
+                prompt.persist();
             }
         })
         .ok();

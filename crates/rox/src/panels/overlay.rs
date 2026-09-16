@@ -9,8 +9,8 @@
 use std::time::Instant;
 
 use gpui::{
-    div, prelude::*, AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, SharedString, WeakEntity, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Pixels, SharedString, WeakEntity, Window, div, prelude::*,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
@@ -25,7 +25,7 @@ use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, PanelChrome, PanelSettings};
 use rox_panel_api::panel_settings;
 use rox_panel_kit::ui as settings_ui;
-use rox_panel_kit::{setting_row, ScrubState};
+use rox_panel_kit::{ScrubState, setting_row};
 
 /// The margin the revealed overlay leaves around itself, so the main panel
 /// frames it on every side.

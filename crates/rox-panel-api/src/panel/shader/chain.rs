@@ -926,9 +926,11 @@ fn fs_user(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(drift); }";
     #[test]
     fn a_text_with_no_images_asks_nothing_of_its_context() {
         let spec = parse_chain(FS_USER).expect("parse");
-        assert!(resolve_assets(&spec, &ProgramCtx::detached(), None)
-            .expect("nothing to find")
-            .is_empty());
+        assert!(
+            resolve_assets(&spec, &ProgramCtx::detached(), None)
+                .expect("nothing to find")
+                .is_empty()
+        );
     }
 
     /// `@cover` binds the playing track's art: it needs no folder behind

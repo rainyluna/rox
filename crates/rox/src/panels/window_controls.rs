@@ -5,8 +5,8 @@
 //! a popped-out copy controls its own window.
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable,
-    MouseButton, MouseDownEvent, Pixels, Stateful, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, MouseButton,
+    MouseDownEvent, Pixels, Stateful, Subscription, WeakEntity, Window, div, prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -18,7 +18,7 @@ use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, PanelChrome, PanelSettings};
 use rox_panel_api::panel_settings;
-use rox_panel_kit::{align_row, justify, Align};
+use rox_panel_kit::{Align, align_row, justify};
 
 /// How the three buttons draw: flat icons like the rest of the chrome, or
 /// the macOS traffic lights.

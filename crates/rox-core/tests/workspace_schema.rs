@@ -2,7 +2,7 @@
 //! checks the write shape actually validates against it, the way a stock
 //! editor with the `$schema` reference resolved would.
 
-use rox_core::settings::{workspace_schema, NamedLayout, WorkspaceBundle};
+use rox_core::settings::{NamedLayout, WorkspaceBundle, workspace_schema};
 
 const COMMITTED: &str = include_str!("../../rox/assets/workspace.schema.json");
 

@@ -10,12 +10,12 @@
 //! a paint is due.
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, svg, AnyElement, App, Bounds, Context, Div,
-    EventEmitter, FocusHandle, Focusable, Path, Pixels, Point, SharedString, Subscription,
-    WeakEntity, Window,
+    AnyElement, App, Bounds, Context, Div, EventEmitter, FocusHandle, Focusable, Path, Pixels,
+    Point, SharedString, Subscription, WeakEntity, Window, canvas, div, fill, point, prelude::*,
+    px, svg,
 };
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::Icon;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ use rox_playback::eq::{BANDS, FREQ_MAX, FREQ_MIN, GAIN_MAX_DB};
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
-use crate::panel::{self, setting_row, toggle, AppState, PanelChrome, PanelSettings};
+use crate::panel::{self, AppState, PanelChrome, PanelSettings, setting_row, toggle};
 use crate::panel_settings;
 use crate::player;
 use crate::settings::ui as settings_ui;

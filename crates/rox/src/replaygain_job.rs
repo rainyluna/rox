@@ -171,11 +171,11 @@ pub fn start(library: Entity<Library>, cx: &mut App) {
             // like the acoustic pace, so the prompt can price any worker
             // count against it. Only off a decent stretch: a pass over a
             // handful of files measures its own startup, not the rate.
-            if progress.done() >= PACE_FLOOR {
-                if let Some(per) = progress.secs_per_track() {
-                    let pace = (per * workers as f64) as f32;
-                    Settings::update(move |s| s.session.replaygain_pace = pace);
-                }
+            if progress.done() >= PACE_FLOOR
+                && let Some(per) = progress.secs_per_track()
+            {
+                let pace = (per * workers as f64) as f32;
+                Settings::update(move |s| s.session.replaygain_pace = pace);
             }
             library.update(cx, |library, cx| match written {
                 // Database mode put the gains straight onto rows the
@@ -336,16 +336,19 @@ fn run(
         .min(albums.len().max(1));
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                if !progress.keep_going() || failure.lock().unwrap().is_some() {
-                    break;
-                }
-                let Some(album) = albums.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
-                    break;
-                };
-                if let Err(e) = measure_album(album, save, &conn, &rewritten, &stored, progress) {
-                    *failure.lock().unwrap() = Some(e);
-                    break;
+            scope.spawn(|| {
+                loop {
+                    if !progress.keep_going() || failure.lock().unwrap().is_some() {
+                        break;
+                    }
+                    let Some(album) = albums.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    if let Err(e) = measure_album(album, save, &conn, &rewritten, &stored, progress)
+                    {
+                        *failure.lock().unwrap() = Some(e);
+                        break;
+                    }
                 }
             });
         }

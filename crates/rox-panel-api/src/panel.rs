@@ -11,12 +11,12 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use gpui::{
-    anchored, deferred, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px,
-    relative, size, AbsoluteLength, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent,
-    Div, Element, Entity, FocusHandle, Focusable as _, GlobalElementId, HighlightStyle,
-    InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba,
-    SharedString, Size, Stateful, StyledText, Subscription, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions,
+    AbsoluteLength, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Element,
+    Entity, FocusHandle, Focusable as _, GlobalElementId, HighlightStyle, InspectorElementId,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, SharedString, Size,
+    Stateful, StyledText, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowHandle, WindowOptions, anchored, deferred, div, fill, linear_color_stop, linear_gradient,
+    point, prelude::*, px, relative, size,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Root};
@@ -36,7 +36,7 @@ use rox_services::history::History;
 use rox_services::lastfm::Scrobbler;
 use rox_services::librefm::LibreFm;
 use rox_services::listenbrainz::ListenBrainz;
-use rox_services::player::{fmt_time, AbState, FadeView, Player};
+use rox_services::player::{AbState, FadeView, Player, fmt_time};
 use rox_services::portraits::Portraits;
 use rox_services::selection::Selection;
 use rox_services::thumbs::Thumbs;
@@ -51,17 +51,17 @@ pub use shader::PanelShader;
 // crate::panel the way they always have, so the split stays behind this
 // line.
 pub use rox_panel_kit::{
-    align_row, banner, banner_flow, check_row, choices, choices_gated, choices_icons,
-    choices_shared, display_name, flick_on_paint_axis, follow_panel, font_picker, glide_snap_axis,
-    glide_step, glide_step_axis, glide_target, glide_target_at, glide_target_axis, icon_choices,
-    icon_control, icon_control_sized, icon_toggles, items, justify, justify_v, language_picker,
-    letter_initial, letter_rail, mode_list, paint_slider, panel_nav_context, picker,
-    scrub_on_paint, setting_block, setting_row, setting_row_dyn, title_text, toggle, toggle_face,
-    toggle_locked, tracking_section, type_ahead_context, type_ahead_fade, type_ahead_grow,
-    type_ahead_hit, type_ahead_live, type_ahead_overlay, type_ahead_scan, valign_row,
-    value_slider_edit, value_slider_edit_over, value_slider_edit_sized, window_body,
-    workspace_body, Align, FlickState, ModeSpec, ResumeIdle, ScrubState, SliderWidth, Tip, Tone,
-    TrackedImage, VAlign, ValueEdit, PANEL_NAV_CONTEXT, SLIDER_STEP, TYPE_AHEAD_CYCLE_CONTEXT,
+    Align, FlickState, ModeSpec, PANEL_NAV_CONTEXT, ResumeIdle, SLIDER_STEP, ScrubState,
+    SliderWidth, TYPE_AHEAD_CYCLE_CONTEXT, Tip, Tone, TrackedImage, VAlign, ValueEdit, align_row,
+    banner, banner_flow, check_row, choices, choices_gated, choices_icons, choices_shared,
+    display_name, flick_on_paint_axis, follow_panel, font_picker, glide_snap_axis, glide_step,
+    glide_step_axis, glide_target, glide_target_at, glide_target_axis, icon_choices, icon_control,
+    icon_control_sized, icon_toggles, items, justify, justify_v, language_picker, letter_initial,
+    letter_rail, mode_list, paint_slider, panel_nav_context, picker, scrub_on_paint, setting_block,
+    setting_row, setting_row_dyn, title_text, toggle, toggle_face, toggle_locked, tracking_section,
+    type_ahead_context, type_ahead_fade, type_ahead_grow, type_ahead_hit, type_ahead_live,
+    type_ahead_overlay, type_ahead_scan, valign_row, value_slider_edit, value_slider_edit_over,
+    value_slider_edit_sized, window_body, workspace_body,
 };
 
 /// The shared entities every panel renders over: one player, one catalog,
@@ -1225,7 +1225,7 @@ pub fn shows_reading(name: &str, reading: &str, show: bool) -> bool {
 /// A name with nothing to add draws as the bare string, which is what the
 /// call sites handed over before this existed. No formatting, no second
 /// allocation.
-pub fn named(name: &str, reading: &str, show: bool) -> impl IntoElement {
+pub fn named(name: &str, reading: &str, show: bool) -> impl IntoElement + use<> {
     if !shows_reading(name, reading, show) {
         return StyledText::new(SharedString::from(name.to_owned()));
     }

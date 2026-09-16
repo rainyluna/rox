@@ -629,6 +629,36 @@ impl DockItem {
         }
     }
 
+    /// Rox addition: the panel whose body covers `position`, judged by the
+    /// bounds the tab groups recorded at their last paint. Only a
+    /// [`TabPanel`](TabPanel) records any, so parts of the tree that hold a
+    /// panel directly answer nothing.
+    fn panel_at(&self, position: Point<Pixels>, cx: &App) -> Option<Arc<dyn PanelView>> {
+        match self {
+            DockItem::Split { items, .. } => {
+                items.iter().find_map(|item| item.panel_at(position, cx))
+            }
+
+            DockItem::Tabs { view, .. } => tab_panel_at(view, position, cx),
+
+            // Tiles overlap and paint bottom up, so the last tile holding
+            // the pointer is the one a drop reaches. A tile's body bounds
+            // come off the TabPanel it wraps and are in window coordinates,
+            // so the container's own origin and scroll don't come into it.
+            DockItem::Tiles { view, .. } => {
+                view.read(cx).sorted_panels().iter().rev().find_map(|item| {
+                    let tabs = item.panel.view().downcast::<TabPanel>().ok()?;
+
+                    tab_panel_at(&tabs, position, cx)
+                })
+            }
+
+            // A panel held directly has no tab group around it, and nobody
+            // writes down where it painted, so there is nothing to test.
+            DockItem::Panel { .. } => None,
+        }
+    }
+
     /// Recursively traverses to find the left-most and top-most TabPanel.
     pub(crate) fn left_top_tab_panel(&self, cx: &App) -> Option<Entity<TabPanel>> {
         match self {
@@ -648,6 +678,22 @@ impl DockItem {
             DockItem::Panel { .. } => None,
         }
     }
+}
+
+/// The active panel of `view` if its body covers `position`. Bounds are
+/// from the last paint, so a group that has never painted holds nothing and
+/// misses.
+fn tab_panel_at(
+    view: &Entity<TabPanel>,
+    position: Point<Pixels>,
+    cx: &App,
+) -> Option<Arc<dyn PanelView>> {
+    let tabs = view.read(cx);
+    if !tabs.content_bounds().contains(&position) {
+        return None;
+    }
+
+    tabs.active_panel(cx)
 }
 
 impl DockArea {
@@ -826,6 +872,45 @@ impl DockArea {
     /// Return the items of the dock area.
     pub fn items(&self) -> &DockItem {
         &self.items
+    }
+
+    /// Whether the panel whose body is under `position` wants the drag in
+    /// flight. The workspace's own drop zones stand down over such a panel
+    /// so the drop reaches it. Walks the tab groups' last painted bounds,
+    /// so it costs a tree walk per call and is meant for once-per-frame use.
+    pub fn accepts_drop_at(&self, position: Point<Pixels>, cx: &App) -> bool {
+        self.panel_at(position, cx)
+            .is_some_and(|panel| panel.accepts_drop(cx))
+    }
+
+    /// The panel under `position`, center first and then the open docks.
+    fn panel_at(&self, position: Point<Pixels>, cx: &App) -> Option<Arc<dyn PanelView>> {
+        // A zoomed panel is all that renders, docks included, so every
+        // other group's bounds are from before the zoom and would claim a
+        // pointer they no longer sit under.
+        if let Some(zoomed) = self.zoom_view.clone() {
+            let tabs = zoomed.downcast::<TabPanel>().ok()?;
+
+            return tab_panel_at(&tabs, position, cx);
+        }
+
+        if let Some(panel) = self.items.panel_at(position, cx) {
+            return Some(panel);
+        }
+
+        // A closed dock keeps its panels and the bounds they had while it
+        // was open, so skip it rather than answer from those.
+        [&self.left_dock, &self.right_dock, &self.bottom_dock]
+            .into_iter()
+            .flatten()
+            .find_map(|dock| {
+                let dock = dock.read(cx);
+                if !dock.is_open() {
+                    return None;
+                }
+
+                dock.panel.panel_at(position, cx)
+            })
     }
 
     /// Subscribe to the tiles item drag item drop event

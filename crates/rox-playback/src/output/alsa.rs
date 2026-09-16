@@ -12,8 +12,8 @@
 //! buffer, so the bypass rule holds identically in either mode, which is
 //! the part of the contract ADR 19 says both backends must keep.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use alsa::card;
@@ -23,7 +23,7 @@ use alsa::{Direction, ValueOr};
 use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer};
 
-use super::{fill, rings, Device, Mode, Negotiated, OpenOutput, OutputStream, Request};
+use super::{Device, Mode, Negotiated, OpenOutput, OutputStream, Request, fill, rings};
 use crate::shared::Shared;
 
 /// One period, in seconds. Ten milliseconds is short enough that a pause or

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui::{App, Global};
 
-use rox_romanize::dictionary::{fetch, Dictionary, Progress};
+use rox_romanize::dictionary::{Dictionary, Progress, fetch};
 
 /// The running download, or nothing. App-global so it outlives the settings
 /// window that started it.

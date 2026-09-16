@@ -32,20 +32,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    canvas, deferred, div, prelude::*, px, AnyElement, App, Context, Div, EntityId, EventEmitter,
-    FocusHandle, Focusable, MouseButton, PathPromptOptions, SharedString, Subscription,
-    UserShaderChain, UserShaderId, UserShaderPass, UserTextureId, WeakEntity, Window,
+    AnyElement, App, Context, Div, EntityId, EventEmitter, FocusHandle, Focusable, MouseButton,
+    PathPromptOptions, SharedString, Subscription, UserShaderChain, UserShaderId, UserShaderPass,
+    UserTextureId, WeakEntity, Window, canvas, deferred, div, prelude::*, px,
 };
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::Icon;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
 use rox_core::settings::{self as core_settings, MilkdropColor};
 use rox_milkdrop::{Command, Engine, EngineOptions, Event, PresetLibrary, Rotation, Status};
 use rox_panel_api::preset_browser::{
-    find_folder_by_relative, folder_label, preset_label, relative_to_roots, PresetHost, Thumb,
-    Thumbnails,
+    PresetHost, Thumb, Thumbnails, find_folder_by_relative, folder_label, preset_label,
+    relative_to_roots,
 };
 use rox_panel_kit::fade::{self, Fade};
 use rox_panel_kit::grade::{self, Grade, GradeMode};
@@ -57,10 +57,10 @@ use crate::design::{palette, tokens};
 // `panel::shader` and one letter apart from this crate's own `shader`.
 use crate::panel::shader as surface;
 use crate::panel::{
-    self, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit, setting_row, toggle,
 };
 use crate::panel_settings;
-use crate::settings::ui::{section, SECTION_GAP};
+use crate::settings::ui::{SECTION_GAP, section};
 
 /// The smallest and largest render each side gets, whatever the panel's
 /// size and scale multiply out to. The floor keeps a panel dragged down to
@@ -815,11 +815,11 @@ impl MilkdropPanel {
     /// rotation is re-sent whether or not the library grew, since a
     /// favorites rotation is the list itself.
     fn follow_lists(&mut self) {
-        let gen = core_settings::milkdrop_gen();
-        if gen == self.lists_gen {
+        let generation = core_settings::milkdrop_gen();
+        if generation == self.lists_gen {
             return;
         }
-        self.lists_gen = gen;
+        self.lists_gen = generation;
         // A folder edit is the one thing that earns a rescan.
         let roots = self.roots();
         if self
@@ -1265,8 +1265,8 @@ impl Thumbnails for ThumbService {
         self.0.want(presets);
     }
 
-    fn gen(&self) -> u64 {
-        self.0.gen()
+    fn generation(&self) -> u64 {
+        self.0.generation()
     }
 
     fn loaded(&self, preset: &Path) {
@@ -1459,12 +1459,12 @@ fn paint(
             Some(frame) => {
                 target.last_seq = frame.seq;
                 let fits = frame.width == target.width && frame.height == target.height;
-                if fits {
-                    if let Err(message) = window.update_user_texture(target.texture, frame.rgba8) {
-                        draw.error = Some(message);
-                        cx.notify(panel);
-                        return;
-                    }
+                if fits
+                    && let Err(message) = window.update_user_texture(target.texture, frame.rgba8)
+                {
+                    draw.error = Some(message);
+                    cx.notify(panel);
+                    return;
                 }
                 fits
             }
@@ -2087,10 +2087,11 @@ impl MilkdropPanel {
                                 this.config.name_always = on;
                                 // Switched on between changes, the name
                                 // has to come up now, not on the next one.
-                                if on && this.banner.is_none() {
-                                    if let Some(path) = this.current_path() {
-                                        this.banner = Some((preset_label(&path), Instant::now()));
-                                    }
+                                if on
+                                    && this.banner.is_none()
+                                    && let Some(path) = this.current_path()
+                                {
+                                    this.banner = Some((preset_label(&path), Instant::now()));
                                 }
                                 cx.notify();
                             },

@@ -26,7 +26,7 @@
 use std::borrow::Cow;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use lofty::config::{ParseOptions, WriteOptions};
@@ -599,15 +599,17 @@ fn mapped_unknowns(
 /// key stay two rows; their sizes are the only thing telling them apart.
 fn push_unknown(out: &mut Vec<(String, UnknownValue)>, key: String, value: UnknownValue) {
     if let UnknownValue::Text(text) = &value {
-        if let Some((_, UnknownValue::Text(existing))) = out
+        let prior = out
             .iter_mut()
-            .find(|(k, v)| k == &key && matches!(v, UnknownValue::Text(_)))
-        {
+            .find(|(k, v)| k == &key && matches!(v, UnknownValue::Text(_)));
+
+        if let Some((_, UnknownValue::Text(existing))) = prior {
             existing.push_str("; ");
             existing.push_str(text);
             return;
         }
     }
+
     out.push((key, value));
 }
 
@@ -723,13 +725,12 @@ fn read_pictures_inner(path: &Path) -> Result<Vec<(PicKind, Vec<u8>, String)>, S
     // The front cover lofty mangles on an unsync MP3 reads clean through
     // the art module's raw path; show that so the diff and the preview see
     // the real image, not the corruption the write itself would repair.
-    if kind == FileType::Mpeg {
-        if let Some(front) = out.iter_mut().find(|(k, _, _)| *k == PicKind::Front) {
-            if let Some((data, mime)) = art::unsync_apic(path, art::ArtKind::Front) {
-                front.1 = data;
-                front.2 = mime;
-            }
-        }
+    if kind == FileType::Mpeg
+        && let Some(front) = out.iter_mut().find(|(k, _, _)| *k == PicKind::Front)
+        && let Some((data, mime)) = art::unsync_apic(path, art::ArtKind::Front)
+    {
+        front.1 = data;
+        front.2 = mime;
     }
     Ok(out)
 }
@@ -1286,10 +1287,10 @@ fn atom_unknown(data: &AtomData) -> Option<UnknownValue> {
 fn apply_unknown_mp4(tag: &mut Ilst, key: &str, value: &Option<String>) {
     let ident = ilst_ident(tag, key);
     tag.retain(|atom| !ilst_addresses(atom.ident(), key));
-    if let Some(v) = value {
-        if mapped_key(lofty::tag::TagType::Mp4Ilst, key).is_none() {
-            tag.insert(Atom::new(ident, AtomData::UTF8(v.clone())));
-        }
+    if let Some(v) = value
+        && mapped_key(lofty::tag::TagType::Mp4Ilst, key).is_none()
+    {
+        tag.insert(Atom::new(ident, AtomData::UTF8(v.clone())));
     }
 }
 
@@ -1300,10 +1301,10 @@ fn apply_unknown_mp4(tag: &mut Ilst, key: &str, value: &Option<String>) {
 /// format's own frame instead.
 fn apply_unknown_mpeg(tag: &mut Id3v2Tag, key: &str, value: &Option<String>) {
     tag.retain(|frame| mpeg_unknown_key(frame) != key);
-    if let Some(v) = value {
-        if mapped_key(lofty::tag::TagType::Id3v2, key).is_none() {
-            drop(tag.insert_user_text(key.to_string(), v.clone()));
-        }
+    if let Some(v) = value
+        && mapped_key(lofty::tag::TagType::Id3v2, key).is_none()
+    {
+        drop(tag.insert_user_text(key.to_string(), v.clone()));
     }
 }
 
@@ -2105,10 +2106,10 @@ mod tests {
     /// them fails here.
     #[test]
     fn mp3_unknown_tags_cover_the_three_tiers() {
+        use lofty::TextEncoding;
         use lofty::id3::v2::{
             BinaryFrame, ExtendedTextFrame, FrameId, Id3v2Tag, PrivateFrame, TextInformationFrame,
         };
-        use lofty::TextEncoding;
         use std::borrow::Cow;
 
         let dir = scratch("mp3-unknown");
@@ -2234,10 +2235,10 @@ mod tests {
     /// binary tier, which only clears.
     #[test]
     fn mp3_unknown_edits_address_every_tier() {
+        use lofty::TextEncoding;
         use lofty::id3::v2::{
             ExtendedTextFrame, FrameId, Id3v2Tag, PrivateFrame, TextInformationFrame,
         };
-        use lofty::TextEncoding;
         use std::borrow::Cow;
 
         let dir = scratch("mp3-unknown-edit");

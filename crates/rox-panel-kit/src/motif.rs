@@ -4,8 +4,8 @@
 //! turns up.
 
 use gpui::{
-    canvas, point, prelude::*, px, quad, size, transparent_black, AnyElement, BorderStyle, Bounds,
-    Pixels, Window,
+    AnyElement, BorderStyle, Bounds, Pixels, Window, canvas, point, prelude::*, px, quad, size,
+    transparent_black,
 };
 use rox_design::palette;
 

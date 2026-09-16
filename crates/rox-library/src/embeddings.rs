@@ -931,10 +931,12 @@ fn held_corpus(
 ) -> rusqlite::Result<Arc<Corpus>> {
     if let Some(db) = db {
         let held = CORPUS_CACHE.read().expect("corpus cache never poisons");
-        if let Some(entry) = held.as_ref() {
-            if entry.db == db && entry.model == model && entry.at == at {
-                return Ok(entry.corpus.clone());
-            }
+        if let Some(entry) = held.as_ref()
+            && entry.db == db
+            && entry.model == model
+            && entry.at == at
+        {
+            return Ok(entry.corpus.clone());
         }
     }
     let built = Arc::new(Corpus::build(conn, model, stats, at.rows)?);
@@ -971,10 +973,12 @@ fn held_stats(
 ) -> rusqlite::Result<Option<Arc<Stats>>> {
     if let Some(db) = db {
         let held = STATS_CACHE.read().expect("stats cache never poisons");
-        if let Some(entry) = held.as_ref() {
-            if entry.db == db && entry.model == model && entry.at == at {
-                return Ok(entry.stats.clone());
-            }
+        if let Some(entry) = held.as_ref()
+            && entry.db == db
+            && entry.model == model
+            && entry.at == at
+        {
+            return Ok(entry.stats.clone());
         }
     }
     let computed = compute_stats(conn, model, at)?.map(Arc::new);
@@ -1023,11 +1027,7 @@ fn compute_stats(
             // difference just under zero.
             let var = (q / n - (s / n) * (s / n)).max(0.0);
             let std = var.sqrt();
-            if std > 1e-9 {
-                (1.0 / std) as f32
-            } else {
-                0.0
-            }
+            if std > 1e-9 { (1.0 / std) as f32 } else { 0.0 }
         })
         .collect();
     Ok(Some(Stats { dim, mean, inv_std }))

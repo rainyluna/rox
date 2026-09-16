@@ -12,7 +12,7 @@
 //! parallelism hides.
 
 use std::collections::{HashMap, HashSet};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::UNIX_EPOCH;
@@ -25,8 +25,8 @@ use lofty::prelude::*;
 use rayon::prelude::*;
 use rusqlite::Connection;
 
-use crate::store;
 use crate::TrackRow;
+use crate::store;
 
 /// The audio extensions rox recognizes: what the scan indexes and what an
 /// external open accepts, one list so the two never drift. Tracks the codec
@@ -402,18 +402,71 @@ pub fn audio_files(root: &Path) -> Vec<PathBuf> {
 /// one filter that decides what becomes a track. Same test the walk runs, so
 /// a watched change and a full scan agree on what counts.
 pub fn is_audio(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+    !is_junk(path)
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Whether a path is something the OS dropped into the folder rather than
+/// part of the library: Finder's .DS_Store, and the AppleDouble `._name`
+/// sidecars macOS writes beside every file on a volume that can't hold
+/// resource forks (SMB, exFAT, a USB stick). A sidecar keeps the real
+/// file's extension, so `._track.mp3` passes the extension test and lands
+/// as a row that won't decode. Checked before the extension in [`is_audio`]
+/// and [`is_cue`] so every caller of those inherits the filter.
+pub fn is_junk(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name == ".DS_Store" || name.starts_with("._")
+}
+
+/// Folder names the OS or a NAS owns, never anything the library wants.
+/// `.Trashes` and `$RECYCLE.BIN` are the ones that actually bite: on an
+/// external drive they hold the audio I deleted, so descending into them
+/// puts every track I threw away back in the library under a hidden path.
+/// The rest are pure metadata stores that only cost walk time. Compared
+/// case insensitively, since the volumes these turn up on (HFS+, APFS,
+/// NTFS, exFAT, SMB) are case insensitive themselves.
+const JUNK_DIRS: &[&str] = &[
+    ".Trashes",
+    ".Spotlight-V100",
+    ".fseventsd",
+    ".TemporaryItems",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    "@eaDir",
+];
+
+/// Whether a directory is one the walk should skip whole instead of
+/// descending into it. Kept deliberately short: a folder that only might
+/// hold junk still gets walked, because a wrong skip here loses real music
+/// silently, and [`is_junk`] catches the sidecars inside either way. Only
+/// directories the walk recurses into are tested, never the walk's own
+/// root, so pointing rox at a folder always scans that folder.
+pub fn is_junk_dir(path: &Path) -> bool {
+    // On a volume with no resource forks a folder gets an AppleDouble
+    // sidecar of its own, so the per-file test runs first.
+    if is_junk(path) {
+        return true;
+    }
+
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| JUNK_DIRS.iter().any(|junk| name.eq_ignore_ascii_case(junk)))
 }
 
 /// Whether a path is a cue sheet. Deliberately not part of [`is_audio`]: a
 /// sheet is never playable and never a row, it only decides how the image
 /// beside it is cut up.
 pub fn is_cue(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case(CUE_EXTENSION))
+    !is_junk(path)
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(CUE_EXTENSION))
 }
 
 /// Whether a changed path is worth handing to [`reindex`]: audio, or a cue
@@ -457,6 +510,14 @@ fn collect_into(dir: &Path, out: &mut Walk, seen: &mut HashSet<PathBuf>) {
             _ => path.is_dir(),
         };
         if is_dir {
+            // Nothing under an OS metadata folder or a volume trash belongs
+            // to the library, and .Trashes on an external drive is full of
+            // audio I deleted on purpose. Skip the folder outright rather
+            // than walking it and filtering its files on the way out.
+            if is_junk_dir(&path) {
+                continue;
+            }
+
             // Guard against symlink loops. A linked folder whose real path was
             // already walked is a cycle, so skip it; without this a symlink
             // pointing back up the tree hangs the scan. Canonicalize collapses
@@ -824,10 +885,10 @@ fn read_tags(path: &Path) -> Option<TrackRow> {
     // file leaves empty, so a whole album of them scans in at zero. The
     // movie header still states it (see [`crate::mp4`]), and this only
     // opens the file again for the rows that came back with nothing.
-    if row.duration_ms == 0 {
-        if let Some(secs) = crate::mp4::fragment_duration_secs(path) {
-            row.duration_ms = (secs * 1000.0).round() as u32;
-        }
+    if row.duration_ms == 0
+        && let Some(secs) = crate::mp4::fragment_duration_secs(path)
+    {
+        row.duration_ms = (secs * 1000.0).round() as u32;
     }
     // The parsed type beats the extension a fallback row guesses from; a
     // format outside the match keeps the guess.
@@ -915,10 +976,10 @@ fn read_tags(path: &Path) -> Option<TrackRow> {
     // Opus files carry no ReplayGain keys at all, so what the generic read
     // found is nothing and the R128 pair off the native parse is the whole
     // answer. Anything a tagger did write the standard way still wins.
-    if let Some(r128) = r128 {
-        if !row.replay_gain.any() {
-            row.replay_gain = r128;
-        }
+    if let Some(r128) = r128
+        && !row.replay_gain.any()
+    {
+        row.replay_gain = r128;
     }
     // The rating read off the same native parse above: FMPS is stored in TXXX
     // frames and unmapped Vorbis keys, which this generic tag never holds.
@@ -1001,6 +1062,83 @@ fn filename_title(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::writer::{self, Change, Field};
+
+    /// macOS drops .DS_Store into every folder it opens, and on a volume with
+    /// no resource forks it writes an AppleDouble `._name` beside every file.
+    /// The sidecar keeps the real extension, so the extension test alone waved
+    /// `._track.mp3` through as a track that never decodes.
+    #[test]
+    fn os_junk_is_neither_audio_nor_a_cue() {
+        for name in [".DS_Store", "._track.mp3", "._album.cue", "._cover.jpg"] {
+            let path = Path::new("/m/Album").join(name);
+            assert!(is_junk(&path), "{name} is OS junk");
+            assert!(!is_audio(&path), "{name} must not become a row");
+            assert!(!is_cue(&path), "{name} must not cut an image");
+            assert!(!is_relevant(&path), "{name} is not worth reindexing");
+        }
+
+        let track = Path::new("/m/Album/track.mp3");
+        assert!(!is_junk(track));
+        assert!(is_audio(track));
+        assert!(!is_cue(track));
+
+        let sheet = Path::new("/m/Album/album.cue");
+        assert!(!is_junk(sheet));
+        assert!(!is_audio(sheet));
+        assert!(is_cue(sheet));
+
+        // The junk folders are skipped by name, whatever case the volume
+        // hands them back in.
+        assert!(is_junk_dir(Path::new("/m/.Trashes")));
+        assert!(is_junk_dir(Path::new("/m/.spotlight-v100")));
+        assert!(is_junk_dir(Path::new("/m/$RECYCLE.BIN")));
+        assert!(is_junk_dir(Path::new("/m/System Volume Information")));
+        assert!(is_junk_dir(Path::new("/m/@eaDir")));
+        assert!(!is_junk_dir(Path::new("/m/Album")));
+    }
+
+    /// A tree the way macOS leaves one on a USB stick: junk in every folder, a
+    /// sidecar per file, and a volume trash holding a track I deleted on
+    /// purpose. The walk is the ground truth the prune diffs the store
+    /// against, so anything it yields here becomes a row.
+    #[test]
+    fn the_walk_yields_only_real_audio() {
+        let dir = std::env::temp_dir().join(format!("rox-scanner-junk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["Album", ".Trashes/501", "@eaDir"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        // Names are the whole test, so empty files are enough; nothing here
+        // gets a tag read.
+        for name in [
+            "Album/a.flac",
+            "Album/._a.flac",
+            "Album/.DS_Store",
+            "Album/album.cue",
+            "Album/._album.cue",
+            ".DS_Store",
+            ".Trashes/501/deleted.mp3",
+            "@eaDir/thumb.mp3",
+        ] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+
+        let mut walk = Walk::default();
+        collect(&dir, &mut walk);
+
+        assert_eq!(
+            walk.audio,
+            vec![dir.join("Album/a.flac")],
+            "sidecars, .DS_Store, and the junk folders all stay out"
+        );
+        assert_eq!(
+            walk.cues,
+            vec![dir.join("Album/album.cue")],
+            "the sidecar of a sheet is not a sheet"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The write-back loop the metadata writer's contract names: commit,
     /// reindex the written path, and the store row converges without a

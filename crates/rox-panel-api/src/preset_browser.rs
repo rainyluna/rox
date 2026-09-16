@@ -26,10 +26,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    canvas, div, hash, image_cache, img, prelude::*, px, uniform_list, App, Asset as _, Context,
-    Div, Entity, EventEmitter, ImageAssetLoader, ImageCache, ImageCacheError, MouseButton,
-    MouseDownEvent, ObjectFit, Pixels, RenderImage, Resource, ScrollStrategy, SharedString,
-    Stateful, Subscription, UniformListScrollHandle, WeakEntity, Window,
+    App, Asset as _, Context, Div, Entity, EventEmitter, ImageAssetLoader, ImageCache,
+    ImageCacheError, MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderImage, Resource,
+    ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle, WeakEntity,
+    Window, canvas, div, hash, image_cache, img, prelude::*, px, uniform_list,
 };
 use gpui_component::input::{Enter, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -40,7 +40,7 @@ use gpui_component::{Icon, Sizable as _};
 use rox_core::settings as core_settings;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
-use rox_library::folders::{build_roots, sum_counts, Node};
+use rox_library::folders::{Node, build_roots, sum_counts};
 use rox_panel_kit::ui as settings_ui;
 
 /// A row cap for the tests: the walk takes one so a caller drawing
@@ -225,7 +225,7 @@ pub trait Thumbnails: 'static {
     /// Which presets are on screen, in order. Replaces the last ask.
     fn want(&self, presets: Vec<PathBuf>);
     /// Moves when a thumbnail lands.
-    fn gen(&self) -> u64;
+    fn generation(&self) -> u64;
     /// A preset loaded and ran on a real engine, so a failure held
     /// against it no longer stands: forget it and let the grid ask again.
     fn loaded(&self, preset: &Path);
@@ -802,21 +802,23 @@ impl PresetBrowser {
     /// cells as they land; it runs while the browser lives and costs one
     /// atomic read per tick when nothing's pending.
     pub fn set_thumbs(&mut self, thumbs: Arc<dyn Thumbnails>, cx: &mut Context<Self>) {
-        self.thumbs_gen = thumbs.gen();
+        self.thumbs_gen = thumbs.generation();
         self.thumbs = Some(thumbs);
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(THUMB_POLL).await;
-            let alive = view.update(cx, |this, cx| {
-                if let Some(thumbs) = this.thumbs.as_ref() {
-                    let gen = thumbs.gen();
-                    if gen != this.thumbs_gen {
-                        this.thumbs_gen = gen;
-                        cx.notify();
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(THUMB_POLL).await;
+                let alive = view.update(cx, |this, cx| {
+                    if let Some(thumbs) = this.thumbs.as_ref() {
+                        let generation = thumbs.generation();
+                        if generation != this.thumbs_gen {
+                            this.thumbs_gen = generation;
+                            cx.notify();
+                        }
                     }
+                });
+                if alive.is_err() {
+                    break;
                 }
-            });
-            if alive.is_err() {
-                break;
             }
         })
         .detach();
@@ -894,10 +896,10 @@ impl PresetBrowser {
             return;
         }
         self.view = view;
-        if view == View::Tree {
-            if let Some(thumbs) = self.thumbs.as_ref() {
-                thumbs.want(Vec::new());
-            }
+        if view == View::Tree
+            && let Some(thumbs) = self.thumbs.as_ref()
+        {
+            thumbs.want(Vec::new());
         }
         self.reveal = true;
         cx.notify();
@@ -1105,7 +1107,7 @@ impl PresetBrowser {
     /// rows that reads its own bounds at layout and hands the width back
     /// through a deferred update, since the view can't be touched from
     /// inside its own frame.
-    fn ruler(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn ruler(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let view = cx.entity().downgrade();
         canvas(
             move |bounds, _, cx| {
@@ -1645,12 +1647,10 @@ impl Render for PresetBrowser {
 
         // A change of preset brings its row up and parks the cursor on
         // it, so the arrows carry on from there.
-        if reveal {
-            if let Some(index) = self.current_index() {
-                self.cursor = Some(index);
-                self.scroll
-                    .scroll_to_item(self.item_of(index), ScrollStrategy::Center);
-            }
+        if reveal && let Some(index) = self.current_index() {
+            self.cursor = Some(index);
+            self.scroll
+                .scroll_to_item(self.item_of(index), ScrollStrategy::Center);
         }
 
         let count = rox_i18n::t!(

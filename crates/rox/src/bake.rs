@@ -102,15 +102,17 @@ pub fn survey(
         let workers = workers(slots.len());
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                scope.spawn(|| loop {
-                    if !progress.keep_going() {
-                        break;
+                scope.spawn(|| {
+                    loop {
+                        if !progress.keep_going() {
+                            break;
+                        }
+                        let Some(slot) = slots.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
+                            break;
+                        };
+                        bake::examine(&mut slot.lock().unwrap());
+                        progress.done.fetch_add(1, Ordering::Relaxed);
                     }
-                    let Some(slot) = slots.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
-                        break;
-                    };
-                    bake::examine(&mut slot.lock().unwrap());
-                    progress.done.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
@@ -321,32 +323,34 @@ fn run(items: &[Item], progress: &Progress) -> (Vec<PathBuf>, Option<String>) {
     let workers = workers(items.len());
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                if !progress.keep_going() {
-                    break;
-                }
-                let Some(item) = items.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
-                    break;
-                };
-                *progress.current.lock().unwrap() = item.path.to_string_lossy().into_owned();
-                match bake::apply(item) {
-                    Ok(()) => {
-                        written.lock().unwrap().push(item.path.clone());
-                        progress.wrote.fetch_add(1, Ordering::Relaxed);
+            scope.spawn(|| {
+                loop {
+                    if !progress.keep_going() {
+                        break;
                     }
-                    // One file that won't take a tag costs its own tags and
-                    // nothing else: the values are still in the database, and
-                    // the next file is unaffected.
-                    Err(e) => {
-                        log::warn!("bake: {}: {e}", item.path.display());
-                        progress.failed.fetch_add(1, Ordering::Relaxed);
-                        let mut failure = failure.lock().unwrap();
-                        if failure.is_none() {
-                            *failure = Some(e);
+                    let Some(item) = items.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    *progress.current.lock().unwrap() = item.path.to_string_lossy().into_owned();
+                    match bake::apply(item) {
+                        Ok(()) => {
+                            written.lock().unwrap().push(item.path.clone());
+                            progress.wrote.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // One file that won't take a tag costs its own tags and
+                        // nothing else: the values are still in the database, and
+                        // the next file is unaffected.
+                        Err(e) => {
+                            log::warn!("bake: {}: {e}", item.path.display());
+                            progress.failed.fetch_add(1, Ordering::Relaxed);
+                            let mut failure = failure.lock().unwrap();
+                            if failure.is_none() {
+                                *failure = Some(e);
+                            }
                         }
                     }
+                    progress.done.fetch_add(1, Ordering::Relaxed);
                 }
-                progress.done.fetch_add(1, Ordering::Relaxed);
             });
         }
     });

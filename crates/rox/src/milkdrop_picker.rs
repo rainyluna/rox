@@ -14,8 +14,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, size, App, Bounds, Context, Entity, EntityId, Global, Subscription,
-    WeakEntity, Window, WindowHandle,
+    App, Bounds, Context, Entity, EntityId, Global, Subscription, WeakEntity, Window, WindowHandle,
+    div, prelude::*, size,
 };
 use gpui_component::{Root, Sizable as _};
 
@@ -23,7 +23,7 @@ use rox_core::settings::{self as core_settings, MilkdropPickerWindowState, Setti
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel;
-use rox_panel_api::preset_browser::{preset_label, BrowserEvent, PresetBrowser, PresetHost};
+use rox_panel_api::preset_browser::{BrowserEvent, PresetBrowser, PresetHost, preset_label};
 use rox_panel_kit::ui as settings_ui;
 
 /// The open picker, if any: its window, and the view inside it so a second
@@ -46,15 +46,15 @@ pub fn open(host: Box<dyn PresetHost>, cx: &mut App) {
 }
 
 fn open_now(host: Box<dyn PresetHost>, cx: &mut App) {
-    if let Some(open) = cx.try_global::<OpenPicker>() {
-        if let Some(view) = open.view.upgrade() {
-            let handle = open.handle;
-            view.update(cx, |this, cx| this.retarget(host, cx));
-            handle
-                .update(cx, |_, window, _| window.activate_window())
-                .ok();
-            return;
-        }
+    if let Some(open) = cx.try_global::<OpenPicker>()
+        && let Some(view) = open.view.upgrade()
+    {
+        let handle = open.handle;
+        view.update(cx, |this, cx| this.retarget(host, cx));
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .ok();
+        return;
     }
     open_fresh_with(host, cx);
 }
@@ -212,9 +212,9 @@ impl PickerWindow {
     /// Hand the browser what the host has: the library when the lists
     /// moved, and the preset that's up.
     fn follow_host(&mut self, cx: &mut Context<Self>) {
-        let gen = core_settings::milkdrop_gen();
-        if self.lists_gen != Some(gen) {
-            self.lists_gen = Some(gen);
+        let generation = core_settings::milkdrop_gen();
+        if self.lists_gen != Some(generation) {
+            self.lists_gen = Some(generation);
             let presets = self.host.presets(cx);
             self.browser
                 .update(cx, |browser, cx| browser.set_presets(&presets, cx));
@@ -226,7 +226,7 @@ impl PickerWindow {
 
     /// The line over the list: who this is picking for, what's up, and
     /// the two things worth doing to it from here.
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let current = self.host.current(cx);
         let has_current = current.is_some();
         let showing = current
@@ -321,7 +321,7 @@ impl PickerWindow {
 
     /// What the window says with no presets to list: where they go, and a
     /// way into that folder.
-    fn empty(&self) -> impl IntoElement {
+    fn empty(&self) -> impl IntoElement + use<> {
         let folder = core_settings::milkdrop_dir().join("presets");
         div()
             .size_full()

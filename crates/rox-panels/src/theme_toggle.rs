@@ -6,8 +6,8 @@
 //! persists to the settings file like the settings window's radio.
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable,
-    MouseButton, Pixels, WeakEntity, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, MouseButton, Pixels,
+    WeakEntity, Window, div, prelude::*, px, svg,
 };
 use gpui_component::menu::PopupMenu;
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
-use crate::panel::{self, align_row, justify, Align, AppState, PanelChrome, PanelSettings};
+use crate::panel::{self, Align, AppState, PanelChrome, PanelSettings, align_row, justify};
 use crate::panel_settings;
 use crate::settings::{self, Settings, Theme};
 

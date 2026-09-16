@@ -263,9 +263,11 @@ mod tests {
     /// clip is shorter than the kernel.
     #[test]
     fn short_and_silent_clips_stay_finite() {
-        assert!(convert(&[0.0; 4096], 44_100, 32_000)
-            .iter()
-            .all(|&s| s == 0.0));
+        assert!(
+            convert(&[0.0; 4096], 44_100, 32_000)
+                .iter()
+                .all(|&s| s == 0.0)
+        );
         for &n in &[1usize, 2, 7, 64] {
             let out = convert(&vec![0.25f32; n], 44_100, 32_000);
             assert!(out.iter().all(|s| s.is_finite()), "n = {n} produced a NaN");

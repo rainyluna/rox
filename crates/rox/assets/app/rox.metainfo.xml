@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The AppStream record every Linux channel installs under share/metainfo:
+  the deb (Cargo.toml deb assets), nix (flake.nix postInstall), the AppImage
+  and the tarball (release.yml), and the Flatpak, whose manifest renames it
+  to com.zealsprince.rox.metainfo.xml and rewrites the launchable to match.
+
+  The releases element is filled at release time by scripts/metainfo-releases.sh
+  from the stable tags, newest first. The marker below is what it replaces;
+  the source tree keeps the marker so the file has one shape at every commit.
+-->
+<component type="desktop-application">
+  <id>com.zealsprince.rox</id>
+  <name>rox</name>
+  <summary>A desktop music player for large, carefully tagged local libraries</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <developer id="com.zealsprince">
+    <name>Andrew Lake</name>
+  </developer>
+  <launchable type="desktop-id">rox.desktop</launchable>
+  <description>
+    <p>
+      rox is a desktop music player for people with large, carefully tagged
+      local libraries. It reads full tags and true durations from every file
+      on import, watches the library folders for changes, and stays fast at
+      tens of thousands of tracks.
+    </p>
+    <p>
+      The interface is panels you compose yourself: library, queue, playlists,
+      lyrics, cover art, visualizers, and forty-odd more, each duplicated
+      with its own settings, popped out into real windows, and saved as a
+      workspace. A workspace is one file carrying the layout, palette, and
+      appearance, so a look can be shared.
+    </p>
+    <p>
+      Tagging is deep enough to trust with a real collection: a full tag
+      editor with atomic writes, batch edits with find and replace, ratings
+      stored in the files themselves, online lookup through MusicBrainz and
+      others, lyrics, and ReplayGain for the files no tagger ever measured.
+    </p>
+  </description>
+  <url type="homepage">https://rox.music</url>
+  <url type="bugtracker">https://github.com/zealsprince/rox/issues</url>
+  <url type="vcs-browser">https://github.com/zealsprince/rox</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/zealsprince/rox/main/docs/0S-screenshots/Preview_Dark.png</image>
+      <caption>The default workspace in the dark theme: art grid, playlists, spectrum, and waveform</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/zealsprince/rox/main/docs/0S-screenshots/Preview_Light.png</image>
+      <caption>The same workspace in the light theme</caption>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <!-- rox:releases -->
+  </releases>
+</component>

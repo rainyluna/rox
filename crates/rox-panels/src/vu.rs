@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, size, AnyElement,
-    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Rgba,
-    SharedString, Subscription, TextRun, WeakEntity, Window,
+    AnyElement, App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    Rgba, SharedString, Subscription, TextRun, WeakEntity, Window, canvas, div, fill,
+    linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::Sizable as _;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
@@ -26,11 +26,11 @@ use rox_viz::AudioFeed;
 use crate::assets::icons;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, choices_shared, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, choices_shared, setting_row, toggle,
 };
 use crate::panel_settings;
 use crate::settings::ui as settings_ui;
-use crate::spectrum::{gradient_choices, orientation_choices, ramp_color, Gradient, Orientation};
+use crate::spectrum::{Gradient, Orientation, gradient_choices, orientation_choices, ramp_color};
 
 /// The most meters the panel draws: stereo is two, mono folds to one.
 const MAX_METERS: usize = 2;

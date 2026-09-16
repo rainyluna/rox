@@ -41,13 +41,13 @@
 use symphonia::core::audio::{
     AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
 };
+use symphonia::core::codecs::CodecInfo;
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::codecs::audio::{
     AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
 };
 use symphonia::core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia::core::codecs::CodecInfo;
-use symphonia::core::errors::{decode_error, unsupported_error, Result};
+use symphonia::core::errors::{Result, decode_error, unsupported_error};
 use symphonia::core::packet::PacketRef;
 use symphonia::core::support_audio_codec;
 

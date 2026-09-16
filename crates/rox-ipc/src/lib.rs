@@ -24,7 +24,7 @@ mod server;
 pub mod client;
 
 pub use events::Events;
-pub use protocol::{RpcError, PROTOCOL_VERSION};
+pub use protocol::{PROTOCOL_VERSION, RpcError};
 pub use server::{Cleanup, Request, Responder, Server};
 
 use std::path::{Path, PathBuf};

@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use gpui::{App, Entity};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use rox_ipc::{Request, RpcError};
 use rox_library::cue::TrackKey;

@@ -8,11 +8,11 @@
 //! Application; the button here checks now either way.
 
 use gpui::{
-    div, prelude::*, px, size, svg, App, Bounds, Context, Div, Global, MouseButton, ScrollHandle,
-    SharedString, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Global, MouseButton, ScrollHandle, SharedString, Subscription,
+    Window, WindowHandle, div, prelude::*, px, size, svg,
 };
-use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::Root;
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ use rox_core::settings::{self, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState};
-use rox_panel_kit::ui::{small_button, SmallButton, SECTION_GAP};
+use rox_panel_kit::ui::{SECTION_GAP, SmallButton, small_button};
 use rox_services::backdrop::WindowBackdrop;
 
 /// The project's home, where the source and the releases live.
@@ -236,16 +236,18 @@ impl AboutWindow {
     /// updater settles. The last tick paints the settled state on its way
     /// out.
     fn poll_update(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(200))
-                .await;
-            let live = this.update(cx, |_, cx| {
-                cx.notify();
-                matches!(updater::status(), updater::Status::Downloading(_))
-            });
-            if !matches!(live, Ok(true)) {
-                break;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let live = this.update(cx, |_, cx| {
+                    cx.notify();
+                    matches!(updater::status(), updater::Status::Downloading(_))
+                });
+                if !matches!(live, Ok(true)) {
+                    break;
+                }
             }
         })
         .detach();
@@ -313,7 +315,7 @@ impl Render for AboutWindow {
                         rox_i18n::t!("about-restart-now"),
                         icons::POWER,
                         false,
-                        cx.listener(|_, _, _, cx| cx.restart()),
+                        cx.listener(|_, _, _, cx| updater::relaunch(cx)),
                     )],
                 ),
                 updater::Status::Downloading(progress) => (

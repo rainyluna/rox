@@ -27,8 +27,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, size, App, Bounds, Context, DismissEvent, Entity, Focusable, Global,
-    WeakEntity, Window, WindowHandle,
+    App, Bounds, Context, DismissEvent, Entity, Focusable, Global, WeakEntity, Window,
+    WindowHandle, div, prelude::*, px, size,
 };
 use gpui_component::Root;
 

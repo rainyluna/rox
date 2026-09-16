@@ -8,8 +8,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    WeakEntity, Window, div, prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Side};
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::assets::icons;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
-use crate::panel::{self, setting_row, toggle, AppState, PanelChrome, PanelSettings};
+use crate::panel::{self, AppState, PanelChrome, PanelSettings, setting_row, toggle};
 use crate::panel_settings;
 use crate::settings::ui as settings_ui;
 use rox_services::history::HistoryEvent;
@@ -197,10 +197,12 @@ impl StatsWidgetPanel {
         // The trailing windows slide whether or not anything plays, so
         // re-count on a slow tick; the loop ends with the view, the
         // console window's shape.
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(TICK).await;
-            if view.update(cx, |this, cx| this.refresh(cx)).is_err() {
-                break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(TICK).await;
+                if view.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    break;
+                }
             }
         })
         .detach();

@@ -187,7 +187,7 @@ fn cluster_bucket(projection: &Projection, rows: &mut [usize], out: &mut Vec<Gro
 mod tests {
     use super::*;
     use crate::rusqlite::Connection;
-    use crate::{store, TrackRow};
+    use crate::{TrackRow, store};
     use std::collections::HashMap;
 
     /// A track row with just the fields the clustering reads; the rest stay

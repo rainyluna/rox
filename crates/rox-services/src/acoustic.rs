@@ -8,8 +8,8 @@ use std::sync::{Arc, RwLock};
 
 use gpui::App;
 
-use rox_acoustic::{models, Local, Source};
-use rox_core::settings::{file_stamp, LocalModel, Settings};
+use rox_acoustic::{Local, Source, models};
+use rox_core::settings::{LocalModel, Settings, file_stamp};
 
 /// The live model pick, the acoustic switch's other half: the Similar column
 /// reads it in the same render paths, and a query that used a different
@@ -67,11 +67,11 @@ fn rehashes_to_its_id(local: &LocalModel, stamp: (u64, i64)) -> bool {
     }
     let path = local.path.clone();
     Settings::update(move |s| {
-        if let Some(stored) = s.acoustic_local_model.as_mut() {
-            if stored.path == path {
-                stored.bytes = stamp.0;
-                stored.mtime = stamp.1;
-            }
+        if let Some(stored) = s.acoustic_local_model.as_mut()
+            && stored.path == path
+        {
+            stored.bytes = stamp.0;
+            stored.mtime = stamp.1;
         }
     });
     true

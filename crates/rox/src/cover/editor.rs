@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, img, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle,
-    Global, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, PathPromptOptions,
-    SharedString, Stateful, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, FocusHandle, Global, Image, ImageFormat, KeyBinding,
+    MouseButton, ObjectFit, PathPromptOptions, SharedString, Stateful, Subscription, Window,
+    WindowHandle, actions, div, img, prelude::*, px, size,
 };
 use gpui_component::Root;
 
@@ -24,12 +24,12 @@ use rox_core::fmt::fmt_ms;
 use rox_library::cue::TrackKey;
 use rox_library::writer::{self, Edit, PicChange, PicKind};
 
-use crate::matching::{open_or_focus, WindowRegistry};
+use crate::matching::{WindowRegistry, open_or_focus};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_net::providers;
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, Seg, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
 

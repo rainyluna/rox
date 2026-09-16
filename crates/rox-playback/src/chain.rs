@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn push_resets_arriving_node_to_chain_rate() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         /// Publishes its reset rate, the shape a real node's shared
         /// parameter atomics take.

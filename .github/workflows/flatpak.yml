@@ -1,0 +1,204 @@
+# Builds the Flatpak from scripts/flatpak/com.zealsprince.rox.yml on every
+# release: lints the manifest and the metainfo, builds in Flathub's own CI
+# image, lints the resulting repo, attaches the sideload bundle to the GitHub
+# release, and pushes the manifest to flathub/com.zealsprince.rox so Flathub
+# rebuilds from it, once that repo exists.
+#
+# The manifest builds offline from pinned sources. Two inputs can't live in
+# the tree: cargo-sources.json, the crate list flatpak-cargo-generator derives
+# from Cargo.lock, and the metainfo with its release history filled in. Both
+# are produced here, and the release tarball's url and sha256 are rewritten
+# for the version being built, all in a working copy of the manifest under
+# $RUNNER_TEMP. The checked-in file stays untouched and keeps pointing at the
+# newest published tag, so it builds as committed.
+#
+# A release candidate builds, lints, and uploads its bundle to the prerelease,
+# the same way the AUR job test-builds one, but never pushes to Flathub: that
+# repo tracks stable only.
+#
+# Runs as a job of the Release workflow (see the note there on why a
+# `release: published` trigger can't work). The manual dispatch is for
+# re-running a version when a run failed after the release itself shipped,
+# and always takes the push path: `candidate` is a workflow_call input only.
+#
+# Needs one secret, FLATHUB_TOKEN: a token with write access to
+# flathub/com.zealsprince.rox, which exists once Flathub has accepted the
+# app. When it's unset the run still builds, lints, and uploads the bundle,
+# and warns instead of pushing.
+name: Flatpak
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version, without the leading v
+        required: true
+        type: string
+      candidate:
+        description: Build and lint without touching the Flathub repo
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      FLATHUB_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, without the leading v
+        required: true
+        type: string
+
+# contents: write is for the bundle upload, which goes through github.token.
+# The caller's job has to grant at least this much or the upload fails.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Flathub's CI image: flatpak-builder, flatpak-builder-lint and the 25.08
+    # runtime and SDK preinstalled, so the run downloads nothing the build
+    # itself doesn't need. Privileged because flatpak-builder sandboxes each
+    # module with bubblewrap, which needs the user namespaces the default
+    # container profile blocks. The tag has to match the manifest's
+    # runtime-version; bump both together.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    env:
+      VERSION: ${{ inputs.version }}
+      MANIFEST: com.zealsprince.rox.yml
+      BUNDLE: rox-v${{ inputs.version }}-flatpak-x86_64.flatpak
+    steps:
+      # `if:` can't read secrets on a step, so gate through a step output.
+      # One answer, not the AUR job's two: the bundle is a release asset on
+      # every run, candidate or not, so there's always a build to do. The
+      # only question is whether the manifest may reach Flathub.
+      - name: Decide whether this run pushes to Flathub
+        id: gate
+        env:
+          FLATHUB_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          if [ "$CANDIDATE" = "true" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          elif [ -n "$FLATHUB_TOKEN" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::FLATHUB_TOKEN not set, skipping the Flathub update"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The tag, not main: main can move while this runs, and the point is
+      # to build the commit that was just released.
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ inputs.version }}
+
+      # Two tools the image doesn't carry. flatpak-cargo-generator is a single
+      # file in flatpak/flatpak-builder-tools, which has no tags, so it's
+      # pinned to a commit (master as of 2026-09-12); its two dependencies
+      # come from pip, which the SDK ships. gh does the release upload; the
+      # image has no package manager, so it comes as the pinned release
+      # tarball, hash-checked the way the AppImage tooling is.
+      - name: Fetch tools
+        env:
+          TOOLS_SHA: de2225a6dee4818c1339b3cdbf29f90c471fcb7e
+          GH_VERSION: 2.101.0
+          GH_SHA256: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -fsSLo "$RUNNER_TEMP/tools/flatpak-cargo-generator.py" \
+            "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$TOOLS_SHA/cargo/flatpak-cargo-generator.py"
+          pip3 install --user aiohttp tomlkit
+          curl -fsSLo "$RUNNER_TEMP/gh.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_amd64.tar.gz"
+          echo "$GH_SHA256  $RUNNER_TEMP/gh.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gh.tar.gz" -C "$RUNNER_TEMP/tools" \
+            --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+
+      # The generator skips gpui and gpui-component: the lock carries them as
+      # path deps with no source, which is why the manifest fetches those two
+      # tarballs itself. Written beside the manifest (gitignored there) so a
+      # local build finds it in the same place.
+      - name: Generate cargo sources
+        run: |
+          python3 "$RUNNER_TEMP/tools/flatpak-cargo-generator.py" Cargo.lock \
+            -o scripts/flatpak/cargo-sources.json
+
+      # Never edit the checked-in manifest in CI. The working copy gets the
+      # tarball url and sha256 of the version being built, hashed here the
+      # same way the AUR job does it, and the release-filled metainfo the
+      # manifest installs in place of the tarball's marker version. The sed
+      # leans on the sha256 line sitting directly under the url line.
+      - name: Prepare the Flathub tree
+        run: |
+          flathub="$RUNNER_TEMP/flathub"
+          mkdir -p "$flathub"
+          cp scripts/flatpak/flathub.json scripts/flatpak/cargo-sources.json "$flathub/"
+          curl -fsSLo "$RUNNER_TEMP/rox-v$VERSION.tar.gz" \
+            "https://github.com/zealsprince/rox/archive/refs/tags/v$VERSION.tar.gz"
+          sha=$(sha256sum "$RUNNER_TEMP/rox-v$VERSION.tar.gz" | cut -d' ' -f1)
+          sed \
+            -e "s|/rox/archive/refs/tags/v[^/]*\.tar\.gz|/rox/archive/refs/tags/v$VERSION.tar.gz|" \
+            -e "\|/rox/archive/refs/tags/|{n;s|sha256: .*|sha256: $sha|;}" \
+            "scripts/flatpak/$MANIFEST" > "$flathub/$MANIFEST"
+          scripts/metainfo-releases.sh crates/rox/assets/app/rox.metainfo.xml
+          cp crates/rox/assets/app/rox.metainfo.xml "$flathub/rox.metainfo.xml"
+
+      # The checks Flathub runs on a submission, before an hour goes into the
+      # build. The linter is on the image's PATH; the appstream check runs on
+      # the filled metainfo, the copy that ships.
+      - name: Lint manifest and metainfo
+        run: |
+          flatpak-builder-lint manifest "$RUNNER_TEMP/flathub/$MANIFEST"
+          flatpak-builder-lint appstream "$RUNNER_TEMP/flathub/rox.metainfo.xml"
+
+      # master as of 2025-04-24. The action leaves the OSTree repo in repo/
+      # and the bundle in the workspace; the cache is flatpak-builder's state
+      # dir, keyed on the lock so a release with the same crates reuses the
+      # compiled ones.
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40
+        with:
+          manifest-path: ${{ runner.temp }}/flathub/com.zealsprince.rox.yml
+          bundle: rox-v${{ inputs.version }}-flatpak-x86_64.flatpak
+          cache-key: flatpak-${{ hashFiles('Cargo.lock') }}
+          upload-artifact: false
+
+      - name: Lint repo
+        run: flatpak-builder-lint repo repo
+
+      # The release exists by now: this job runs after the Release workflow's
+      # release job. Not in SHA256SUMS.txt, which was written before this
+      # bundle existed; the in-app updater never installs a Flatpak anyway.
+      # --clobber so a dispatch re-run replaces the asset instead of failing.
+      - name: Upload bundle to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload --clobber "v$VERSION" "$BUNDLE"
+
+      # Flathub builds each app from its own repo, so the release lands there
+      # as one commit of the manifest and its side files. Explicit adds, and
+      # a no-op diff is skipped so dispatch re-runs stay idempotent.
+      - name: Push to Flathub
+        if: steps.gate.outputs.push == 'true'
+        env:
+          FLATHUB_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
+        run: |
+          git config --global user.name zealsprince
+          git config --global user.email andrew@zealsprince.com
+          git clone "https://x-access-token:$FLATHUB_TOKEN@github.com/flathub/com.zealsprince.rox" \
+            "$RUNNER_TEMP/flathub-repo"
+          cd "$RUNNER_TEMP/flathub"
+          cp "$MANIFEST" flathub.json cargo-sources.json rox.metainfo.xml "$RUNNER_TEMP/flathub-repo/"
+          cd "$RUNNER_TEMP/flathub-repo"
+          git add "$MANIFEST" flathub.json cargo-sources.json rox.metainfo.xml
+          if git diff --cached --quiet; then
+            echo "Flathub is already at v$VERSION"
+          else
+            git commit -m "Update to v$VERSION"
+            git push origin HEAD:master
+          fi

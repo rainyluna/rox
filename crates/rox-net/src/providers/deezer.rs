@@ -2,7 +2,7 @@
 //! URLs at fixed sizes. `cover_big` is the 500px preview, `cover_xl` the
 //! 1000px image a save embeds.
 
-use super::{agent, net_reason, string, ArtCandidate, ArtProvider, TrackQuery};
+use super::{ArtCandidate, ArtProvider, TrackQuery, agent, net_reason, string};
 
 const API: &str = "https://api.deezer.com/search/album";
 
@@ -49,11 +49,7 @@ impl ArtProvider for Deezer {
             // result omits it.
             let thumb = {
                 let big = string(album.get("cover_big"));
-                if big.is_empty() {
-                    full.clone()
-                } else {
-                    big
-                }
+                if big.is_empty() { full.clone() } else { big }
             };
             out.push(ArtCandidate {
                 provider: self.name(),

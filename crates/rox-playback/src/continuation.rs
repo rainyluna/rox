@@ -587,9 +587,11 @@ mod tests {
     #[test]
     fn browse_on_an_empty_library_returns_nothing() {
         let conn = library(0);
-        assert!(Browse
-            .next(&conn, &seed(Scope::Library, Vec::new(), 5))
-            .is_empty());
+        assert!(
+            Browse
+                .next(&conn, &seed(Scope::Library, Vec::new(), 5))
+                .is_empty()
+        );
     }
 
     /// A listen sinks its track behind everything never played, whatever

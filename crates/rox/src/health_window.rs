@@ -43,12 +43,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, relative, size, AnyElement, App, Bounds, Context, Div, FocusHandle,
-    FontWeight, Global, ScrollHandle, SharedString, Stateful, Subscription, Task, Window,
-    WindowHandle,
+    AnyElement, App, Bounds, Context, Div, FocusHandle, FontWeight, Global, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, Window, WindowHandle, div, prelude::*, px,
+    relative, size,
 };
-use gpui_component::scroll::Scrollbar;
 use gpui_component::Root;
+use gpui_component::scroll::Scrollbar;
 
 use rox_core::settings::Settings;
 use rox_design::assets::icons;
@@ -59,7 +59,7 @@ use rox_library::projection::Projection;
 use rox_library::{art, store};
 use rox_panel_api::charts;
 use rox_panel_api::panel::{self, AppState};
-use rox_panel_kit::ui::{self as settings_ui, section, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 use rox_services::backdrop::WindowBackdrop;
 use rox_services::catalog::LibraryEvent;
 
@@ -1939,10 +1939,10 @@ fn probe_album(cache: &mut HashMap<String, ArtVerdict>, path: &str) -> bool {
         art::identity(file),
         file.parent().map(art::identity).unwrap_or((0, 0)),
     );
-    if let Some(verdict) = cache.get(path) {
-        if (verdict.file, verdict.folder) == identity {
-            return verdict.missing;
-        }
+    if let Some(verdict) = cache.get(path)
+        && (verdict.file, verdict.folder) == identity
+    {
+        return verdict.missing;
     }
     let missing = art_missing(art::cover_art_source(file));
     cache.insert(
@@ -2179,7 +2179,7 @@ mod tests {
     use super::*;
     use rox_library::projection::FilterSet;
     use rox_library::rusqlite::Connection;
-    use rox_library::{store, TrackRow};
+    use rox_library::{TrackRow, store};
 
     /// One row with the fields the health scans read; everything else stays
     /// at its neutral default, which is what an untagged file scans as.
@@ -2338,7 +2338,7 @@ mod tests {
             path.clone(),
             ArtVerdict {
                 file: identity.0,
-                folder: (identity.1 .0 + 1, identity.1 .1),
+                folder: (identity.1.0 + 1, identity.1.1),
                 missing: false,
             },
         );

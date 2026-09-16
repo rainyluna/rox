@@ -515,46 +515,48 @@ fn analyze_batch(
         .min(batch.len().max(1));
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                if !progress.keep_going() {
-                    break;
-                }
-                let Some(item) = batch.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
-                    break;
-                };
-                *progress.current.lock().unwrap() = item.path.clone();
-                // The file's own tag first: a hit is a description this
-                // library already paid for, and taking it skips the decode
-                // entirely. Nothing is written back on a hit, since what
-                // would be written is what was just read.
-                if let Some(vector) = recover(extractor, model, item) {
-                    out.lock().unwrap().push((item.id, vector));
-                    progress.done.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                match extractor.describe(Path::new(&item.path), item.duration_ms) {
-                    Ok(vector) => {
-                        if tags_this_track(save, item) {
-                            let path = PathBuf::from(&item.path);
-                            match writer::commit_embedding(&path, model, &vector) {
-                                Ok(()) => tagged.lock().unwrap().push(path),
-                                // The vector is good and the row below takes
-                                // it either way, so a file that wouldn't take
-                                // a tag costs its tag and nothing else. Not
-                                // counted as a failure: the track is
-                                // described, which is what the readout is
-                                // counting.
-                                Err(e) => log::warn!("acoustic: tagging {}: {e}", item.path),
-                            }
-                        }
+            scope.spawn(|| {
+                loop {
+                    if !progress.keep_going() {
+                        break;
+                    }
+                    let Some(item) = batch.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    *progress.current.lock().unwrap() = item.path.clone();
+                    // The file's own tag first: a hit is a description this
+                    // library already paid for, and taking it skips the decode
+                    // entirely. Nothing is written back on a hit, since what
+                    // would be written is what was just read.
+                    if let Some(vector) = recover(extractor, model, item) {
                         out.lock().unwrap().push((item.id, vector));
+                        progress.done.fetch_add(1, Ordering::Relaxed);
+                        continue;
                     }
-                    Err(e) => {
-                        log::warn!("acoustic: {}: {e}", item.path);
-                        progress.failed.fetch_add(1, Ordering::Relaxed);
+                    match extractor.describe(Path::new(&item.path), item.duration_ms) {
+                        Ok(vector) => {
+                            if tags_this_track(save, item) {
+                                let path = PathBuf::from(&item.path);
+                                match writer::commit_embedding(&path, model, &vector) {
+                                    Ok(()) => tagged.lock().unwrap().push(path),
+                                    // The vector is good and the row below takes
+                                    // it either way, so a file that wouldn't take
+                                    // a tag costs its tag and nothing else. Not
+                                    // counted as a failure: the track is
+                                    // described, which is what the readout is
+                                    // counting.
+                                    Err(e) => log::warn!("acoustic: tagging {}: {e}", item.path),
+                                }
+                            }
+                            out.lock().unwrap().push((item.id, vector));
+                        }
+                        Err(e) => {
+                            log::warn!("acoustic: {}: {e}", item.path);
+                            progress.failed.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+                    progress.done.fetch_add(1, Ordering::Relaxed);
                 }
-                progress.done.fetch_add(1, Ordering::Relaxed);
             });
         }
     });

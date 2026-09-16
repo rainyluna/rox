@@ -75,6 +75,14 @@ What stays out of the look is what stayed out of a bundle already: the theme pic
 app font size, and the icon pack. Theme and font size are per-user choices a shared look
 has no business moving, and an icon pack names a folder on one machine.
 
+**Amended 2026-09-15:** the icon pack is gone, and its setting with it. A pack was a
+folder of SVGs shadowing the built-in names, it only took effect on the next launch, and
+nothing suggested anyone had built one. The folder-on-one-machine reasoning above stays as
+the record of why it sat outside the look while it existed. An old `settings.json` that
+still carries `icon_pack` loads as before and drops the key on its next write, and the
+`icons/` folder under the data dir is left alone: anyone who did make a pack keeps the
+files.
+
 Migration reads every piece out of the pre-split file's flat map. Each state's fields
 kept their names through the move, so three of the four deserialize straight out of it
 with no field list to keep in sync; the look needs its own pass only because its

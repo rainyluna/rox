@@ -211,13 +211,12 @@ pub fn thumbnail(conn: &Mutex<Connection>, path: &Path) -> Option<Vec<u8>> {
             // in another folder) skips the decode and re-encode whole.
             let pooled: Option<Vec<u8>> = {
                 let conn = conn.lock().unwrap();
-                let hit = conn
-                    .prepare_cached("SELECT image FROM images WHERE hash = ?1")
+
+                conn.prepare_cached("SELECT image FROM images WHERE hash = ?1")
                     .ok()?
                     .query_row([hash], |r| r.get(0))
                     .optional()
-                    .ok()?;
-                hit
+                    .ok()?
             };
             let thumb = match pooled {
                 Some(image) => image,

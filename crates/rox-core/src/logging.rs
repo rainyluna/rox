@@ -110,10 +110,10 @@ impl Log for Logger {
         let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
         let formatted = format!("{} {:>5} {}\n", line.time, line.level, line.message);
         let mut wrote = 0u64;
-        if let Some(file) = sink.file.as_mut() {
-            if file.write_all(formatted.as_bytes()).is_ok() {
-                wrote = formatted.len() as u64;
-            }
+        if let Some(file) = sink.file.as_mut()
+            && file.write_all(formatted.as_bytes()).is_ok()
+        {
+            wrote = formatted.len() as u64;
         }
         sink.bytes += wrote;
         if sink.bytes >= FILE_CAP {

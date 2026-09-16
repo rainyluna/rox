@@ -8,15 +8,15 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, Div, ElementId, FocusHandle, Global,
-    Interactivity, KeyDownEvent, MouseButton, Pixels, ScrollHandle, SharedString, Stateful,
-    StyleRefinement, Window,
+    AnyElement, App, Context, Div, ElementId, FocusHandle, Global, Interactivity, KeyDownEvent,
+    MouseButton, Pixels, ScrollHandle, SharedString, Stateful, StyleRefinement, Window, div,
+    prelude::*, px, svg,
 };
-use gpui_component::scroll::Scrollbar;
 use gpui_component::Selectable;
+use gpui_component::scroll::Scrollbar;
 
 use rox_design::assets::icons;
-use rox_design::palette::{self, Side, Sides, ROLES};
+use rox_design::palette::{self, ROLES, Side, Sides};
 use rox_design::tokens;
 
 /// A control was pressed. The pointer and the keyboard both arrive here,
@@ -473,11 +473,7 @@ impl PageBody {
 
     /// Chain conditionally, gpui's own `when` shape.
     pub fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self {
-        if condition {
-            then(self)
-        } else {
-            self
-        }
+        if condition { then(self) } else { self }
     }
 
     /// How many rows the page kept; zero drops it from the results stack
@@ -628,11 +624,7 @@ impl Rows<'_> {
 
     /// Chain conditionally, gpui's own `when` shape.
     pub fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self {
-        if condition {
-            then(self)
-        } else {
-            self
-        }
+        if condition { then(self) } else { self }
     }
 
     /// [`Rows::when`] over an option, for the row that only exists while
@@ -1622,7 +1614,7 @@ pub fn role_grid(columns: usize, mut cell: impl FnMut(usize) -> AnyElement) -> D
 
 #[cfg(test)]
 mod tests {
-    use super::{ceiling, span, Query, OVER};
+    use super::{OVER, Query, ceiling, span};
 
     /// Every term must appear somewhere, any field counts, case folded.
     #[test]

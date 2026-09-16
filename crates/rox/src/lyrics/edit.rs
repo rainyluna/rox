@@ -21,8 +21,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    actions, div, prelude::*, px, size, AnyElement, App, Bounds, Context, Div, Entity, Focusable,
-    Global, KeyBinding, KeyDownEvent, SharedString, Subscription, Window, WindowHandle,
+    AnyElement, App, Bounds, Context, Div, Entity, Focusable, Global, KeyBinding, KeyDownEvent,
+    SharedString, Subscription, Window, WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::{Root, Sizable};
@@ -30,12 +30,12 @@ use gpui_component::{Root, Sizable};
 use rox_library::cue::TrackKey;
 use rox_library::lyrics::{self, Source};
 
-use crate::matching::{open_or_focus, WindowRegistry};
+use crate::matching::{WindowRegistry, open_or_focus};
 use rox_core::settings::lyrics_dir;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{self as settings_ui, icon_button, kbd_line, section, Seg};
+use rox_panel_kit::ui::{self as settings_ui, Seg, icon_button, kbd_line, section};
 use rox_panels::lyrics::StampLine;
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::player::fmt_time;

@@ -672,7 +672,7 @@ pub fn count_between(conn: &Connection, since: i64, until: i64) -> rusqlite::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{store, TrackRow};
+    use crate::{TrackRow, store};
 
     fn track(path: &str, title: &str, artist: &str, album: &str, genre: &str) -> TrackRow {
         TrackRow {

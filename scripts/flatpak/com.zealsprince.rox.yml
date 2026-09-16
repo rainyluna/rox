@@ -1,0 +1,191 @@
+# The Flathub build of rox. Assembles rox offline from pinned sources the
+# same way flake.nix and the vendor scripts do for the other channels, then
+# bundles a static ffmpeg so Convert works out of the box.
+#
+# What it mirrors and where the pins are duplicated from:
+# - gpui and gpui-component are the crates.io tarballs with patches/<crate>
+#   applied, the table in scripts/vendor-gpui.sh and flake.nix (vendoredCrate).
+# - libprojectM is the commit scripts/vendor-projectm.sh and flake.nix pin,
+#   submodule included, with patches/projectm on top.
+# Bump all three places together.
+#
+# Two files beside this one are generated, never committed (see .gitignore):
+# cargo-sources.json, the crate list flatpak-cargo-generator derives from
+# Cargo.lock, and rox.metainfo.xml, the tree's metainfo with its release
+# history filled in by scripts/metainfo-releases.sh. The workflow
+# (.github/workflows/flatpak.yml) produces both, then rewrites the release
+# tarball url and sha256 below for the version it's building. As committed
+# the tarball points at the newest published tag, so the file builds as is.
+
+app-id: com.zealsprince.rox
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: rox
+
+# The tree keeps the bare names (rox.desktop, rox.svg, rox.metainfo.xml) so
+# the deb, the AUR package, nix and the tarball stay on what they install
+# today. flatpak-builder renames these to the app id at cleanup and rewrites
+# Icon=, <id> and <launchable> to match.
+rename-desktop-file: rox.desktop
+rename-icon: rox
+rename-appdata-file: rox.metainfo.xml
+
+finish-args:
+  # Wayland first, X11 as the fallback; ipc is what the X11 side needs.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # /dev/snd for exclusive output. Strawberry and Picard ship on Flathub with
+  # the same grant.
+  - --device=all
+  - --socket=pulseaudio
+  # Scrobbling, lyrics, MusicBrainz, AcoustID, the update check.
+  - --share=network
+  # The Strawberry set: the music folder and mounted drives. A library
+  # anywhere else comes back through the portal, and the Library page then
+  # shows the override command that widens this. No --filesystem=host: the
+  # linter rejects it without an exception PR.
+  - --filesystem=xdg-music
+  - --filesystem=/mnt
+  - --filesystem=/media
+  - --filesystem=/run/media
+  # MPRIS registers as org.mpris.MediaPlayer2.rox.instance<pid>
+  # (media_controls.rs), and the default grant only covers
+  # org.mpris.MediaPlayer2.$FLATPAK_ID, so the wildcard is required.
+  - --own-name=org.mpris.MediaPlayer2.rox.*
+  # The tray icon is ksni, which registers with the StatusNotifierWatcher.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Discord rich presence over its IPC socket: the bare one, plus the paths
+  # the Flatpak Discord and Vesktop expose. Best-effort, as it is for every
+  # Discord RPC Flatpak: a socket that isn't there at launch stays invisible
+  # for that run.
+  - --filesystem=xdg-run/discord-ipc-0
+  - --filesystem=xdg-run/app/com.discordapp.Discord:create
+  - --filesystem=xdg-run/app/dev.vencord.Vesktop:create
+
+modules:
+  # ffmpeg's mp3 encoder. The runtime carries ogg, vorbis and opus (they
+  # come in with GStreamer) but nothing encodes mp3, so lame is built here.
+  - name: lame
+    buildsystem: autotools
+    config-opts:
+      - --disable-frontend
+      - --enable-nasm
+    cleanup:
+      - /include
+      - /lib/*.a
+      - /lib/*.la
+      - /share
+    sources:
+      - type: archive
+        url: https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz
+        sha256: ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+
+  # Encoders are cut down to what Convert offers. Decoders, demuxers and
+  # muxers stay at their defaults: the library holds every format
+  # rox_library::scanner::EXTENSIONS lists and ffmpeg has to read them all.
+  # ffprobe is only used by tests. If configure ever fails to find opus or
+  # vorbis, the fallback is to build them as modules ahead of this one
+  # (libogg first); the pins for that are in the packaging contract.
+  - name: ffmpeg
+    buildsystem: autotools
+    config-opts:
+      - --prefix=/app
+      - --disable-shared
+      - --enable-static
+      - --disable-autodetect
+      - --disable-doc
+      - --disable-ffplay
+      - --disable-ffprobe
+      - --disable-network
+      - --disable-devices
+      - --disable-hwaccels
+      - --disable-encoders
+      - --enable-encoder=flac,libmp3lame,libopus,libvorbis,pcm_s16le,pcm_s24le,pcm_f32le
+      - --enable-libmp3lame
+      - --enable-libopus
+      - --enable-libvorbis
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /lib/*.a
+      - /share/ffmpeg
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+        sha256: cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
+
+  - name: rox
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        # Where cargo-sources.json unpacks the crates; the module name is
+        # part of the path, so renaming this module means changing it too.
+        CARGO_HOME: /run/build/rox/cargo
+        # Service identities crates/rox-net/build.rs bakes in (see
+        # .env.template). Already public: the binary carries them. The
+        # Last.fm pair and the AcoustID key are minted for the Flatpak
+        # channel so they revoke independently of nix and the release
+        # workflow; the Discord app id is shared across channels and public
+        # by design.
+        LASTFM_API_KEY: 'b9f5cc5f6c69e70419ba5f25ab010ede'
+        LASTFM_API_SECRET: '7e64edfa196c138979377e3033ccc248'
+        DISCORD_APPLICATION_ID: '1531533372051030036'
+        ACOUSTID_CLIENT_KEY: 'TqRkflO8Ev'
+    build-commands:
+      # The patch sets come from the tarball's own patches/ tree and go on
+      # in byte order (LC_ALL=C), later ones diffing against earlier ones'
+      # output, no fuzz: the rules scripts/vendor-gpui.sh spells out. The
+      # sources below have already put the pristine trees under vendor/.
+      - |
+        export LC_ALL=C
+        for name in gpui gpui-component projectm; do
+          for p in patches/$name/*.patch; do
+            patch -p1 -F0 -d "vendor/$name" --no-backup-if-mismatch < "$p"
+          done
+        done
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release --package rox --package rox-mcp
+      - install -Dm755 target/release/rox /app/bin/rox
+      - install -Dm755 target/release/rox-mcp /app/bin/rox-mcp
+      - install -Dm644 crates/rox/assets/app/rox.desktop /app/share/applications/rox.desktop
+      - install -Dm644 crates/rox/assets/app/rox-music.svg /app/share/icons/hicolor/scalable/apps/rox.svg
+      # The filled copy beside this manifest, not the tarball's, which still
+      # carries the marker where the release history goes.
+      - install -Dm644 rox.metainfo.xml /app/share/metainfo/rox.metainfo.xml
+    sources:
+      # The workflow rewrites these two lines for the version it builds and
+      # relies on the sha256 sitting directly under the url.
+      - type: archive
+        url: https://github.com/zealsprince/rox/archive/refs/tags/v1.27.0.tar.gz
+        sha256: 92bb101c2fb5ac490d14dc34d48b8dea50378928922eda18f42a1b5259d37c5b
+      # Every registry crate in Cargo.lock. gpui and gpui-component aren't in
+      # it: the lock carries them as path deps with no source, which is why
+      # the two tarballs below are fetched here.
+      - cargo-sources.json
+      - type: archive
+        url: https://static.crates.io/crates/gpui/gpui-0.2.2.crate
+        sha256: 979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707
+        archive-type: tar-gzip
+        strip-components: 1
+        dest: vendor/gpui
+      - type: archive
+        url: https://static.crates.io/crates/gpui-component/gpui-component-0.5.1.crate
+        sha256: d021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a
+        archive-type: tar-gzip
+        strip-components: 1
+        dest: vendor/gpui-component
+      # Submodules on: vendor/projectm-eval is what the build links when
+      # ENABLE_SYSTEM_PROJECTM_EVAL is off, and an empty directory there is a
+      # link error a long way downstream.
+      - type: git
+        url: https://github.com/projectM-visualizer/projectm.git
+        commit: 88f23c76743a38c6d8456a8c354c62186270f661
+        dest: vendor/projectm
+      - type: file
+        path: rox.metainfo.xml
+        dest-filename: rox.metainfo.xml

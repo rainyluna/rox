@@ -23,7 +23,7 @@
 use std::io::{BufRead as _, Write as _};
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use rox_ipc::client::Client;
 
@@ -131,10 +131,8 @@ fn initialize(params: &Value) -> Value {
 /// leaves them out.
 fn tools(dev: bool) -> Value {
     let mut tools = base_tools();
-    if dev {
-        if let (Value::Array(all), Value::Array(extra)) = (&mut tools, dev_tools()) {
-            all.extend(extra);
-        }
+    if dev && let (Value::Array(all), Value::Array(extra)) = (&mut tools, dev_tools()) {
+        all.extend(extra);
     }
     tools
 }
@@ -420,7 +418,7 @@ fn call(rox: &mut Option<Client>, socket: &std::path::Path, params: &Value, dev:
             _ => {
                 return refusal(
                     "transport takes an action: toggle, play, pause, next, prev, or stop",
-                )
+                );
             }
         },
         "ab_repeat" => match args.get("action").and_then(Value::as_str) {

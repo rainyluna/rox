@@ -1,0 +1,11 @@
+#!/bin/sh
+# Entry point of the rox AppImage. The runtime mounts the squashfs and runs
+# this in place of the binary; scripts/appimage/build.sh puts it at the
+# AppDir root. `--mcp` is the one argument it eats: it swaps in rox-mcp so
+# one .AppImage path serves both the player and the MCP config snippet.
+here=$(dirname "$(readlink -f "$0")")
+if [ "$1" = "--mcp" ]; then
+    shift
+    exec "$here/usr/bin/rox-mcp" "$@"
+fi
+exec "$here/usr/bin/rox" "$@"

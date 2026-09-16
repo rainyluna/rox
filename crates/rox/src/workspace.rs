@@ -8,27 +8,27 @@
 //! playback's sake.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, canvas, deferred, div, overlay_phase, prelude::*, px, svg, AnyElement,
-    AnyWindowHandle, App, Axis, Bounds, Context, DismissEvent, Div, Entity, ExternalPaths,
-    FocusHandle, Focusable as _, FontFeatures, Global, KeyDownEvent, Modifiers,
+    AnyElement, AnyWindowHandle, App, Axis, Bounds, Context, DismissEvent, Div, Entity,
+    ExternalPaths, FocusHandle, Focusable as _, FontFeatures, Global, KeyDownEvent, Modifiers,
     ModifiersChangedEvent, MouseButton, PathPromptOptions, Pixels, Point, ScrollHandle,
-    SharedString, Subscription, Task, WeakEntity, Window, WindowBounds,
+    SharedString, Subscription, Task, WeakEntity, Window, WindowBounds, actions, canvas, deferred,
+    div, overlay_phase, prelude::*, px, svg,
 };
 use rox_dock::{
-    register_panel, DockArea, DockAreaState, DockEvent, DockItem, Panel as _, PanelInfo, PanelView,
-    StackPanel, TabPanel, ToggleZoom,
+    DockArea, DockAreaState, DockEvent, DockItem, Panel as _, PanelInfo, PanelView, StackPanel,
+    TabPanel, ToggleZoom, register_panel,
 };
 use rox_library::cue::TrackKey;
 
 use gpui::rgba;
+use gpui_component::Icon;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;
-use gpui_component::Icon;
 
 use crate::composite;
 use crate::goto_dialog::GoTo;
@@ -36,6 +36,7 @@ use crate::integrations::media_controls::MediaSession;
 use crate::integrations::tray;
 use crate::panel_catalog::{self as catalog, PanelDef, PanelPlacement, PanelSection};
 use crate::panel_presets;
+use crate::panels::controls::ControlsPanel;
 use crate::panels::drawer::DrawerPanel;
 use crate::panels::group::GroupPanel;
 use crate::panels::menu::{MenuConfig, MenuPanel};
@@ -47,15 +48,15 @@ use crate::panels::window_controls::{WindowControlsConfig, WindowControlsPanel};
 use crate::pass_prompt;
 use crate::quick_play::QuickPlay;
 use rox_core::settings::{
-    self, LastTrack, LayoutEdit, LayoutSize, NamedLayout, PostShaderConfig, QueueState,
-    QueuedTrack, Settings, WindowState,
+    self, GainModeSetting, LastTrack, LayoutEdit, LayoutSize, NamedLayout, PostShaderConfig,
+    QueueState, QueuedTrack, Settings, ShuffleMode, WindowState,
 };
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, TabHosts};
 use rox_panel_api::query::shared_query::SharedQuery;
 use rox_panel_api::track_ui::track_drag::PlayDrag;
-use rox_panel_kit::ui::{chord, kbd_line, Seg};
+use rox_panel_kit::ui::{Seg, chord, kbd_line};
 use rox_panels::art::{ArtConfig, ArtPanel};
 use rox_panels::artist_grid::{ArtistGridConfig, ArtistGridPanel};
 use rox_panels::biography::BiographyPanel;
@@ -121,7 +122,7 @@ const ALT_DOUBLE_TAP: Duration = Duration::from_millis(500);
 // callers (the tray, the taskbar, the tasks/EQ/signals/console windows, the
 // single-instance guard) need.
 use rox_panel_api::windows::OpenWorkspace;
-use rox_panel_api::windows::{note_activated, WorkspaceWindows};
+use rox_panel_api::windows::{WorkspaceWindows, note_activated};
 
 /// The workspace behind a registry entry, or None once its entity has
 /// gone. The registry stores it type-erased so nothing below the binary
@@ -834,19 +835,19 @@ pub(crate) fn close_workspace_window(
     // open; hand the service to a survivor so the media keys keep working.
     // Each window's service is bound to its own player, so the survivor
     // registers anew rather than inheriting this one.
-    if had_media && !last {
-        if let Some((handle, ws)) = cx
+    if had_media
+        && !last
+        && let Some((handle, ws)) = cx
             .default_global::<WorkspaceWindows>()
             .open
             .first()
             .map(|w| (w.handle, typed_workspace(&w.workspace)))
-        {
-            let _ = handle.update(cx, |_, window, cx| {
-                if let Some(ws) = ws {
-                    ws.update(cx, |this, cx| this.install_media(window, cx));
-                }
-            });
-        }
+    {
+        let _ = handle.update(cx, |_, window, cx| {
+            if let Some(ws) = ws {
+                ws.update(cx, |this, cx| this.install_media(window, cx));
+            }
+        });
     }
     // Closing the last workspace window quits; without this, a settings or
     // popout window left open keeps the app running with the menubar (and
@@ -1219,7 +1220,29 @@ actions!(
         ToggleResizeLock,
         ToggleArtTheming,
         ToggleTheme,
-        ClosePanelAction
+        ClosePanelAction,
+        ToggleContinuation,
+        ToggleCrossfade,
+        ToggleCrossfadeAlbums,
+        SleepOff,
+        PlaySimilar,
+        ClearQueue,
+        AbClear,
+        CycleShuffleMode,
+        ToggleEq,
+        FlattenEq,
+        ToggleExclusiveOutput,
+        CycleReplayGainMode,
+        ToggleFavourite,
+        AbortScan,
+        ToggleSeams,
+        ToggleReadings,
+        ToggleMini,
+        SaveLayout,
+        SaveWorkspace,
+        ReportIssue,
+        OpenDiscussions,
+        OpenChat
     ]
 );
 
@@ -1246,6 +1269,54 @@ pub fn init(cx: &mut App) {
             ws.state
                 .player
                 .update(cx, |player, _| player.toggle_pause());
+        });
+    });
+    // The seven below are bound Global but were only ever handled on the
+    // workspace root's own div, so a Controls button in a popped-out panel
+    // window dispatched into nothing: that window has no workspace in its
+    // focus path. Each gets the fallback its neighbours already have. No
+    // double fire when a workspace window is focused: gpui clears
+    // `propagate_event` before every bubble-phase element listener and only
+    // reaches the global listeners if the element path left it set
+    // (`vendor/gpui/src/window.rs`, `dispatch_action_on_node`), and
+    // `App::on_action` registers Bubble-only.
+    cx.on_action(|_: &SeekBackward, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, _| player.seek_by(-5.0));
+        });
+    });
+
+    cx.on_action(|_: &SeekForward, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, _| player.seek_by(5.0));
+        });
+    });
+
+    cx.on_action(|_: &StepBackward, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.read(cx).step_by(true);
+        });
+    });
+
+    cx.on_action(|_: &StepForward, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.read(cx).step_by(false);
+        });
+    });
+
+    cx.on_action(|_: &OpenGoTo, cx| {
+        with_front_workspace(cx, |ws, window, cx| ws.toggle_goto(window, cx));
+    });
+
+    cx.on_action(|_: &OpenQuickPlay, cx| {
+        with_front_workspace(cx, |ws, window, cx| ws.toggle_quick_play(window, cx));
+    });
+
+    cx.on_action(|_: &FocusSearch, cx| {
+        with_front_workspace(cx, |ws, window, cx| {
+            ws.dock.update(cx, |dock, cx| {
+                dock.focus_panel_named("search", window, cx);
+            });
         });
     });
     cx.on_action(|_: &OpenSettings, cx| {
@@ -1439,6 +1510,155 @@ pub fn init(cx: &mut App) {
                 .update(cx, |player, cx| player.toggle_stop_after(cx));
         });
     });
+
+    // Continuation's own switch, stop-after's neighbour on the strip: off, or
+    // back on in whatever strategy it was last using.
+    cx.on_action(|_: &ToggleContinuation, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state
+                .player
+                .update(cx, |player, cx| player.toggle_continuation(cx));
+        });
+    });
+
+    // Cancel a running sleep timer. Only the Off row of that menu is here:
+    // the other four carry a length, and a command has nowhere to put one.
+    cx.on_action(|_: &SleepOff, cx| run_menu_action(MenuAction::Sleep(SleepPick::Off), cx));
+
+    // Empty the up-next queue, the queue panel's own clear. The playing track
+    // and the context around it stay; only the hand-picked entries go.
+    cx.on_action(|_: &ClearQueue, cx| {
+        with_front_workspace(cx, |ws, _, cx| ws.state.player.read(cx).clear_queue());
+    });
+
+    // The way out of an A-B section without stepping the cycle round to its
+    // third press.
+    cx.on_action(|_: &AbClear, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, cx| player.ab_clear(cx));
+        });
+    });
+
+    // The draw button's other half. Gated where the button's hold menu is
+    // gated: with nothing described there are no vectors to draw by. The
+    // button falls back to a random pull there, which a command named Play
+    // Similar has no business doing, so this one stays put instead.
+    cx.on_action(|_: &PlaySimilar, cx| {
+        if !settings::similarity_ready() {
+            return;
+        }
+
+        with_front_workspace(cx, |ws, _, cx| {
+            let library = ws.state.library.clone();
+            ws.state
+                .player
+                .update(cx, |player, cx| player.play_similar(&library, cx));
+        });
+    });
+
+    // Step the order shuffle sorts by. Same gate as the draw: the shuffle
+    // button drops its menu entirely while Similar has nothing to sort by,
+    // and a cycle with one reachable mode is a cycle with nowhere to go.
+    cx.on_action(|_: &CycleShuffleMode, cx| {
+        if !settings::similarity_ready() {
+            return;
+        }
+
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, cx| {
+                let modes = ShuffleMode::ALL;
+                let at = modes
+                    .iter()
+                    .position(|mode| *mode == player.shuffle_mode())
+                    .unwrap_or(0);
+                player.set_shuffle_mode(modes[(at + 1) % modes.len()], cx);
+            });
+        });
+    });
+
+    // The crossfade pair, the transport button's press and the switch behind
+    // its hold: off and back on at its last length, and whether the fade
+    // takes album-contiguous boundaries too.
+    cx.on_action(|_: &ToggleCrossfade, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state
+                .player
+                .update(cx, |player, cx| player.toggle_crossfade(cx));
+        });
+    });
+
+    cx.on_action(|_: &ToggleCrossfadeAlbums, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, cx| {
+                let on = !player.crossfade_albums();
+                player.set_crossfade_albums(on, cx);
+            });
+        });
+    });
+
+    // Step the levelling rule the engine reads (ADR 19), in the order the
+    // Audio page lists it.
+    cx.on_action(|_: &CycleReplayGainMode, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, cx| {
+                let next = match player.replay_gain().mode {
+                    GainModeSetting::Off => GainModeSetting::Track,
+                    GainModeSetting::Track => GainModeSetting::Album,
+                    GainModeSetting::Album => GainModeSetting::Off,
+                };
+                player.set_replay_gain_mode(next, cx);
+            });
+        });
+    });
+
+    // Claim the device for rox alone, or give it back. The running session
+    // rebuilds against the other backend either way, so this is a heavier
+    // press than it looks.
+    cx.on_action(|_: &ToggleExclusiveOutput, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, cx| {
+                let on = !player.exclusive_output();
+                player.set_exclusive_output(on, cx);
+            });
+        });
+    });
+
+    // The equalizer's two buttons. App-wide like the theme flip, since the
+    // bands are one set for the whole app rather than a window's.
+    cx.on_action(|_: &ToggleEq, cx| {
+        rox_services::player::set_eq_enabled(!rox_services::player::eq_enabled(), cx);
+    });
+
+    cx.on_action(|_: &FlattenEq, cx| rox_services::player::flatten_eq(cx));
+
+    // The transport strip's heart, on the playing track. Nothing playing, or
+    // a file the library doesn't hold, has nothing to mark.
+    cx.on_action(|_: &ToggleFavourite, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            let Some(key) = ws.state.player.read(cx).now_playing().map(|now| now.key) else {
+                return;
+            };
+
+            ws.state.library.update(cx, |library, cx| {
+                let Some(id) = library.id_for_key(&key) else {
+                    return;
+                };
+
+                let on = !library.is_favourite(id);
+                library.set_favourites(&[id], on, cx);
+            });
+        });
+    });
+
+    // Stop a running scan at the next file. What it already indexed stays,
+    // and the projection reload still follows.
+    cx.on_action(|_: &AbortScan, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state
+                .library
+                .update(cx, |library, cx| library.abort_scan(cx));
+        });
+    });
     cx.on_action(|_: &VolumeUp, cx| nudge_volume(VOLUME_STEP, cx));
     cx.on_action(|_: &VolumeDown, cx| nudge_volume(-VOLUME_STEP, cx));
     // The menu rows that had no chord: each runs exactly what its row runs,
@@ -1470,6 +1690,47 @@ pub fn init(cx: &mut App) {
         settings::set_resize_lock(on, cx);
         Settings::update(move |s| s.resize_lock = on);
     });
+
+    // The seams and the reading names, the resize lock's shape: two settings
+    // page switches with no menu row, each running the live flag that
+    // repaints every window and the file write that keeps it.
+    cx.on_action(|_: &ToggleSeams, cx| {
+        let on = !settings::seams();
+        settings::set_seams(on, cx);
+        Settings::update(move |s| s.look.bundle.appearance.seams = on);
+    });
+
+    cx.on_action(|_: &ToggleReadings, cx| {
+        let on = !settings::show_readings();
+        settings::set_show_readings(on, cx);
+        Settings::update(move |s| s.show_readings = on);
+    });
+
+    // Swap between the mini layout and the primary. The panels holding this
+    // button defer out of their own update because the swap dumps the dock
+    // and the dump reads every panel; here the workspace is what's being
+    // updated, which is how the menubar's own row calls it.
+    cx.on_action(|_: &ToggleMini, cx| {
+        with_front_workspace(cx, |ws, window, cx| ws.toggle_mini(window, cx));
+    });
+
+    // The two save dialogs, the same name fields the menus' "Save as" rows
+    // open.
+    cx.on_action(|_: &SaveLayout, cx| {
+        with_front_workspace(cx, |ws, window, cx| ws.open_save_dialog(window, cx));
+    });
+
+    cx.on_action(|_: &SaveWorkspace, cx| {
+        with_front_workspace(cx, |ws, window, cx| {
+            ws.open_save_workspace_dialog(window, cx)
+        });
+    });
+
+    // The three links out to the project. Through their menu rows, so the
+    // URLs stay written down in one place.
+    cx.on_action(|_: &ReportIssue, cx| run_menu_action(MenuAction::ReportIssue, cx));
+    cx.on_action(|_: &OpenDiscussions, cx| run_menu_action(MenuAction::OpenDiscussions, cx));
+    cx.on_action(|_: &OpenChat, cx| run_menu_action(MenuAction::OpenChat, cx));
     // Closing the focused panel is the dock's own action, dispatched at the
     // tab group like Panel Settings. It's bound as our type because the
     // dock's is handled by whichever tab panel holds focus, and a chord
@@ -1588,6 +1849,7 @@ fn register_panels(state: &AppState, workspace: WeakEntity<Workspace>, cx: &mut 
     configured!("bookmarks", BookmarksPanel);
     configured_windowed!("queue", QueuePanel);
     configured!("queue widget", QueueWidgetPanel);
+    configured!("custom controls", ControlsPanel);
     configured!("eq widget", EqWidgetPanel);
     configured!("stats widget", StatsWidgetPanel);
     configured!("health widget", HealthWidgetPanel);
@@ -2514,6 +2776,7 @@ pub(crate) const MENUS: &[Menu] = &[
             MenuEntry::Panels(&catalog::CATALOGUE),
             MenuEntry::Panels(&catalog::DETAILS),
             MenuEntry::Panels(&catalog::VISUALIZERS),
+            MenuEntry::Panels(&catalog::WIDGETS),
             // Drawn only while the flag is on, the gate [`section_shows`]
             // applies for every menu that renders this table. It was
             // missing here entirely, so turning experimental features on
@@ -2638,6 +2901,10 @@ fn keymap_command(action: MenuAction) -> Option<&'static str> {
         MenuAction::CloseWindow => "close_window",
         MenuAction::Quit => "quit",
         MenuAction::TogglePostShader => "toggle_post_shader",
+        MenuAction::Sleep(SleepPick::Off) => "sleep_off",
+        MenuAction::ReportIssue => "report_issue",
+        MenuAction::OpenDiscussions => "open_discussions",
+        MenuAction::OpenChat => "open_chat",
         _ => return None,
     })
 }
@@ -3822,14 +4089,14 @@ impl Workspace {
         // back to the saved dump.
         let edited = settings.look.layout_edits.get(name).cloned();
         let mut applied = false;
-        if let Some(edit) = &edited {
-            if let Ok(dump) = serde_json::from_value::<DockAreaState>(edit.dump.clone()) {
-                applied = self.apply_layout(dump, window, cx);
-                // The working copy's own size wins when it has one; a copy
-                // from before sizes were stored keeps the preset's.
-                if applied && edit.size.is_some() {
-                    size = edit.size;
-                }
+        if let Some(edit) = &edited
+            && let Ok(dump) = serde_json::from_value::<DockAreaState>(edit.dump.clone())
+        {
+            applied = self.apply_layout(dump, window, cx);
+            // The working copy's own size wins when it has one; a copy
+            // from before sizes were stored keeps the preset's.
+            if applied && edit.size.is_some() {
+                size = edit.size;
             }
         }
         if !applied {
@@ -3850,12 +4117,11 @@ impl Workspace {
         // its resize still takes. A `--window-size` launch also pins the
         // frame: preset sizes stay stored, they just don't move the window
         // that session, so every look screenshots at the flag's one size.
-        if let Some(size) = size {
-            if !(cfg!(target_os = "macos") && window.is_fullscreen())
-                && crate::window_size_override().is_none()
-            {
-                resize_clamped(window, size);
-            }
+        if let Some(size) = size
+            && !(cfg!(target_os = "macos") && window.is_fullscreen())
+            && crate::window_size_override().is_none()
+        {
+            resize_clamped(window, size);
         }
         // A programmatic resize only shows on the next drawn frame, and gpui
         // stops pumping frames for a window that's idle and not focused.
@@ -4656,6 +4922,14 @@ impl Workspace {
     /// The backdrop dims without occluding, so a drop on a queue row still
     /// reaches the queue's own handler. An OS file drag skips the gate; it
     /// enters the window already committed.
+    ///
+    /// The third guard is the panels themselves. A panel that takes this
+    /// drag on its body ([`rox_dock::Panel::accepts_drop`]) would never see
+    /// it with a card sitting over it, so while the pointer is on one the
+    /// cards go inert: they still draw, faded, but register no occlusion and
+    /// no handlers, and the drop falls through to the panel. They stay drawn
+    /// rather than hidden so the strip doesn't blink in and out as the
+    /// pointer crosses from one panel to the next.
     fn drop_zones_overlay(
         &mut self,
         window: &Window,
@@ -4678,6 +4952,10 @@ impl Workspace {
         if !reveal.revealed {
             return None;
         }
+
+        // Asked once per frame rather than per card: it walks the dock tree.
+        let inert = self.dock.read(cx).accepts_drop_at(pointer, cx);
+
         Some(
             div()
                 .absolute()
@@ -4697,12 +4975,14 @@ impl Workspace {
                             rox_i18n::t!("workspace-drop-play-now"),
                             icons::PLAY,
                             true,
+                            inert,
                             cx,
                         ))
                         .child(self.drop_zone(
                             rox_i18n::t!("workspace-drop-add-queue"),
                             icons::LIST_MUSIC,
                             false,
+                            inert,
                             cx,
                         )),
                 )
@@ -4714,24 +4994,40 @@ impl Workspace {
     /// track and jumps to it; false appends it to the queue. Both accept a
     /// file from the OS and a track dragged from the library. Occluded so
     /// the drop is the card's alone and never also hits what it covers.
+    ///
+    /// `inert` says a panel under the card has claimed the drag. The card
+    /// then washes out and gives up its occlusion, its drag-over styling and
+    /// its handlers, leaving the release to the hitbox below it.
     fn drop_zone(
         &self,
         label: impl Into<SharedString>,
         icon: &'static str,
         play_now: bool,
+        inert: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let card = div()
             .flex_1()
             .h_full()
-            .occlude()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
             .gap(tokens::SPACE_SM)
             .rounded(tokens::RADIUS)
-            .border_2()
+            .border_2();
+
+        if inert {
+            return card
+                .border_color(palette::alpha(palette::border_light(), 0x55))
+                .bg(palette::alpha(palette::bg_menu_opaque(), 0x66))
+                .text_color(palette::text_faint())
+                .child(Icon::default().path(icon))
+                .child(div().text_lg().child(label.into()));
+        }
+
+        let card = card
+            .occlude()
             .border_color(palette::border_light())
             .bg(palette::bg_menu_opaque())
             .text_color(palette::text_muted())
@@ -4747,6 +5043,7 @@ impl Workspace {
                     .border_color(palette::accent())
                     .bg(palette::bg_control_hover_opaque())
             });
+
         if play_now {
             card.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.play_dropped(paths.paths().to_vec(), cx);
@@ -4888,15 +5185,18 @@ impl Workspace {
         // the root stack, above the transport row.
         let tabs = if self.center_tabs.read(cx).visible(cx) {
             self.center_tabs.clone()
-        } else if let Some(tabs) = self.state.tab_hosts.read(cx).last_live(cx) {
-            tabs
         } else {
-            let tabs_view: Arc<dyn PanelView> = Arc::new(self.center_tabs.clone());
-            let weak_dock = self.dock.downgrade();
-            self.stack.update(cx, |stack, cx| {
-                stack.insert_panel_before(tabs_view, 0, None, weak_dock, window, cx);
-            });
-            self.center_tabs.clone()
+            match self.state.tab_hosts.read(cx).last_live(cx) {
+                Some(tabs) => tabs,
+                _ => {
+                    let tabs_view: Arc<dyn PanelView> = Arc::new(self.center_tabs.clone());
+                    let weak_dock = self.dock.downgrade();
+                    self.stack.update(cx, |stack, cx| {
+                        stack.insert_panel_before(tabs_view, 0, None, weak_dock, window, cx);
+                    });
+                    self.center_tabs.clone()
+                }
+            }
         };
         tabs.update(cx, |tabs, cx| tabs.add_panel(panel, window, cx));
     }
@@ -5111,7 +5411,7 @@ impl Workspace {
     /// which way the next click goes. Built inline rather than through
     /// [`panel::icon_control`] because the swap needs the window the icon
     /// helper doesn't pass, and it reads like a menu button beside them.
-    fn mini_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn mini_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         self.mini_layout.as_ref()?;
         // The glyph says which way the click goes and the tip says it in
         // words, since two arrows pointing in and two pointing out are a
@@ -6247,8 +6547,8 @@ mod tests {
 #[cfg(test)]
 mod shader_feed_tests {
     use super::*;
-    use rox_viz::signal::Source;
     use rox_viz::AudioFeed;
+    use rox_viz::signal::Source;
 
     /// A hub with one band signal, ticked once so the engine has a slot
     /// to read. Silent: what's being checked here is which path fills the

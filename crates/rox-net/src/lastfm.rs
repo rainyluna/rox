@@ -172,11 +172,13 @@ mod tests {
         };
         // No code at all is the offline case: the request never reached
         // the service.
-        assert!(ApiError {
-            code: None,
-            message: "no connection".to_string(),
-        }
-        .retryable());
+        assert!(
+            ApiError {
+                code: None,
+                message: "no connection".to_string(),
+            }
+            .retryable()
+        );
         assert!(api(11).retryable(), "service offline");
         assert!(api(16).retryable(), "temporarily unavailable");
         assert!(api(29).retryable(), "rate limited");

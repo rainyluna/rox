@@ -11,8 +11,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, svg, uniform_list, App, Context, Entity, Focusable as _, MouseButton,
-    Pixels, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
+    App, Context, Entity, Focusable as _, MouseButton, Pixels, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, svg, uniform_list,
 };
 use gpui_component::input::{Enter, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_component::popover::Popover;
@@ -56,6 +56,11 @@ pub struct PickRow {
     /// English. Empty for rows whose label is all there is to type
     /// toward, the font list's case.
     pub terms: Vec<SharedString>,
+    /// An asset path drawn at the row's leading edge, if the row wants a
+    /// glyph. The icon picker's rows carry one so a name can be read
+    /// against the thing it names; the font and language lists leave it
+    /// None.
+    pub icon: Option<SharedString>,
 }
 
 /// A searchable dropdown over `rows`. `label` is what the closed field
@@ -63,17 +68,24 @@ pub struct PickRow {
 /// caller's because the caller knows whether they translate: the
 /// language picker passes `t!` copy, the font picker its literals until
 /// the settings pages extract.
+// `use<..>` and the named `A` for the same reason as the crate root's
+// `picker`: only a weak handle comes off `cx` here, so the element never
+// needs the borrow.
 #[allow(clippy::too_many_arguments)]
-pub fn search_picker<P: 'static>(
+pub fn search_picker<P, A>(
     id: &'static str,
     rows: Arc<Vec<PickRow>>,
     label: SharedString,
     current: Option<SharedString>,
     placeholder: SharedString,
     empty: SharedString,
-    apply: impl Fn(&mut P, Option<String>, &mut Context<P>) + 'static,
+    apply: A,
     cx: &mut Context<P>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<P, A>
+where
+    P: 'static,
+    A: Fn(&mut P, Option<String>, &mut Context<P>) + 'static,
+{
     let host = cx.entity().downgrade();
     SearchPicker {
         id,
@@ -307,7 +319,7 @@ impl RenderOnce for SearchPicker {
                                     let picked = row.value == current;
                                     let value = row.value.map(|value| value.to_string());
                                     let commit = commit.clone();
-                                    row_body(row.label, picked, ix == state.selected)
+                                    row_body(row.label, row.icon, picked, ix == state.selected)
                                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                             commit(value.clone(), window, cx)
                                         })
@@ -347,10 +359,15 @@ impl RenderOnce for SearchPicker {
                     })
                     .capture_action({
                         let search = search.clone();
-                        let commit = commit.clone();
-                        cx.listener(move |_, _: &Enter, window, cx| {
+                        let pick = pick.clone();
+                        // Not through `commit`: this listener already runs
+                        // inside the popover's own update, and `commit`
+                        // dismisses through `popover.update`, which would
+                        // nest and panic. Dismiss on `this` instead.
+                        cx.listener(move |this, _: &Enter, window, cx| {
                             if let Some(value) = search.read(cx).picked() {
-                                commit(value, window, cx);
+                                pick(value, cx);
+                                this.dismiss(window, cx);
                             }
                         })
                     })
@@ -377,11 +394,16 @@ impl RenderOnce for SearchPicker {
     }
 }
 
-/// One list row: the label flush left, a tick on the right edge of
-/// the one that's set, and the menu hover behind whichever the arrows or
-/// the pointer are on. The tick trails rather than leads so unpicked
-/// rows don't all get its indent.
-fn row_body(label: SharedString, picked: bool, selected: bool) -> gpui::Div {
+/// One list row: the row's glyph if it has one, the label flush left, a
+/// tick on the right edge of the one that's set, and the menu hover
+/// behind whichever the arrows or the pointer are on. The tick trails
+/// rather than leads so unpicked rows don't all get its indent.
+fn row_body(
+    label: SharedString,
+    icon: Option<SharedString>,
+    picked: bool,
+    selected: bool,
+) -> gpui::Div {
     div()
         .w_full()
         .h(ROW_H)
@@ -394,6 +416,10 @@ fn row_body(label: SharedString, picked: bool, selected: bool) -> gpui::Div {
         .cursor_pointer()
         .when(selected, |d| d.bg(palette::bg_menu_hover()))
         .hover(|d| d.bg(palette::bg_menu_hover()))
+        // Plain `Icon::default()`, the same size a panel settings menu
+        // item draws its glyph at, so a row here sits at menu scale
+        // rather than a size picked for this list alone.
+        .when_some(icon, |d, path| d.child(Icon::default().path(path)))
         .child(
             div()
                 .flex_1()

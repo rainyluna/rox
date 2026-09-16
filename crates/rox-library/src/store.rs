@@ -1662,12 +1662,15 @@ pub fn names_for(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<(String
     let mut stmt = conn.prepare_cached("SELECT artist, title FROM tracks WHERE id = ?1")?;
     let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
-        if let Ok((artist, title)) = stmt.query_row([id], |r| {
+        let row = stmt.query_row([id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        }) {
-            if !artist.is_empty() && !title.is_empty() {
-                out.push((artist, title));
-            }
+        });
+
+        if let Ok((artist, title)) = row
+            && !artist.is_empty()
+            && !title.is_empty()
+        {
+            out.push((artist, title));
         }
     }
     Ok(out)
@@ -3472,9 +3475,11 @@ mod tests {
             .unwrap(),
             1
         );
-        assert!(id_for_path(&conn, "/m/Artist/Album/1.mp3")
-            .unwrap()
-            .is_none());
+        assert!(
+            id_for_path(&conn, "/m/Artist/Album/1.mp3")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             id_for_path(&conn, "/m/Artist/Album/one.mp3").unwrap(),
             Some(file_id),

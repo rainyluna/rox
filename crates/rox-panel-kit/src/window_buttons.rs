@@ -3,7 +3,7 @@
 //! widget factory, so both callers get the same three buttons and only the
 //! close handler differs.
 
-use gpui::{div, prelude::*, px, rgb, App, Div, MouseButton, MouseDownEvent, Stateful, Window};
+use gpui::{App, Div, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px, rgb};
 use rox_design::assets::icons;
 
 use crate::Tip;

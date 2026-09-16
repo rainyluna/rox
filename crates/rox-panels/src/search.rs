@@ -8,8 +8,8 @@
 //! play launcher does.
 
 use gpui::{
-    div, prelude::*, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, SharedString,
-    Subscription, WeakEntity, Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    WeakEntity, Window, div, prelude::*,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};

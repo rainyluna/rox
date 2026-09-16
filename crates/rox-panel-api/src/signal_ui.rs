@@ -25,21 +25,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    canvas, div, point, prelude::*, px, size, svg, AnyElement, BorderStyle, Bounds, Context, Div,
-    Entity, Focusable as _, MouseButton, MouseDownEvent, Pixels, Rgba, SharedString, Subscription,
-    Window,
+    AnyElement, BorderStyle, Bounds, Context, Div, Entity, Focusable as _, MouseButton,
+    MouseDownEvent, Pixels, Rgba, SharedString, Subscription, Window, canvas, div, point,
+    prelude::*, px, size, svg,
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu as _, PopupMenuItem};
 use gpui_component::{Disableable as _, Icon, Sizable as _};
 
-use rox_viz::signal::{Route, Signal, SignalHub, Source, AGGREGATE_RATE_MAX};
+use rox_viz::signal::{AGGREGATE_RATE_MAX, Route, Signal, SignalHub, Source};
 
-use crate::panel::{self, setting_row, toggle, ScrubState, ValueEdit};
+use crate::panel::{self, ScrubState, ValueEdit, setting_row, toggle};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
-use rox_panel_kit::ui::{self as settings_ui, section, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 
 /// The frequency band a signal's tuning sliders pick between, and the
 /// smallest span they keep between their bounds: tight enough for a kick,
@@ -1307,46 +1307,44 @@ pub fn bindable_row<P: RouteHost>(
         .flex_col()
         .gap(tokens::SPACE_SM)
         .child(panel::setting_row(label, description, control));
-    if open {
-        if let Some(index) = bound {
-            let header = settings_ui::block_header(
-                div()
-                    .text_xs()
-                    .text_color(palette::text_muted())
-                    .child(rox_i18n::t!("route-header")),
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(tokens::SPACE_XS)
-                    .child(toggle(
-                        host.routes()[index].enabled,
-                        move |this: &mut P, on, cx| {
-                            if let Some(route) = this.routes_mut().get_mut(index) {
-                                route.enabled = on;
-                            }
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(settings_ui::icon_button(
-                        icons::TRASH,
-                        false,
-                        cx.listener(move |this: &mut P, _, _, cx| {
-                            this.signal_ui_mut().open_bind = None;
-                            remove_route(this, index, cx);
-                        }),
-                    )),
-            );
-            row = row.child(settings_ui::nested(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(tokens::SPACE_SM)
-                    .child(header)
-                    .child(route_tuning(host, index, cx)),
-            ));
-        }
+    if open && let Some(index) = bound {
+        let header = settings_ui::block_header(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(rox_i18n::t!("route-header")),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(tokens::SPACE_XS)
+                .child(toggle(
+                    host.routes()[index].enabled,
+                    move |this: &mut P, on, cx| {
+                        if let Some(route) = this.routes_mut().get_mut(index) {
+                            route.enabled = on;
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                ))
+                .child(settings_ui::icon_button(
+                    icons::TRASH,
+                    false,
+                    cx.listener(move |this: &mut P, _, _, cx| {
+                        this.signal_ui_mut().open_bind = None;
+                        remove_route(this, index, cx);
+                    }),
+                )),
+        );
+        row = row.child(settings_ui::nested(
+            div()
+                .flex()
+                .flex_col()
+                .gap(tokens::SPACE_SM)
+                .child(header)
+                .child(route_tuning(host, index, cx)),
+        ));
     }
     row
 }

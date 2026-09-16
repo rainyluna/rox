@@ -6,8 +6,8 @@
 //! it a slot at a time, and there's no cap.
 
 use gpui::{
-    canvas, div, prelude::*, px, relative, App, Axis, Context, Div, EventEmitter, FocusHandle,
-    Focusable, SharedString, WeakEntity, Window,
+    App, Axis, Context, Div, EventEmitter, FocusHandle, Focusable, SharedString, WeakEntity,
+    Window, canvas, div, prelude::*, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
@@ -249,78 +249,85 @@ impl GroupPanel {
         // Workspace settings page.
         let controls = if self.config.chrome.controls_hidden() {
             None
-        } else if let Some(child) = self.slots[ix].clone() {
-            let count = self.slots.len();
-            let stacked = self.config.stacked;
-            Some(composite::corner_controls().child(composite::slot_button(
-                ("group-slot", ix),
-                child,
-                self.state.clone(),
-                self.workspace.clone(),
-                move |this: &mut Self, panel, cx| this.set_slot(ix, Some(panel), cx),
-                move |this: &mut Self, cx| this.set_slot(ix, None, cx),
-                // A pair swaps whole from the group's own menu; a longer
-                // split reorders a slot at a time from here.
-                move |menu, weak| {
-                    if count <= 2 {
-                        return menu;
-                    }
-                    let (back_label, back_icon) = if stacked {
-                        (rox_i18n::t!("group-panel-move-up"), icons::ARROW_UP)
-                    } else {
-                        (rox_i18n::t!("composite-move-left"), icons::CHEVRON_LEFT)
-                    };
-                    let (fwd_label, fwd_icon) = if stacked {
-                        (rox_i18n::t!("group-panel-move-down"), icons::ARROW_DOWN)
-                    } else {
-                        (rox_i18n::t!("composite-move-right"), icons::CHEVRON_RIGHT)
-                    };
-                    let back = weak.clone();
-                    let forward = weak;
-                    menu.item(
-                        PopupMenuItem::new(back_label)
-                            .icon(Icon::default().path(back_icon))
-                            .disabled(ix == 0)
-                            .on_click(move |_, _, cx| {
-                                if let Some(this) = back.upgrade() {
-                                    this.update(cx, |this, cx| this.shift(ix, false, cx));
-                                }
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(fwd_label)
-                            .icon(Icon::default().path(fwd_icon))
-                            .disabled(ix + 1 >= count)
-                            .on_click(move |_, _, cx| {
-                                if let Some(this) = forward.upgrade() {
-                                    this.update(cx, |this, cx| this.shift(ix, true, cx));
-                                }
-                            }),
-                    )
-                    .separator()
-                },
-                cx,
-            )))
-        } else if self.slots.len() > 2 {
-            // An empty slot on a grown split can leave: the x drops the
-            // hole and hands its share back.
-            let weak = cx.entity().downgrade();
-            Some(
-                composite::corner_controls().child(
-                    Button::new(("group-drop", ix))
-                        .icon(Icon::default().path(icons::CLOSE))
-                        .small()
-                        .ghost()
-                        .tooltip(rox_i18n::t!("group-panel-remove-slot"))
-                        .on_click(move |_, _, cx| {
-                            if let Some(this) = weak.upgrade() {
-                                this.update(cx, |this, cx| this.remove_slot(ix, cx));
-                            }
-                        }),
-                ),
-            )
         } else {
-            None
+            match self.slots[ix].clone() {
+                Some(child) => {
+                    let count = self.slots.len();
+                    let stacked = self.config.stacked;
+                    Some(composite::corner_controls().child(composite::slot_button(
+                        ("group-slot", ix),
+                        child,
+                        self.state.clone(),
+                        self.workspace.clone(),
+                        move |this: &mut Self, panel, cx| this.set_slot(ix, Some(panel), cx),
+                        move |this: &mut Self, cx| this.set_slot(ix, None, cx),
+                        // A pair swaps whole from the group's own menu; a longer
+                        // split reorders a slot at a time from here.
+                        move |menu, weak| {
+                            if count <= 2 {
+                                return menu;
+                            }
+                            let (back_label, back_icon) = if stacked {
+                                (rox_i18n::t!("group-panel-move-up"), icons::ARROW_UP)
+                            } else {
+                                (rox_i18n::t!("composite-move-left"), icons::CHEVRON_LEFT)
+                            };
+                            let (fwd_label, fwd_icon) = if stacked {
+                                (rox_i18n::t!("group-panel-move-down"), icons::ARROW_DOWN)
+                            } else {
+                                (rox_i18n::t!("composite-move-right"), icons::CHEVRON_RIGHT)
+                            };
+                            let back = weak.clone();
+                            let forward = weak;
+                            menu.item(
+                                PopupMenuItem::new(back_label)
+                                    .icon(Icon::default().path(back_icon))
+                                    .disabled(ix == 0)
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(this) = back.upgrade() {
+                                            this.update(cx, |this, cx| this.shift(ix, false, cx));
+                                        }
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new(fwd_label)
+                                    .icon(Icon::default().path(fwd_icon))
+                                    .disabled(ix + 1 >= count)
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(this) = forward.upgrade() {
+                                            this.update(cx, |this, cx| this.shift(ix, true, cx));
+                                        }
+                                    }),
+                            )
+                            .separator()
+                        },
+                        cx,
+                    )))
+                }
+                _ => {
+                    if self.slots.len() > 2 {
+                        // An empty slot on a grown split can leave: the x drops the
+                        // hole and hands its share back.
+                        let weak = cx.entity().downgrade();
+                        Some(
+                            composite::corner_controls().child(
+                                Button::new(("group-drop", ix))
+                                    .icon(Icon::default().path(icons::CLOSE))
+                                    .small()
+                                    .ghost()
+                                    .tooltip(rox_i18n::t!("group-panel-remove-slot"))
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(this) = weak.upgrade() {
+                                            this.update(cx, |this, cx| this.remove_slot(ix, cx));
+                                        }
+                                    }),
+                            ),
+                        )
+                    } else {
+                        None
+                    }
+                }
+            }
         };
         let cell = div()
             .relative()

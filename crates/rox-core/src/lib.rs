@@ -6,6 +6,7 @@
 pub mod acoustic;
 pub mod continuation;
 pub mod fmt;
+pub mod install;
 pub mod logging;
 pub mod pace;
 pub mod settings;

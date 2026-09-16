@@ -7,7 +7,7 @@
 //! token earns its slot when two files must agree or a look-wide knob
 //! should turn in one line.
 
-use gpui::{px, Pixels};
+use gpui::{Pixels, px};
 
 // Motion.
 

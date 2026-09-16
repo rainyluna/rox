@@ -4,39 +4,11 @@
 //! everything else falling through to the bundled set.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
-use std::sync::RwLock;
 
 use gpui::{AssetSource, Result, SharedString};
 use rust_embed::RustEmbed;
 
 use crate::palette;
-
-/// The active icon pack's folder, or None for the built-in set. A pack is a
-/// flat folder of SVGs named like the built-in icons (play.svg, heart.svg);
-/// a file present there overrides that icon, a missing one falls through to
-/// our own embedded set and then the bundled widget set. Set at startup from
-/// settings and when the picker changes. Already-rendered icons keep their
-/// tiles until the app restarts, since gpui's sprite atlas keys on the path
-/// and only reads an icon's bytes on a cache miss.
-static ACTIVE_PACK: RwLock<Option<PathBuf>> = RwLock::new(None);
-
-/// Point the resolver at an icon pack folder, or None for the built-in set.
-/// The app's startup icon_packs module owns the name-to-folder mapping and
-/// calls this.
-pub fn set_active_pack(dir: Option<PathBuf>) {
-    *ACTIVE_PACK.write().unwrap() = dir;
-}
-
-/// The built-in bytes for an icon path, ours first then the bundled widget
-/// set, ignoring any active pack. Seeds a new pack folder with the current
-/// icons so an author starts from the real set, not a blank folder.
-pub fn builtin_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
-    if let Some(f) = Assets::get(path) {
-        return Some(f.data);
-    }
-    gpui_component_assets::Assets.load(path).ok().flatten()
-}
 
 /// Icon paths for gpui's `svg` element. Lucide icons, the same family the
 /// bundled widget icons come from, so the two sets match on screen.
@@ -47,6 +19,11 @@ pub mod icons {
     pub const SKIP_FORWARD: &str = "icons/skip-forward.svg";
     pub const REWIND: &str = "icons/rewind.svg";
     pub const FAST_FORWARD: &str = "icons/fast-forward.svg";
+    /// The step commands, one track's worth at a time. Rewind and fast
+    /// forward are spoken for by the press-and-hold scan, and the bar
+    /// against the triangle is the mark for a single step.
+    pub const STEP_BACK: &str = "icons/step-back.svg";
+    pub const STEP_FORWARD: &str = "icons/step-forward.svg";
     /// The timed nudges where no skip buttons are alongside to disambiguate:
     /// on their own, the double triangles read as track changes, and the
     /// circular arrow is the established mark for a jump by seconds.
@@ -54,8 +31,17 @@ pub mod icons {
     pub const SEEK_FORWARD: &str = "icons/rotate-cw.svg";
     pub const REPEAT: &str = "icons/repeat.svg";
     pub const REPEAT_1: &str = "icons/repeat-1.svg";
+    /// A-B repeat: the flag is the a-point planted and waiting for b, the
+    /// counter-clockwise iteration is the loop once both ends are set.
+    pub const FLAG: &str = "icons/flag.svg";
+    pub const ITERATION_CCW: &str = "icons/iteration-ccw.svg";
     pub const STOP: &str = "icons/square.svg";
     pub const SHUFFLE: &str = "icons/shuffle.svg";
+    /// Shuffle off: the queue in the order it was written, which is what
+    /// the numbered list draws.
+    pub const LIST_ORDERED: &str = "icons/list-ordered.svg";
+    /// The Milkdrop panel's mirror toggles, one per axis the frame can be
+    /// flipped on.
     pub const FLIP_HORIZONTAL: &str = "icons/flip-horizontal.svg";
     pub const FLIP_VERTICAL: &str = "icons/flip-vertical.svg";
     /// Continuation (ADR 17): a queue that doesn't end. The lemniscate reads
@@ -69,6 +55,11 @@ pub mod icons {
     pub const VOLUME_1: &str = "icons/volume-1.svg";
     pub const VOLUME_2: &str = "icons/volume-2.svg";
     pub const VOLUME_X: &str = "icons/volume-x.svg";
+    /// Exclusive output: rox holding the device on its own.
+    pub const HEADPHONES: &str = "icons/headphones.svg";
+    /// The text size commands, from the bundled widget set: the two A's
+    /// are the standing mark for type scale.
+    pub const A_LARGE_SMALL: &str = "icons/a-large-small.svg";
     pub const ALIGN_LEFT: &str = "icons/align-left.svg";
     pub const ALIGN_CENTER: &str = "icons/align-center.svg";
     pub const ALIGN_RIGHT: &str = "icons/align-right.svg";
@@ -78,6 +69,9 @@ pub mod icons {
     pub const POWER: &str = "icons/power.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
+    /// The fourth chevron, so a button can point any of the four ways the
+    /// other three already do. Bundled set, no file of ours needed.
+    pub const CHEVRON_UP: &str = "icons/chevron-up.svg";
     pub const DISC: &str = "icons/disc-3.svg";
     pub const LOCATE: &str = "icons/locate-fixed.svg";
     pub const MUSIC: &str = "icons/music.svg";
@@ -110,9 +104,15 @@ pub mod icons {
     pub const RADIO: &str = "icons/radio.svg";
     pub const DATABASE: &str = "icons/database.svg";
     pub const CLOCK: &str = "icons/clock.svg";
+    /// The sleep timer once it's armed, since a plain clock would read as
+    /// any of the other time surfaces.
+    pub const BED: &str = "icons/bed.svg";
     pub const CALENDAR: &str = "icons/calendar.svg";
     pub const TAG: &str = "icons/tag.svg";
     pub const IMAGE: &str = "icons/image.svg";
+    /// The backdrop preset picker: a look picked rather than a file
+    /// chosen, which is what separates it from the plain image entry.
+    pub const WAND_SPARKLES: &str = "icons/wand-sparkles.svg";
     /// The color grid's role link: an override following another app
     /// color instead of storing a literal.
     pub const LINK: &str = "icons/link.svg";
@@ -120,6 +120,10 @@ pub mod icons {
     pub const CONTRAST: &str = "icons/contrast.svg";
     pub const LAYOUT_DASHBOARD: &str = "icons/layout-dashboard.svg";
     pub const EYE: &str = "icons/eye.svg";
+    /// The hidden half of a visibility toggle, the menubar's above all:
+    /// a button that hides something wants the struck-through eye when
+    /// it's already hidden. Bundled set, no file of ours needed.
+    pub const EYE_OFF: &str = "icons/eye-off.svg";
     /// These two resolve from the bundled widget set, no file of ours
     /// needed.
     pub const CLOSE: &str = "icons/close.svg";
@@ -168,6 +172,8 @@ pub mod icons {
     /// the panel menu's experimental group. Both use the flask, so the two
     /// surfaces read as the same thing.
     pub const FLASK: &str = "icons/flask-conical.svg";
+    /// The console, from the bundled widget set: a prompt in a frame.
+    pub const SQUARE_TERMINAL: &str = "icons/square-terminal.svg";
     /// The settings sidebar's Keymap page, and the chord chips on it.
     pub const KEYBOARD: &str = "icons/keyboard.svg";
     /// The theme toggle panel's glyphs, the side a click switches to; both
@@ -207,34 +213,53 @@ pub mod icons {
     pub const ARROW_UP: &str = "icons/arrow-up.svg";
     pub const ARROW_DOWN: &str = "icons/arrow-down.svg";
     pub const ARROW_LEFT: &str = "icons/arrow-left.svg";
+    /// The fourth arrow, bundled like the other three. Nothing in the
+    /// tree draws it yet; it's here so a button pointing forward, the
+    /// next-bookmark jump above all, isn't the one direction missing.
+    pub const ARROW_RIGHT: &str = "icons/arrow-right.svg";
     /// The rox mark: a single-path logo, so it paints in the text color
     /// like any other svg element. Heads the empty launcher and the
     /// welcome window.
     pub const LOGO: &str = "app/rox-music.svg";
 
-    /// Every icon the app draws, the surface an icon pack can override. A
-    /// new pack is seeded with these, so an author edits the real files
-    /// instead of guessing which names the app asks for. The logo is left
-    /// out: it's the brand mark, not a themeable icon.
+    /// Every icon the app draws, the set an icon picker can offer. It's the
+    /// one enumerated list of the names the app asks for, so a picker reads
+    /// it instead of guessing. The logo is left out: it's the brand mark,
+    /// not an icon a button gets to wear.
+    ///
+    /// This order is the picker's order, so it runs glyph-first: the marks a
+    /// button plausibly wears, then a tail of window and panel furniture.
+    /// The chevrons, arrows and panel edges are real entries, just not what
+    /// anyone is scrolling for, so they sit at the bottom rather than in the
+    /// middle of the transport and library marks.
     pub const CATALOG: &[&str] = &[
         PLAY,
         PAUSE,
         SKIP_BACK,
         SKIP_FORWARD,
+        STEP_BACK,
+        STEP_FORWARD,
         REWIND,
         FAST_FORWARD,
         SEEK_BACK,
         SEEK_FORWARD,
         REPEAT,
         REPEAT_1,
+        FLAG,
+        ITERATION_CCW,
         STOP,
         SHUFFLE,
+        LIST_ORDERED,
+        FLIP_HORIZONTAL,
+        FLIP_VERTICAL,
         INFINITY,
         BLEND,
         DICE,
         VOLUME_1,
         VOLUME_2,
         VOLUME_X,
+        HEADPHONES,
+        A_LARGE_SMALL,
         ALIGN_LEFT,
         ALIGN_CENTER,
         ALIGN_RIGHT,
@@ -242,8 +267,6 @@ pub mod icons {
         ROWS_3,
         REFRESH_CW,
         POWER,
-        CHEVRON_RIGHT,
-        CHEVRON_DOWN,
         DISC,
         LOCATE,
         MUSIC,
@@ -259,6 +282,7 @@ pub mod icons {
         UPLOAD,
         TRASH,
         PENCIL,
+        BOOKMARK,
         STAR,
         STAR_FILLED,
         HEART,
@@ -267,20 +291,19 @@ pub mod icons {
         RADIO,
         DATABASE,
         CLOCK,
+        BED,
         CALENDAR,
         TAG,
         IMAGE,
+        WAND_SPARKLES,
         LINK,
         PALETTE,
         CONTRAST,
         LAYOUT_DASHBOARD,
         EYE,
-        CLOSE,
-        CHECK,
+        EYE_OFF,
         SETTINGS,
         COPY,
-        EXTERNAL_LINK,
-        PLUS,
         CHART_PIE,
         INFO,
         ALERT,
@@ -289,7 +312,6 @@ pub mod icons {
         HASH,
         LAYOUT_GRID,
         GALLERY,
-        MOVE_VERTICAL,
         MOVE_HORIZONTAL,
         AUDIO_LINES,
         AUDIO_WAVEFORM,
@@ -301,27 +323,39 @@ pub mod icons {
         FULLSCREEN_EXIT,
         SQUARE_DASHED,
         FLASK,
+        SQUARE_TERMINAL,
         KEYBOARD,
         SUN,
         MOON,
-        MINUS,
         APP_WINDOW,
-        MENU,
         USER,
-        MOVE,
-        COLUMNS_2,
         LAYERS,
-        PANEL_BOTTOM,
-        PANEL_TOP,
-        PANEL_LEFT,
-        PANEL_RIGHT,
-        CHEVRON_LEFT,
         LOCK,
         LOCK_OPEN,
         PIN,
+        // The chrome: window and panel furniture, sunk to the bottom of
+        // the picker because a button rarely wants one.
+        CHEVRON_UP,
+        CHEVRON_DOWN,
+        CHEVRON_LEFT,
+        CHEVRON_RIGHT,
         ARROW_UP,
         ARROW_DOWN,
         ARROW_LEFT,
+        ARROW_RIGHT,
+        PLUS,
+        MINUS,
+        CLOSE,
+        CHECK,
+        MOVE,
+        MOVE_VERTICAL,
+        PANEL_TOP,
+        PANEL_BOTTOM,
+        PANEL_LEFT,
+        PANEL_RIGHT,
+        COLUMNS_2,
+        MENU,
+        EXTERNAL_LINK,
     ];
 }
 
@@ -393,16 +427,6 @@ impl AssetSource for Assets {
         if path.is_empty() {
             return Ok(None);
         }
-        // An active pack overrides same-named files under icons/. It's a
-        // flat folder, so map icons/play.svg to <pack>/play.svg. A missing
-        // file just falls through to the built-in and bundled sets below.
-        if let Some(name) = path.strip_prefix("icons/") {
-            if let Some(dir) = ACTIVE_PACK.read().unwrap().clone() {
-                if let Ok(bytes) = std::fs::read(dir.join(name)) {
-                    return Ok(Some(Cow::Owned(bytes)));
-                }
-            }
-        }
         if let Some(f) = Self::get(path) {
             return Ok(Some(f.data));
         }
@@ -422,45 +446,16 @@ impl AssetSource for Assets {
 mod tests {
     use super::*;
 
-    /// An active pack overrides a same-named icon and falls through for one
-    /// it doesn't have, the whole point of the layered resolver.
-    #[test]
-    fn active_pack_overrides_then_falls_through() {
-        let dir = std::env::temp_dir().join("rox-pack-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("play.svg"), b"<svg id=\"packed\"/>").unwrap();
-
-        set_active_pack(Some(dir.clone()));
-        // The pack has play.svg, so it wins.
-        let play = Assets.load("icons/play.svg").unwrap().unwrap();
-        assert_eq!(play.as_ref(), b"<svg id=\"packed\"/>");
-        // It has no pause.svg, so that falls through to the built-in.
-        let pause = Assets.load("icons/pause.svg").unwrap().unwrap();
-        assert_ne!(pause.as_ref(), b"<svg id=\"packed\"/>");
-        assert!(!pause.is_empty());
-
-        // Back to the built-in set: play.svg no longer comes from the pack.
-        set_active_pack(None);
-        let play = Assets.load("icons/play.svg").unwrap().unwrap();
-        assert_ne!(play.as_ref(), b"<svg id=\"packed\"/>");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A new pack is seeded from the catalog, so every entry has to resolve
-    /// to real bytes, ours or bundled. If one doesn't, a created pack would
-    /// silently miss that icon and the app would fall back mid-set.
+    /// The catalog is the list a picker offers, so every entry has to
+    /// resolve to real bytes, ours or bundled. If one doesn't, a picked icon
+    /// would draw as nothing.
     #[test]
     fn every_catalog_icon_resolves() {
         for path in icons::CATALOG {
+            let bytes = Assets.load(path).unwrap();
             assert!(
-                builtin_bytes(path).is_some(),
-                "catalog icon {path} has no built-in bytes"
-            );
-            assert!(
-                path.strip_prefix("icons/").is_some(),
-                "catalog icon {path} is not under icons/, so a flat pack can't hold it"
+                bytes.is_some_and(|b| !b.is_empty()),
+                "catalog icon {path} does not resolve"
             );
         }
     }

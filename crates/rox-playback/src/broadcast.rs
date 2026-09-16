@@ -219,14 +219,13 @@ fn serve_connection(
         if stop.load(Ordering::Relaxed) {
             return Served::Stopped;
         }
-        if SONG_DIRTY.swap(false, Ordering::AcqRel) {
-            if let Some(song) = SONG.lock().unwrap().clone() {
-                if let Err(err) = push_metadata(config, mount, &song) {
-                    // Metadata is decoration; a failed update never costs
-                    // the stream itself.
-                    log::debug!("broadcast: metadata update failed: {err}");
-                }
-            }
+        if SONG_DIRTY.swap(false, Ordering::AcqRel)
+            && let Some(song) = SONG.lock().unwrap().clone()
+            && let Err(err) = push_metadata(config, mount, &song)
+        {
+            // Metadata is decoration; a failed update never costs
+            // the stream itself.
+            log::debug!("broadcast: metadata update failed: {err}");
         }
         let Some(current) = chunk.take() else {
             match rx.recv_timeout(Duration::from_millis(500)) {

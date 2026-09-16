@@ -9,8 +9,8 @@
 //! arrangement; the library's config stores its own.
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, rems, svg, AnyElement, Div,
-    ObjectFit, Pixels, SharedString,
+    AnyElement, Div, ObjectFit, Pixels, SharedString, div, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rems, svg,
 };
 use serde::{Deserialize, Serialize};
 

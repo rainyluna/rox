@@ -69,7 +69,7 @@ fn field_for(name: &str) -> Result<Option<Field>, String> {
         other => {
             return Err(
                 rox_i18n::t!("tags-guess-unknown-placeholder", name = other.to_owned()).to_string(),
-            )
+            );
         }
     }))
 }
@@ -250,7 +250,7 @@ impl Pattern {
                 match token {
                     Token::Literal(lit) => segment.push_str(lit),
                     Token::Skip => {
-                        return Err(rox_i18n::t!("tags-guess-skip-renders-nothing").to_string())
+                        return Err(rox_i18n::t!("tags-guess-skip-renders-nothing").to_string());
                     }
                     Token::Capture(field) => {
                         let raw = values
@@ -494,14 +494,18 @@ mod tests {
 
     #[test]
     fn render_rejects_skip_and_empty_segments() {
-        assert!(parse("%skip% - %title%")
-            .unwrap()
-            .render(&[(Field::Title, "Song".into())])
-            .is_err());
-        assert!(parse("%artist%//%title%")
-            .unwrap()
-            .render(&[(Field::Artist, "A".into()), (Field::Title, "B".into())])
-            .is_err());
+        assert!(
+            parse("%skip% - %title%")
+                .unwrap()
+                .render(&[(Field::Title, "Song".into())])
+                .is_err()
+        );
+        assert!(
+            parse("%artist%//%title%")
+                .unwrap()
+                .render(&[(Field::Artist, "A".into()), (Field::Title, "B".into())])
+                .is_err()
+        );
     }
 
     #[test]

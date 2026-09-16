@@ -4,12 +4,12 @@
 //! playlist name window. A blank name is fine: the mark shows its time.
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle, Focusable,
-    KeyBinding, Rgba, SharedString, Stateful, Subscription, Window,
+    App, Bounds, Context, Div, Entity, FocusHandle, Focusable, KeyBinding, Rgba, SharedString,
+    Stateful, Subscription, Window, actions, div, prelude::*, px, size,
 };
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::Sizable as _;
 
 use rox_core::fmt::fmt_time;
 use rox_design::assets::icons;
@@ -17,7 +17,7 @@ use rox_design::{palette, tokens};
 use rox_library::cue::TrackKey;
 use rox_panel_api::bookmark_ui::{self, QUICK_COLORS};
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{kbd_line, section, small_button, Seg};
+use rox_panel_kit::ui::{Seg, kbd_line, section, small_button};
 use rox_services::backdrop::WindowBackdrop;
 
 actions!(bookmark_dialog, [Save, Cancel]);

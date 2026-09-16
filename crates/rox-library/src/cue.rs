@@ -59,17 +59,16 @@ impl TrackKey {
     /// reading wins: handed a callback that checks the store (or the disk),
     /// a name that really ends in `#2` beats the cue reading of it.
     pub fn from_fragment(s: &str, exists: impl Fn(&str) -> bool) -> TrackKey {
-        if !exists(s) {
-            if let Some((path, sub)) = s.rsplit_once('#') {
-                if let Ok(sub) = sub.parse::<u16>() {
-                    if sub > 0 && exists(path) {
-                        return TrackKey {
-                            path: PathBuf::from(path),
-                            sub,
-                        };
-                    }
-                }
-            }
+        if !exists(s)
+            && let Some((path, sub)) = s.rsplit_once('#')
+            && let Ok(sub) = sub.parse::<u16>()
+            && sub > 0
+            && exists(path)
+        {
+            return TrackKey {
+                path: PathBuf::from(path),
+                sub,
+            };
         }
         TrackKey {
             path: PathBuf::from(s),
@@ -310,16 +309,16 @@ pub fn parse(bytes: &[u8]) -> Option<CueSheet> {
                 }
             }
             "INDEX" => {
-                if let TrackState::Audio(pending) = &mut state {
-                    if let Some((number, tail)) = read_arg(rest) {
-                        let at = read_arg(tail).and_then(|(time, _)| parse_time(&time));
-                        match (number.trim().parse::<u8>().ok(), at) {
-                            (Some(0), Some(at)) => pending.index00 = Some(at),
-                            (Some(1), Some(at)) => pending.index01 = Some(at),
-                            // INDEX 02 and up are intra-track markers nothing
-                            // here plays from, so they're dropped.
-                            _ => {}
-                        }
+                if let TrackState::Audio(pending) = &mut state
+                    && let Some((number, tail)) = read_arg(rest)
+                {
+                    let at = read_arg(tail).and_then(|(time, _)| parse_time(&time));
+                    match (number.trim().parse::<u8>().ok(), at) {
+                        (Some(0), Some(at)) => pending.index00 = Some(at),
+                        (Some(1), Some(at)) => pending.index01 = Some(at),
+                        // INDEX 02 and up are intra-track markers nothing
+                        // here plays from, so they're dropped.
+                        _ => {}
                     }
                 }
             }

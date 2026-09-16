@@ -10,6 +10,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext as _, WeakEntity, Window};
 use rox_dock::PanelView;
 
+use crate::panels::controls::{ControlsConfig, ControlsPanel};
 use crate::panels::drawer::{DrawerConfig, DrawerPanel};
 use crate::panels::group::{GroupConfig, GroupPanel};
 use crate::panels::menu::{MenuConfig, MenuPanel};
@@ -50,7 +51,6 @@ use rox_panels::spectrogram::{SpectrogramConfig, SpectrogramPanel};
 use rox_panels::spectrum::{SpectrumConfig, SpectrumPanel};
 use rox_panels::stats_widget::{StatsWidgetConfig, StatsWidgetPanel};
 use rox_panels::status::{StatusConfig, StatusPanel};
-use rox_panels::theme_toggle::{ThemeToggleConfig, ThemeTogglePanel};
 use rox_panels::transport::{
     SeekConfig, SeekStripPanel, TrackInfoConfig, TrackInfoPanel, TransportConfig, TransportPanel,
     VolumeConfig, VolumePanel,
@@ -425,7 +425,7 @@ pub(crate) static CONTROLS: PanelSection = PanelSection {
         PanelDef {
             label: "panel-catalog-status",
             name: "status",
-            icon: icons::CHART_PIE,
+            icon: icons::HASH,
             placement: PanelPlacement::Bottom,
             build: |state, _, _, cx| {
                 Arc::new(cx.new(|cx| StatusPanel::new(state.clone(), StatusConfig::default(), cx)))
@@ -462,8 +462,30 @@ pub(crate) static CONTROLS: PanelSection = PanelSection {
         },
         // The rating and favourite panels retired from the catalog once
         // the stars and the heart became transport items and track info
-        // pieces; the registry still builds them, so a layout that
-        // holds one keeps restoring.
+        // pieces. The theme toggle followed them once a custom controls
+        // button could bind the toggle_theme command and do the same
+        // flip. The registry still builds all three, so a layout holding
+        // one keeps restoring it.
+        PanelDef {
+            label: "panel-catalog-custom-controls",
+            name: "custom controls",
+            icon: icons::SQUARE_DASHED,
+            placement: PanelPlacement::Bottom,
+            build: |state, _, _, cx| {
+                Arc::new(
+                    cx.new(|cx| ControlsPanel::new(state.clone(), ControlsConfig::default(), cx)),
+                )
+            },
+        },
+    ],
+};
+
+/// The compact readouts: a panel each for one slice of state, sized for a
+/// strip or a corner rather than a pane of its own. They read the same
+/// data the full panels do, in a tile that fits beside the transport.
+pub(crate) static WIDGETS: PanelSection = PanelSection {
+    group: Some(("panel-catalog-group-widgets", icons::LAYOUT_GRID)),
+    panels: &[
         PanelDef {
             label: "panel-catalog-queue-widget",
             name: "queue widget",
@@ -505,17 +527,6 @@ pub(crate) static CONTROLS: PanelSection = PanelSection {
             build: |state, _, _, cx| {
                 Arc::new(cx.new(|cx| {
                     StatsWidgetPanel::new(state.clone(), StatsWidgetConfig::default(), cx)
-                }))
-            },
-        },
-        PanelDef {
-            label: "panel-catalog-theme-toggle",
-            name: "theme toggle",
-            icon: icons::CONTRAST,
-            placement: PanelPlacement::Bottom,
-            build: |state, _, _, cx| {
-                Arc::new(cx.new(|cx| {
-                    ThemeTogglePanel::new(state.clone(), ThemeToggleConfig::default(), cx)
                 }))
             },
         },
@@ -664,6 +675,7 @@ static CATALOG: &[&PanelSection] = &[
     &CATALOGUE,
     &DETAILS,
     &VISUALIZERS,
+    &WIDGETS,
     &EXPERIMENTAL,
 ];
 

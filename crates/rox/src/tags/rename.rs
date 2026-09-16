@@ -32,8 +32,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Focusable as _, Global,
-    KeyBinding, ScrollHandle, SharedString, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, Focusable as _, Global, KeyBinding, ScrollHandle,
+    SharedString, Subscription, Window, WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::Scrollbar;
@@ -44,13 +44,13 @@ use rox_core::settings::Settings;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_library::lyrics;
-use rox_library::writer::{Field, CLONE_SUFFIX};
+use rox_library::writer::{CLONE_SUFFIX, Field};
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, small_button, Seg};
+use rox_panel_kit::ui::{self as settings_ui, Seg, kbd_line, section, small_button};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
 
-use crate::matching::{open_or_focus, WindowRegistry};
+use crate::matching::{WindowRegistry, open_or_focus};
 use crate::tags::guess;
 
 /// The pattern a first run starts on: the layout most libraries already

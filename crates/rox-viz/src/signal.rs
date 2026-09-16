@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::{log_bands, Analyzer};
 use crate::AudioFeed;
+use crate::analysis::{Analyzer, log_bands};
 
 /// dB window signals normalize into, on magnitudes where a full-scale sine
 /// reads 0 dB. The same window the spectrum's bars draw against, so a
@@ -573,17 +573,17 @@ impl SignalHub {
         let mut hub = self.inner.lock().unwrap();
         // Ahead of the throttle below, so a change never depends on which
         // caller won the frame.
-        if let Some(track) = track {
-            if hub.last_track.replace(track) != Some(track) {
-                let ids: Vec<u64> = hub
-                    .pool
-                    .iter()
-                    .filter(|s| s.reset_on_track && s.aggregate().is_some())
-                    .map(|s| s.id)
-                    .collect();
-                for id in ids {
-                    hub.engine.flush(id);
-                }
+        if let Some(track) = track
+            && hub.last_track.replace(track) != Some(track)
+        {
+            let ids: Vec<u64> = hub
+                .pool
+                .iter()
+                .filter(|s| s.reset_on_track && s.aggregate().is_some())
+                .map(|s| s.id)
+                .collect();
+            for id in ids {
+                hub.engine.flush(id);
             }
         }
         let now = Instant::now();

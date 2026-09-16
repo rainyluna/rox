@@ -99,16 +99,40 @@ fn command(binary: &str) -> Command {
     command
 }
 
-/// Which ffmpeg to spawn: the path from settings when one is set, the one
-/// on PATH otherwise.
+/// Which ffmpeg to spawn, in this order: the path from settings when one is
+/// set, a file named `ffmpeg` in rox's data folder when one is there, and
+/// the bare name on PATH otherwise.
+///
+/// The data folder is in the list because it's the one place every channel
+/// can reach the same way. A Flatpak can't run the host's ffmpeg: the
+/// sandbox has neither its loader nor its libraries, so pointing the
+/// setting at `/usr/bin/ffmpeg` from inside one fails the test like a
+/// broken binary would. A static build dropped beside the library database
+/// runs on every channel, and the settings page names the folder.
 pub fn binary() -> String {
-    let custom = Settings::load().convert.ffmpeg;
-    let custom = custom.trim();
-    if custom.is_empty() {
-        "ffmpeg".to_string()
-    } else {
-        custom.to_string()
+    let setting = Settings::load().convert.ffmpeg;
+    resolve(&setting, &rox_core::settings::data_dir())
+}
+
+/// The lookup behind [`binary`], over its inputs rather than the process so
+/// a test can hand it a folder. [`PROBED`] is keyed on what this returns,
+/// so a build that appears in the data folder mid-session re-probes on the
+/// next Test press rather than inheriting the bare name's answer.
+fn resolve(setting: &str, data_dir: &Path) -> String {
+    let custom = setting.trim();
+    if !custom.is_empty() {
+        return custom.to_string();
     }
+
+    // `is_file` rather than `exists`: a folder someone named ffmpeg would
+    // otherwise be handed to `Command` and fail with a message about
+    // permissions that points nowhere.
+    let dropped = data_dir.join("ffmpeg");
+    if dropped.is_file() {
+        return dropped.to_string_lossy().into_owned();
+    }
+
+    "ffmpeg".to_string()
 }
 
 /// What each binary reported when it was asked its version, so the probe
@@ -968,32 +992,34 @@ fn run(items: &[Item], format: &Format, binary: &str, progress: &Progress) -> Op
         .min(items.len().max(1));
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                if !progress.keep_going() {
-                    break;
-                }
-                let Some(item) = items.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
-                    break;
-                };
-                *progress.current.lock().unwrap() = item.src.to_string_lossy().into_owned();
-                match convert(item, format, binary, progress) {
-                    Ok(Outcome::Wrote) => {
-                        progress.wrote.fetch_add(1, Ordering::Relaxed);
+            scope.spawn(|| {
+                loop {
+                    if !progress.keep_going() {
+                        break;
                     }
-                    Ok(Outcome::Skipped) => {
-                        progress.skipped.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Ok(Outcome::Cancelled) => {}
-                    Err(e) => {
-                        log::warn!("convert: {}: {e}", item.src.display());
-                        progress.failed.fetch_add(1, Ordering::Relaxed);
-                        let mut failure = failure.lock().unwrap();
-                        if failure.is_none() {
-                            *failure = Some(e);
+                    let Some(item) = items.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    *progress.current.lock().unwrap() = item.src.to_string_lossy().into_owned();
+                    match convert(item, format, binary, progress) {
+                        Ok(Outcome::Wrote) => {
+                            progress.wrote.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(Outcome::Skipped) => {
+                            progress.skipped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(Outcome::Cancelled) => {}
+                        Err(e) => {
+                            log::warn!("convert: {}: {e}", item.src.display());
+                            progress.failed.fetch_add(1, Ordering::Relaxed);
+                            let mut failure = failure.lock().unwrap();
+                            if failure.is_none() {
+                                *failure = Some(e);
+                            }
                         }
                     }
+                    progress.done.fetch_add(1, Ordering::Relaxed);
                 }
-                progress.done.fetch_add(1, Ordering::Relaxed);
             });
         }
     });
@@ -1127,6 +1153,65 @@ fn custom(ext: &str, args: &str) -> Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch folder under the OS temp dir, named per test so two tests
+    /// in cargo's thread pool never share one. Removed on drop, so a failed
+    /// assertion doesn't leave a fake ffmpeg behind for the next run.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("rox-convert-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_set_path_wins_whatever_the_data_folder_holds() {
+        let scratch = Scratch::new("set-path");
+        std::fs::write(scratch.0.join("ffmpeg"), b"").unwrap();
+
+        assert_eq!(
+            resolve("  /opt/ffmpeg/bin/ffmpeg ", &scratch.0),
+            "/opt/ffmpeg/bin/ffmpeg"
+        );
+    }
+
+    #[test]
+    fn an_empty_setting_falls_to_path_when_the_data_folder_is_bare() {
+        let scratch = Scratch::new("bare-folder");
+
+        assert_eq!(resolve("", &scratch.0), "ffmpeg");
+        assert_eq!(resolve("   ", &scratch.0), "ffmpeg");
+    }
+
+    #[test]
+    fn a_build_in_the_data_folder_beats_path() {
+        let scratch = Scratch::new("dropped-build");
+        let dropped = scratch.0.join("ffmpeg");
+        std::fs::write(&dropped, b"").unwrap();
+
+        assert_eq!(resolve("", &scratch.0), dropped.to_string_lossy());
+    }
+
+    /// Only a file counts: a folder called ffmpeg in the data dir is not
+    /// something `Command` can spawn.
+    #[test]
+    fn a_folder_named_ffmpeg_is_not_a_binary() {
+        let scratch = Scratch::new("folder-not-binary");
+        std::fs::create_dir(scratch.0.join("ffmpeg")).unwrap();
+
+        assert_eq!(resolve("", &scratch.0), "ffmpeg");
+    }
 
     fn tags(values: &[(Field, &str)]) -> Vec<(Field, String)> {
         values
@@ -1784,45 +1869,49 @@ mod runtime {
         let bare = tone(&dir, "bare.flac", 2);
         let with_art = dir.join("art.flac");
         let cover = dir.join("cover.png");
-        assert!(command("ffmpeg")
-            .args([
-                "-nostdin",
-                "-n",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=red:s=64x64:d=1",
-                "-frames:v",
-                "1",
-            ])
-            .arg(&cover)
-            .status()
-            .unwrap()
-            .success());
-        assert!(command("ffmpeg")
-            .args(["-nostdin", "-n", "-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&bare)
-            .arg("-i")
-            .arg(&cover)
-            .args([
-                "-map",
-                "0:a",
-                "-map",
-                "1:v",
-                "-c:v",
-                "copy",
-                "-disposition:v",
-                "attached_pic",
-                "-c:a",
-                "flac",
-            ])
-            .arg(&with_art)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            command("ffmpeg")
+                .args([
+                    "-nostdin",
+                    "-n",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=red:s=64x64:d=1",
+                    "-frames:v",
+                    "1",
+                ])
+                .arg(&cover)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            command("ffmpeg")
+                .args(["-nostdin", "-n", "-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&bare)
+                .arg("-i")
+                .arg(&cover)
+                .args([
+                    "-map",
+                    "0:a",
+                    "-map",
+                    "1:v",
+                    "-c:v",
+                    "copy",
+                    "-disposition:v",
+                    "attached_pic",
+                    "-c:a",
+                    "flac",
+                ])
+                .arg(&with_art)
+                .status()
+                .unwrap()
+                .success()
+        );
 
         let progress = Progress::default();
         let kept = Item {

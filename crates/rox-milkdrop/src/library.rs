@@ -203,9 +203,28 @@ impl PresetLibrary {
 }
 
 fn is_preset(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("milk"))
+    !is_junk(path)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("milk"))
+}
+
+/// Whether a file is something the OS dropped into the pack rather than part
+/// of it: Finder's .DS_Store, and the AppleDouble `._name` sidecars macOS
+/// writes beside every file on a volume that can't hold resource forks (SMB,
+/// exFAT, a USB stick). A sidecar keeps the real name's extension, so
+/// unzipping a pack off a stick leaves a `._preset.milk` beside every preset
+/// and the rotation fills up with files projectM can only fail to parse.
+///
+/// Same rule `rox_library::scanner::is_junk` runs on audio files, written out
+/// again here because this crate reaches no higher than rox-viz (ADR 28).
+fn is_junk(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    name == ".DS_Store" || name.starts_with("._")
 }
 
 fn is_textures_dir(path: &Path) -> bool {
@@ -294,6 +313,29 @@ mod tests {
             &[root.join("b.milk"), root.join("nested/deeper/a.MILK")]
         );
         assert!(!library.is_empty());
+    }
+
+    /// What a pack unzipped off a USB stick or an SMB share on macOS looks
+    /// like: a `._name` sidecar beside every file, plus a .DS_Store per
+    /// folder. The sidecars carry the .milk extension, so they are the ones
+    /// that would otherwise land in the rotation.
+    #[test]
+    fn scan_skips_the_junk_macos_leaves_beside_presets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("a.milk"));
+        touch(&root.join("._a.milk"));
+        touch(&root.join(".DS_Store"));
+        touch(&root.join("nested/._b.MILK"));
+
+        let library = PresetLibrary::scan(&[root.to_path_buf()], None);
+        assert_eq!(library.presets(), &[root.join("a.milk")]);
+
+        // Favorites come in as explicit paths, so they take the same filter
+        // rather than trusting whatever was starred.
+        let mut library = library;
+        library.extend(&[root.join("._a.milk")]);
+        assert_eq!(library.presets(), &[root.join("a.milk")]);
     }
 
     #[test]
@@ -461,9 +503,11 @@ mod tests {
         touch(&root.join("Fractal/a.milk"));
 
         let library = PresetLibrary::scan(&[root.to_path_buf()], None);
-        assert!(library
-            .rotation_indices(&Rotation::Folder(root.join("Deleted")))
-            .is_empty());
+        assert!(
+            library
+                .rotation_indices(&Rotation::Folder(root.join("Deleted")))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -497,9 +541,11 @@ mod tests {
             root.join("Fractal/deleted.milk"),
         ]));
         assert_eq!(indices, vec![0, 2]);
-        assert!(library
-            .rotation_indices(&Rotation::Set(Vec::new()))
-            .is_empty());
+        assert!(
+            library
+                .rotation_indices(&Rotation::Set(Vec::new()))
+                .is_empty()
+        );
     }
 
     #[test]

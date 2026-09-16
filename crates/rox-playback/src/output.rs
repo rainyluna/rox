@@ -11,8 +11,8 @@
 //! backend calls: pop a pre-allocated ring, read atomics, write the device
 //! buffer. No allocation, no lock, no logging, no I/O.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

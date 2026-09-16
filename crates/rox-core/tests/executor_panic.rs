@@ -11,9 +11,9 @@
 //! `for runnable in receiver { runnable.run() }`, never restarted.
 
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_task::Runnable;

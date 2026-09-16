@@ -12,6 +12,7 @@
 
 pub mod actions;
 pub mod bookmark_ui;
+pub mod buttons;
 pub mod charts;
 pub mod group_head;
 pub mod openers;

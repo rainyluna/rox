@@ -8,9 +8,9 @@
 //! the builder holds its handle.
 
 use gpui::{
-    anchored, canvas, deferred, div, point, prelude::*, px, svg, AnyElement, App, Bounds, Context,
-    Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, WeakEntity, Window,
+    AnyElement, App, Bounds, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, WeakEntity, Window, anchored, canvas,
+    deferred, div, point, prelude::*, px, svg,
 };
 use gpui_component::menu::PopupMenu;
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -18,19 +18,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::panel_catalog::PanelDef;
 use crate::workspace::menubar::{
-    menu_entry_rows, nav_lit, nav_row_at, step_index, subgroup_rows, submenu_rows, NavRow, NavSlot,
+    NavRow, NavSlot, menu_entry_rows, nav_lit, nav_row_at, step_index, subgroup_rows, submenu_rows,
 };
 use crate::workspace::{
-    flyout_leftward, flyout_side, menu_item_display, menu_section, panel_menu_item, section_shows,
-    shortcut_for, signal_marked, LayoutTarget, Menu, MenuAction, MenuEntry, MenuItem, PanelTarget,
-    Workspace, WorkspaceTarget, MENUS,
+    LayoutTarget, MENUS, Menu, MenuAction, MenuEntry, MenuItem, PanelTarget, Workspace,
+    WorkspaceTarget, flyout_leftward, flyout_side, menu_item_display, menu_section,
+    panel_menu_item, section_shows, shortcut_for, signal_marked,
 };
 use rox_core::settings::{self, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, PanelChrome, PanelSettings};
 use rox_panel_api::panel_settings;
-use rox_panel_kit::{align_row, justify, Align};
+use rox_panel_kit::{Align, align_row, justify};
 
 /// The menu panel's per-view config: what a saved layout restores, and
 /// what the settings window edits.
@@ -121,7 +121,15 @@ impl MenuPanel {
     /// A paint-time capture of a menu surface's bounds into
     /// [`MenuPanel::menu_surfaces`], with the viewport width alongside. The
     /// next frame's flyout side decisions read both.
-    fn menu_surface_capture(&self, level: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    // `+ use<>` here and on the builders below: a 2024 `impl Trait` return
+    // captures every lifetime in scope by default, and these hand an element
+    // built from owned values back to a caller that still holds `cx`. The
+    // empty capture list keeps the return from borrowing it.
+    fn menu_surface_capture(
+        &self,
+        level: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let view = cx.entity();
         canvas(
             move |bounds, window, cx| {
@@ -173,7 +181,7 @@ impl MenuPanel {
 
     /// A paint-time capture of the button's bounds, the anchor a keyboard
     /// open hangs the menu off.
-    fn button_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn button_capture(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let view = cx.entity();
         canvas(
             move |bounds, _, cx| {
@@ -451,7 +459,7 @@ impl MenuPanel {
         index: usize,
         menu: &'static Menu,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_top == Some(index);
         row()
             .id(("menu-top", index))
@@ -620,7 +628,7 @@ impl MenuPanel {
         icon_path: &'static str,
         panels: &'static [PanelDef],
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_sub == Some(index);
         row()
             .id(("menu-group", index))
@@ -659,7 +667,7 @@ impl MenuPanel {
         target: LayoutTarget,
         with_new: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_sub == Some(index);
         row()
             .id(("menu-layouts", index))
@@ -752,7 +760,7 @@ impl MenuPanel {
         icon_path: &'static str,
         target: PanelTarget,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_sub == Some(index);
         self.sub_row(index, label, icon_path, open, cx)
             .when(open, |d| {
@@ -787,7 +795,7 @@ impl MenuPanel {
         label: &'static str,
         icon_path: &'static str,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_sub == Some(index);
         self.sub_row(index, label, icon_path, open, cx)
             .when(open, |d| {
@@ -847,7 +855,7 @@ impl MenuPanel {
         icon_path: &'static str,
         rows: Vec<Div>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_subgroup == Some(index);
         row()
             .id(("panel-window-group", index))
@@ -956,7 +964,7 @@ impl MenuPanel {
         target: WorkspaceTarget,
         with_new: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_sub == Some(index);
         row()
             .id(("menu-workspaces", index))

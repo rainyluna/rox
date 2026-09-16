@@ -349,13 +349,12 @@ pub fn fetch(model: &Model, progress: &Progress) -> Result<(), String> {
     if let Some(claimed) = response
         .header("Content-Length")
         .and_then(|v| v.parse::<u64>().ok())
+        && claimed != weights.bytes
     {
-        if claimed != weights.bytes {
-            return Err(format!(
-                "the server offered {claimed} bytes, the catalog expects {}",
-                weights.bytes
-            ));
-        }
+        return Err(format!(
+            "the server offered {claimed} bytes, the catalog expects {}",
+            weights.bytes
+        ));
     }
 
     let outcome = stream(response.into_reader(), &part_path, weights, progress);
@@ -486,10 +485,12 @@ mod tests {
                     "{} has a sha256 that isn't 32 bytes of hex",
                     model.id
                 );
-                assert!(weights
-                    .sha256
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+                assert!(
+                    weights
+                        .sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                );
                 assert!(weights.bytes > 0);
                 // A weight file must not be able to escape the models dir.
                 assert!(!weights.file.contains('/') && !weights.file.contains('\\'));

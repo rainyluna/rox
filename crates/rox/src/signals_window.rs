@@ -19,11 +19,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, size, svg, App, Bounds, Context, Div, Entity, Global, MouseButton,
-    ScrollHandle, SharedString, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, Global, MouseButton, ScrollHandle, SharedString,
+    Subscription, Window, WindowHandle, div, prelude::*, px, size, svg,
 };
-use gpui_component::scroll::Scrollbar;
 use gpui_component::Root;
+use gpui_component::scroll::Scrollbar;
 
 use rox_viz::signal::SignalHub;
 

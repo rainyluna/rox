@@ -255,13 +255,12 @@ pub fn fetch(dictionary: &Dictionary, progress: &Progress) -> Result<(), String>
     if let Some(claimed) = response
         .header("Content-Length")
         .and_then(|v| v.parse::<u64>().ok())
+        && claimed != dictionary.bytes
     {
-        if claimed != dictionary.bytes {
-            return Err(format!(
-                "the server offered {claimed} bytes, the catalog expects {}",
-                dictionary.bytes
-            ));
-        }
+        return Err(format!(
+            "the server offered {claimed} bytes, the catalog expects {}",
+            dictionary.bytes
+        ));
     }
 
     let outcome = stream(response.into_reader(), &part_path, dictionary, progress)
@@ -384,18 +383,22 @@ mod tests {
     /// right shape, and the folder can't escape `models/`.
     #[test]
     fn the_descriptor_is_well_formed() {
-        assert!(IPADIC
-            .url
-            .starts_with("https://github.com/lindera/lindera/releases/download/"));
+        assert!(
+            IPADIC
+                .url
+                .starts_with("https://github.com/lindera/lindera/releases/download/")
+        );
         assert!(
             IPADIC.url.contains("v5.3.0"),
             "the asset and the pinned lindera release have to move together"
         );
         assert_eq!(IPADIC.sha256.len(), 64);
-        assert!(IPADIC
-            .sha256
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            IPADIC
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
         assert!(IPADIC.bytes > 0);
         assert!(!IPADIC.folder.contains('/') && !IPADIC.folder.contains('\\'));
         assert!(!IPADIC.licence.is_empty());

@@ -23,10 +23,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    div, prelude::*, px, rems, svg, uniform_list, App, Context, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
-    PathPromptOptions, Pixels, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
-    Subscription, UniformListScrollHandle, WeakEntity, Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, PathPromptOptions, Pixels, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Stateful, Subscription, UniformListScrollHandle, WeakEntity, Window, div,
+    prelude::*, px, rems, svg, uniform_list,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -48,13 +48,14 @@ use crate::selection::SelectionEvent;
 use crate::settings::ui as settings_ui;
 use crate::track_ui::track_cells;
 use crate::track_ui::track_columns::{
-    self, Column, ColumnHost, GroupTrack, HeadSlot, HeadingHost, ART_MARGIN_MAX, HEAD_GAP_MAX,
-    HEAD_HEIGHT_MAX, HEAD_TEXT_MAX, HEAD_TEXT_MIN, HEAD_TEXT_STOCK, ROW_HEIGHT_MAX, ROW_HEIGHT_MIN,
-    ROW_HEIGHT_STOCK, ROW_SPACING_MAX,
+    self, ART_MARGIN_MAX, Column, ColumnHost, GroupTrack, HEAD_GAP_MAX, HEAD_HEIGHT_MAX,
+    HEAD_TEXT_MAX, HEAD_TEXT_MIN, HEAD_TEXT_STOCK, HeadSlot, HeadingHost, ROW_HEIGHT_MAX,
+    ROW_HEIGHT_MIN, ROW_HEIGHT_STOCK, ROW_SPACING_MAX,
 };
+use crate::track_ui::track_drag::PlayDrag;
 use rox_library::playlist_file::Format;
 use rox_library::playlists::{PlaylistKind, PlaylistTrack};
-use rox_library::projection::{parse_query, FilterSet, Filterable, Term};
+use rox_library::projection::{FilterSet, Filterable, Term, parse_query};
 use rox_panel_kit::config::default_true;
 
 /// The heading tiles' rounding knob ceiling, the library panel's scale.
@@ -877,11 +878,11 @@ impl PlaylistsPanel {
         // the catalog loads after the panel builds, so earlier refreshes
         // (the empty initial load) keep it pending. Strict, so it lands
         // even if the panel is in a background tab until then.
-        if let Some(row) = self.restore_scroll {
-            if !self.rows.is_empty() {
-                self.restore_scroll = None;
-                self.scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
-            }
+        if let Some(row) = self.restore_scroll
+            && !self.rows.is_empty()
+        {
+            self.restore_scroll = None;
+            self.scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
         }
         // A rebuild that moves the playing track re-scrolls; one that
         // leaves it exactly where it was does not, or a rating edit
@@ -955,10 +956,10 @@ impl PlaylistsPanel {
         }
         let ratings = self.state.library.read(cx).ratings_for(&ids);
         for row in &mut self.rows {
-            if let Row::Track(t) = row {
-                if let Some(&r) = ratings.get(&t.track_id) {
-                    t.rating = r;
-                }
+            if let Row::Track(t) = row
+                && let Some(&r) = ratings.get(&t.track_id)
+            {
+                t.rating = r;
             }
         }
         cx.notify();
@@ -1332,7 +1333,7 @@ impl PlaylistsPanel {
     /// The multi-selection drag set as a shared Arc, resolved through
     /// `selected_members` once per selection or row change and cached after.
     fn drag_members(&mut self) -> Arc<[i64]> {
-        if self.drag_set.as_ref().map(|(gen, _)| *gen) != Some(self.drag_gen) {
+        if self.drag_set.as_ref().map(|(generation, _)| *generation) != Some(self.drag_gen) {
             let members: Arc<[i64]> = self.selected_members().into();
             self.drag_set = Some((self.drag_gen, members));
         }
@@ -1486,18 +1487,29 @@ impl PlaylistsPanel {
         cx.notify();
     }
 
+    /// The playlist and insertion point a row stands for: a header means the
+    /// end of its own list, a track means the slot just before itself. An
+    /// album heading is presentation, not a slot, so it resolves to nothing
+    /// and the caller drops the drag on the floor; the tracks around it take
+    /// it instead. Shared by both drop paths so a member move and a track
+    /// dragged in from elsewhere land in the same place.
+    fn drop_target(&self, target: usize) -> Option<(i64, Option<i64>)> {
+        match self.rows.get(target) {
+            Some(Row::Head { id, .. }) => Some((*id, None)),
+            Some(Row::Track(t)) => Some((t.playlist_id, Some(t.member_id))),
+            Some(Row::Album(_) | Row::AlbumMeta(_)) | None => None,
+        }
+    }
+
     /// A dragged set dropped onto a row: onto a header, or a track, it goes in as
     /// one block before the target (or at the end of a header's playlist),
     /// pulling in members from other playlists on the way. Dropping onto one of
     /// the dragged rows does nothing.
     fn drop_on(&mut self, drag: &TrackDrag, target: usize, cx: &mut Context<Self>) {
-        let (playlist_id, before) = match self.rows.get(target) {
-            Some(Row::Head { id, .. }) => (*id, None),
-            Some(Row::Track(t)) => (t.playlist_id, Some(t.member_id)),
-            // A heading is presentation, not a slot; drop on the tracks
-            // around it.
-            Some(Row::Album(_) | Row::AlbumMeta(_)) | None => return,
+        let Some((playlist_id, before)) = self.drop_target(target) else {
+            return;
         };
+
         if before.is_some_and(|b| drag.members.contains(&b)) {
             return;
         }
@@ -1516,6 +1528,44 @@ impl PlaylistsPanel {
         let members = drag.members.clone();
         self.state.library.update(cx, |library, cx| {
             library.place_playlist_members(playlist_id, &members, before, cx);
+        });
+    }
+
+    /// Tracks dragged in from any other panel, added as new members where they
+    /// land: before the target track, or at the end of a header's playlist.
+    /// The drag carries its library ids next to its keys, so the common case
+    /// stores rows straight through. Only a source with no ids to hand over
+    /// pays for resolving keys back to the catalog, and a key with no row
+    /// behind it (a loose file off the desktop) has nothing to add, so it
+    /// falls out of the set.
+    fn drop_tracks(&mut self, drag: &PlayDrag, target: usize, cx: &mut Context<Self>) {
+        let Some((playlist_id, before)) = self.drop_target(target) else {
+            return;
+        };
+
+        // Same refusal a member drag gets: a smart playlist's contents are its
+        // query's answer, so there is nowhere for a dropped track to go.
+        if self.is_smart(playlist_id) {
+            self.refuse(rox_i18n::t!("playlists-refuse-smart-source"), cx);
+            return;
+        }
+
+        let ids: Vec<i64> = if drag.ids.is_empty() {
+            let library = self.state.library.read(cx);
+            drag.keys
+                .iter()
+                .filter_map(|key| library.id_for_key(key))
+                .collect()
+        } else {
+            drag.ids.to_vec()
+        };
+
+        if ids.is_empty() {
+            return;
+        }
+
+        self.state.library.update(cx, |library, cx| {
+            library.add_to_playlist_at(playlist_id, &ids, before, cx);
         });
     }
 
@@ -1592,8 +1642,18 @@ impl PlaylistsPanel {
             .drag_over::<TrackDrag>(|style, _, _, _| {
                 style.bg(palette::alpha(palette::accent(), 0x1a))
             })
+            .drag_over::<PlayDrag>(|style, _, _, _| {
+                style.bg(palette::alpha(palette::accent(), 0x1a))
+            })
             .on_drop(cx.listener(move |this, drag: &TrackDrag, _, cx| {
                 this.drop_on(drag, ix, cx);
+            }))
+            // Tracks from the library, the folder tree, or any other panel
+            // land here as new members; TrackDrag above stays the panel's own
+            // move of rows it already holds. gpui dispatches on_drop by
+            // payload type, so the two sit side by side on one row.
+            .on_drop(cx.listener(move |this, drag: &PlayDrag, _, cx| {
+                this.drop_tracks(drag, ix, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1815,8 +1875,14 @@ impl PlaylistsPanel {
             .drag_over::<TrackDrag>(|style, _, _, _| {
                 style.bg(palette::alpha(palette::accent(), 0x1a))
             })
+            .drag_over::<PlayDrag>(|style, _, _, _| {
+                style.bg(palette::alpha(palette::accent(), 0x1a))
+            })
             .on_drop(cx.listener(move |this, drag: &TrackDrag, _, cx| {
                 this.drop_on(drag, ix, cx);
+            }))
+            .on_drop(cx.listener(move |this, drag: &PlayDrag, _, cx| {
+                this.drop_tracks(drag, ix, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1891,16 +1957,17 @@ impl PlaylistsPanel {
             cover,
         };
         for col in columns() {
-            if self.column_shown(col.key) {
-                if let Some(c) = track_columns::cell(
-                    col.key,
-                    &cell,
-                    &self.state,
-                    self.row_height,
-                    self.compact_plays,
-                ) {
-                    row = row.child(c);
-                }
+            if !self.column_shown(col.key) {
+                continue;
+            }
+            if let Some(c) = track_columns::cell(
+                col.key,
+                &cell,
+                &self.state,
+                self.row_height,
+                self.compact_plays,
+            ) {
+                row = row.child(c);
             }
         }
         row
@@ -2467,6 +2534,14 @@ impl Panel for PlaylistsPanel {
 
     rox_panel_api::opens_settings!();
 
+    /// The headers and track rows take the drop themselves, so the workspace's
+    /// own drop zones stand down over this panel. A drop that misses every row
+    /// is a no-op: there is no one playlist that empty space would mean, same
+    /// as the rest of the workspace's neutral space.
+    fn accepts_drop(&self, cx: &App) -> bool {
+        cx.active_drag_is::<PlayDrag>()
+    }
+
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         panel::title_text(
             self.config.chrome.title.as_deref(),
@@ -2612,12 +2687,12 @@ impl Panel for PlaylistsPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Vec<Button>> {
-        Some(vec![Button::new("import-playlist")
-            .icon(Icon::default().path(icons::DOWNLOAD))
-            .tooltip(rox_i18n::t!("playlists-import-tooltip"))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.import(window, cx)
-            }))])
+        Some(vec![
+            Button::new("import-playlist")
+                .icon(Icon::default().path(icons::DOWNLOAD))
+                .tooltip(rox_i18n::t!("playlists-import-tooltip"))
+                .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+        ])
     }
 }
 
@@ -2885,7 +2960,7 @@ impl PlaylistsPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{fold_head_lines, PlaylistsConfig};
+    use super::{PlaylistsConfig, fold_head_lines};
     use crate::group_head::{self, HeadPiece};
 
     /// A layout from before the composition editors has no saved lines, so

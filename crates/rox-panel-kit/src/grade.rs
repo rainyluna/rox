@@ -47,6 +47,11 @@
 //! more than the ramp's, and its hue lands a spread either side of the
 //! cover's, folded from the full circle. Grey pixels take the ramp as is.
 //!
+//! A cover with no colour in it has no hue to lend, and neither does the
+//! accent standing in for it, which song theming strips to grey under
+//! exactly that cover. `Cover` degrades to `Palette` there: the same two
+//! colours, the preset's shape, and no hue conjured out of a grey.
+//!
 //! Both run in linear light: the frame is sampled from an sRGB texture
 //! that decodes on read, and Oklab is defined from linear sRGB. The theme
 //! colours are handed over already linearised for the same reason.
@@ -95,7 +100,8 @@ pub struct Grade {
     pub accent: [f32; 3],
     /// The cover ramp's colour as Oklab hue in radians and chroma. The
     /// lightness is the ramp's own, so it isn't carried. The accent's
-    /// while there's no cover with colour in it.
+    /// while there's no cover with colour in it, and zero chroma when
+    /// that accent has no colour either.
     pub cover: (f32, f32),
 }
 
@@ -155,12 +161,29 @@ impl Grade {
 /// grey.
 const COVER_CHROMA_FLOOR: f32 = 0.1;
 
+/// The least chroma a colour needs before its hue means anything. A tan
+/// is muted; a grey has no hue at all, and the angle `atan2` reads off
+/// what's left of one is the round trip's own rounding error. Song
+/// theming strips the accent to grey under an achromatic cover, and that
+/// grey stands in for the cover here, so without this the ramp ran on
+/// whichever hue the last ulp happened to point at: an amber accent came
+/// back at exactly 180 degrees and painted the frame teal.
+const COVER_CHROMA_MIN: f32 = 0.01;
+
 /// The cover ramp's colour: the cover's hue in radians and its chroma or
 /// the floor. The lightness is dropped on purpose; the ramp's contrast is
 /// the distance between its ends, and the palette already put the accent
 /// that distance from the background.
+///
+/// A colour with no chroma worth the name comes back as no stop at all,
+/// zero chroma, which the shader takes as its cue to run the plain
+/// two-stop ramp instead of inventing a hue to grade toward.
 pub fn cover_stop(cover: Rgba) -> (f32, f32) {
     let (_, chroma, hue) = palette::rgba_to_oklch(cover);
+    if chroma < COVER_CHROMA_MIN {
+        return (0.0, 0.0);
+    }
+
     (hue, chroma.max(COVER_CHROMA_FLOOR))
 }
 
@@ -301,16 +324,20 @@ fn grade(rgb: vec3<f32>) -> vec3<f32> {
     let mode = params.signals[0].w;
     let light = params.signals[1].w;
     var out = rgb;
-    if (mode >= 2.5) {
-        let lab = linear_to_oklab(rgb);
-        let floor = linear_to_oklab(params.signals[1].xyz);
-        let accent = linear_to_oklab(params.signals[2].xyz);
-        out = cover_grade(lab, floor, accent.x, params.signals[2].w, params.signals[3].x);
-    } else if (mode >= 1.5) {
+    if (mode >= 1.5) {
         let lab = linear_to_oklab(rgb);
         let floor = linear_to_oklab(params.signals[1].xyz);
         let ceiling = linear_to_oklab(params.signals[2].xyz);
-        out = fit_gamut(mix(floor, ceiling, clamp(lab.x, 0.0, 1.0)));
+        let chroma = params.signals[3].x;
+        // The cover ramp needs a colour to run on. A grey album, or a
+        // grey accent standing in for one, arrives at zero chroma with no
+        // hue behind it, and the two-stop ramp is the same colours
+        // without a hue invented to grade toward.
+        if (mode >= 2.5 && chroma > 0.0) {
+            out = cover_grade(lab, floor, ceiling.x, params.signals[2].w, chroma);
+        } else {
+            out = fit_gamut(mix(floor, ceiling, clamp(lab.x, 0.0, 1.0)));
+        }
     } else if (mode >= 0.5 && light > 0.5) {
         let lab = linear_to_oklab(rgb);
         out = fit_gamut(vec3<f32>(1.0 - lab.x, lab.yz));
@@ -377,6 +404,31 @@ mod tests {
         assert!(cover_c < COVER_CHROMA_FLOOR, "and muted: {cover_c}");
         assert_eq!(got_h, cover_h, "hue kept");
         assert_eq!(got_c, COVER_CHROMA_FLOOR, "chroma floored");
+    }
+
+    /// A grey has no hue to floor. The angle left on one is the round
+    /// trip's rounding error, and the shipped amber stripped of its
+    /// chroma comes back pointing at exactly 180 degrees, so the floor
+    /// used to paint the whole frame teal under a colourless cover.
+    #[test]
+    fn a_neutralised_accent_lends_no_hue() {
+        let (lightness, _, hue) = palette::rgba_to_oklch(gpui::rgb(0xffb300));
+        // What derivation does to a colourful role when the cover has no
+        // colour in it: the chroma goes, the lightness stays.
+        let neutral = palette::oklch_to_rgba(lightness, 0.0, hue, 1.0);
+        let (_, left, _) = palette::rgba_to_oklch(neutral);
+        assert!(
+            left < COVER_CHROMA_MIN,
+            "premise: it came back grey: {left}"
+        );
+        assert_eq!(cover_stop(neutral), (0.0, 0.0), "no colour, no stop");
+
+        // Zero in the chroma slot is what sends the shader down the
+        // two-stop ramp instead of the cover one.
+        let grade = Grade::new(GradeMode::Cover, false, gpui::rgb(0x121212), neutral, None);
+        let mut signals = [0.0f32; 16];
+        grade.write(&mut signals);
+        assert_eq!(signals[SLOT_COVER + 1], 0.0, "and none reaches the shader");
     }
 
     /// A vivid cover colour goes through untouched, floor or not.

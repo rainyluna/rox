@@ -11,16 +11,15 @@
 use std::sync::{Arc, LazyLock};
 
 use gpui::{
-    canvas, div, prelude::*, px, App, Context, DismissEvent, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, FontFeatures, KeyDownEvent, MouseButton, MouseDownEvent, Subscription,
-    Window,
+    App, Context, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    KeyDownEvent, MouseButton, MouseDownEvent, Subscription, Window, canvas, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use rox_core::fmt::fmt_time;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, ScrubState};
-use rox_panel_kit::ui::{kbd_line, Seg};
+use rox_panel_kit::ui::{Seg, kbd_line};
 use rox_services::player::NowPlaying;
 
 /// The modal's width, narrower than quick-play's: one field and one strip.

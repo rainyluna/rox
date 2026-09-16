@@ -13,7 +13,7 @@ use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, TextEdit,
 };
 
-use rox_library::projection::{Projection, QueryField, SymTable, QUERY_FIELDS};
+use rox_library::projection::{Projection, QUERY_FIELDS, QueryField, SymTable};
 use rox_library::writer::Field;
 use rox_services::catalog::Library;
 
@@ -240,10 +240,10 @@ fn token_at(text: &str, offset: usize) -> Option<(usize, usize)> {
         match c {
             '"' => in_quotes = !in_quotes,
             c if c.is_whitespace() && !in_quotes => {
-                if let Some(s) = start.take() {
-                    if (s..=i).contains(&offset) {
-                        return Some((s, i));
-                    }
+                if let Some(s) = start.take()
+                    && (s..=i).contains(&offset)
+                {
+                    return Some((s, i));
                 }
                 continue;
             }

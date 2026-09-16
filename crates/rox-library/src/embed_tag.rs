@@ -33,8 +33,8 @@
 
 use std::path::Path;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use half::f16;
 use lofty::file::{AudioFile, FileType};
 use lofty::flac::FlacFile;
@@ -163,12 +163,11 @@ fn read_value(path: &Path, key: &str) -> Option<String> {
         FileType::Flac => {
             let mut source = crate::tag_source::open(path).ok()?;
             let file = FlacFile::read_from(&mut source, opts).ok()?;
-            let found = file
-                .vorbis_comments()?
+
+            file.vorbis_comments()?
                 .items()
                 .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                .map(|(_, v)| v.to_string());
-            found
+                .map(|(_, v)| v.to_string())
         }
         _ => None,
     }

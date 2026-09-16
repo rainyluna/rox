@@ -13,9 +13,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, Action, App, AppContext, Context, Div, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, KeyDownEvent, ParentElement, SharedString, Styled,
-    Subscription, Window,
+    Action, App, AppContext, Context, Div, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, KeyDownEvent, ParentElement, SharedString, Styled, Subscription,
+    Window, div,
 };
 use gpui_component::input::{
     CompletionProvider, Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp,

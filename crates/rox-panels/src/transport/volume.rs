@@ -3,8 +3,8 @@
 //! composes down to any subset in any order.
 
 use gpui::{
-    canvas, div, prelude::*, px, svg, AnyElement, App, Context, Div, EventEmitter, FocusHandle,
-    Focusable, MouseButton, Pixels, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, MouseButton, Pixels,
+    Subscription, WeakEntity, Window, canvas, div, prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::assets::icons;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, align_row, justify, Align, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, Align, AppState, PanelChrome, PanelSettings, ScrubState, align_row, justify,
 };
 use crate::panel_settings;
 use crate::player::observe_view;

@@ -21,12 +21,12 @@ pub mod panel_presets;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{LazyLock, OnceLock, RwLock};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use gpui::{px, App, SharedString, WindowAppearance, WindowDecorations};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use gpui::{App, SharedString, WindowAppearance, WindowDecorations, px};
 use serde::{Deserialize, Serialize};
 
 use rox_playback::engine::LoopMode;
@@ -36,6 +36,7 @@ use rox_design::palette::{self, Palette, Sides};
 
 use crate::acoustic;
 use crate::continuation;
+use crate::install;
 
 /// The floor under every rox window. Applying a layout or toggling the
 /// mini-player resizes the window to a preset's stored size, and a bad or
@@ -64,11 +65,18 @@ pub fn set_workspace_migrator(migrate: fn(WorkspaceBundle)) {
 }
 
 /// The folder holding the running executable, portable mode's anchor.
-/// None when the exe path can't be read, which just leaves portable off.
+/// Under an AppImage it's the folder holding the .AppImage file: the mount
+/// under /tmp the executable actually runs from is read-only and gone
+/// after exit, and a portable folder has to outlive the run. None when the
+/// exe path can't be read, which just leaves portable off.
 fn exe_dir() -> Option<PathBuf> {
+    if let Some(dir) = install::appimage().and_then(Path::parent) {
+        return Some(dir.to_path_buf());
+    }
+
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
 }
 
 /// The marker file beside the executable that keeps portable mode on
@@ -77,18 +85,24 @@ pub fn portable_marker() -> Option<PathBuf> {
     exe_dir().map(|dir| dir.join("portable"))
 }
 
-/// The portable data folder beside the executable. Named rox-data rather
-/// than data so it stays recognizable in a folder shared with other apps.
+/// The portable data folder's name. rox-data rather than data so it stays
+/// recognizable in a folder shared with other apps.
+const PORTABLE_DATA: &str = "rox-data";
+
+/// The portable data folder beside the executable.
 pub fn portable_data_dir() -> Option<PathBuf> {
-    exe_dir().map(|dir| dir.join("rox-data"))
+    exe_dir().map(|dir| dir.join(PORTABLE_DATA))
 }
 
 /// The resolved data root and whether it's the portable one, decided
 /// once per process so a mid-run toggle can't split the stores: the
 /// `portable` marker beside the executable, or a `--portable` flag for
 /// one run, routes everything into rox-data; a flip takes effect on the
-/// next launch. In debug builds `--fresh` overrides both with a wiped
-/// scratch folder for testing the first-run experience.
+/// next launch. A portable request against an executable folder that
+/// takes no writes falls back to the OS data dir with a warning, since
+/// the alternative is a data dir every store fails to open. In debug
+/// builds `--fresh` overrides both with a wiped scratch folder for
+/// testing the first-run experience.
 static DATA_DIR: OnceLock<(PathBuf, bool)> = OnceLock::new();
 
 fn resolve_data_dir() -> (PathBuf, bool) {
@@ -103,13 +117,30 @@ fn resolve_data_dir() -> (PathBuf, bool) {
         let _ = std::fs::remove_dir_all(&dir);
         return (dir, false);
     }
+
     let portable = std::env::args().any(|arg| arg == "--portable")
         || portable_marker().is_some_and(|marker| marker.exists());
+    choose_data_dir(portable, exe_dir().as_deref())
+}
+
+/// The portable decision over its inputs, split from the flag and marker
+/// reading so a test can hand it a folder. A portable request only takes
+/// the folder beside the executable when that folder takes writes;
+/// otherwise the OS data dir, so the stores still open.
+fn choose_data_dir(portable: bool, exe_dir: Option<&Path>) -> (PathBuf, bool) {
     if portable {
-        if let Some(dir) = portable_data_dir() {
-            return (dir, true);
+        match exe_dir {
+            Some(dir) if dir_writable(dir) => return (dir.join(PORTABLE_DATA), true),
+            Some(dir) => log::warn!(
+                "portable mode requested, but {} takes no writes; using the OS data dir",
+                dir.display()
+            ),
+            None => log::warn!(
+                "portable mode requested, but the executable's folder is unknown; using the OS data dir"
+            ),
         }
     }
+
     let dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rox");
@@ -135,10 +166,13 @@ pub fn portable() -> bool {
 /// read-only, and a directory permission read isn't reliable across
 /// platforms, so probe with a real file.
 pub fn portable_available() -> bool {
-    let Some(dir) = exe_dir() else {
-        return false;
-    };
+    exe_dir().is_some_and(|dir| dir_writable(&dir))
+}
+
+/// The write probe itself: create and remove a file in the folder.
+fn dir_writable(dir: &Path) -> bool {
     let probe = dir.join(".rox-write-probe");
+
     match std::fs::write(&probe, b"") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);
@@ -279,11 +313,11 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T, what: &str) -> bool {
             return false;
         }
     };
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            log::warn!("{what}: creating {}: {e}", dir.display());
-            return false;
-        }
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        log::warn!("{what}: creating {}: {e}", dir.display());
+        return false;
     }
     let tmp = path.with_extension("json.tmp");
     if let Err(e) = std::fs::write(&tmp, &text) {
@@ -503,12 +537,6 @@ pub struct Settings {
     /// scales from. Clamped to the palette's shared range on apply; 16 is
     /// the stock size the app has always drawn at.
     pub app_font_size: f32,
-    /// The active icon pack by name, a folder of SVGs under the packs dir
-    /// that overrides the built-in icons. None uses the built-in set, as
-    /// does a name whose folder is gone. Applied at startup; a switch takes
-    /// effect on the next launch, since rendered icons keep their cached tiles.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub icon_pack: Option<String>,
     /// Whether launch loads the last playing track back up, paused where
     /// it left off. The track below is written either way; this only
     /// gates the restore.
@@ -908,6 +936,11 @@ pub struct SessionState {
         deserialize_with = "lenient::option"
     )]
     pub update_dismissed: Option<String>,
+    /// Whether the welcome window's offer to add an AppImage menu entry was
+    /// turned down. A flag rather than the entry's absence, because absence
+    /// is "never asked": a fresh install should hear the offer, someone who
+    /// said no shouldn't hear it twice. Per machine, like the entry itself.
+    pub appimage_menu_declined: bool,
     /// What the last acoustic pass measured on this machine, worker-seconds
     /// per track by model id, so the Library page can price Analyze Missing
     /// before it runs: divide by the worker setting, multiply by what's
@@ -993,6 +1026,7 @@ impl Default for SessionState {
             last_scan: 0,
             update_cache: None,
             update_dismissed: None,
+            appimage_menu_declined: false,
             acoustic_pace: HashMap::new(),
             replaygain_pace: 0.0,
             tempo_pace: 0.0,
@@ -3386,12 +3420,11 @@ fn scrub_dump_paths(value: &mut serde_json::Value) {
                 shader.remove("path");
             }
             // The Shader panel, whose config is the shader.
-            if map.get("panel_name").and_then(|name| name.as_str()) == Some(SHADER_PANEL) {
-                if let Some(serde_json::Value::Object(config)) =
+            if map.get("panel_name").and_then(|name| name.as_str()) == Some(SHADER_PANEL)
+                && let Some(serde_json::Value::Object(config)) =
                     map.get_mut("info").and_then(|info| info.get_mut("panel"))
-                {
-                    config.remove("path");
-                }
+            {
+                config.remove("path");
             }
             for child in map.values_mut() {
                 scrub_dump_paths(child);
@@ -3525,20 +3558,18 @@ fn collect_dump_shader_sources(value: &serde_json::Value, out: &mut Vec<String>)
     match value {
         serde_json::Value::Object(map) => {
             // Any panel's surface shader, flattened onto its config.
-            if let Some(serde_json::Value::Object(shader)) = map.get("shader") {
-                if let Some(source) = shader.get("source").and_then(|s| s.as_str()) {
-                    out.push(source.to_string());
-                }
+            if let Some(serde_json::Value::Object(shader)) = map.get("shader")
+                && let Some(source) = shader.get("source").and_then(|s| s.as_str())
+            {
+                out.push(source.to_string());
             }
             // The Shader panel, whose config is the shader.
-            if map.get("panel_name").and_then(|name| name.as_str()) == Some(SHADER_PANEL) {
-                if let Some(serde_json::Value::Object(config)) =
+            if map.get("panel_name").and_then(|name| name.as_str()) == Some(SHADER_PANEL)
+                && let Some(serde_json::Value::Object(config)) =
                     map.get("info").and_then(|info| info.get("panel"))
-                {
-                    if let Some(source) = config.get("source").and_then(|s| s.as_str()) {
-                        out.push(source.to_string());
-                    }
-                }
+                && let Some(source) = config.get("source").and_then(|s| s.as_str())
+            {
+                out.push(source.to_string());
             }
             for child in map.values() {
                 collect_dump_shader_sources(child, out);
@@ -3618,10 +3649,10 @@ impl WorkspaceBundle {
             if !shader.source.is_empty() {
                 continue;
             }
-            if let Some(path) = shader.path.as_ref() {
-                if let Ok(source) = std::fs::read_to_string(path) {
-                    shader.source = source;
-                }
+            if let Some(path) = shader.path.as_ref()
+                && let Ok(source) = std::fs::read_to_string(path)
+            {
+                shader.source = source;
             }
         }
     }
@@ -3939,7 +3970,6 @@ impl Default for Settings {
             theme: Theme::default(),
             language: None,
             app_font_size: palette::FONT_SIZE_DEFAULT,
-            icon_pack: None,
             restore_last_track: true,
             scrobbling: true,
             scrobble_threshold: 0.5,
@@ -4009,10 +4039,10 @@ impl Settings {
         // preferences; back it up and drain its workspaces before any of them
         // read out of it.
         settings.migrated = raw.is_some() && Self::shard_missing();
-        if let Some(text) = raw.as_deref() {
-            if settings.migrated {
-                Self::migrate_split(&value, text);
-            }
+        if let Some(text) = raw.as_deref()
+            && settings.migrated
+        {
+            Self::migrate_split(&value, text);
         }
         settings.look = load_shard(&look_path(), "look", &value, LookState::from_legacy);
         settings.windows = load_shard(&windows_path(), "windows", &value, from_legacy);
@@ -4074,10 +4104,10 @@ impl Settings {
         }
         // A file from before multi-folder holds one library_root; it
         // seeds the list here and the next save drops it.
-        if settings.library_roots.is_empty() {
-            if let Some(root) = settings.library_root.take() {
-                settings.library_roots.push(root);
-            }
+        if settings.library_roots.is_empty()
+            && let Some(root) = settings.library_root.take()
+        {
+            settings.library_roots.push(root);
         }
         settings
     }
@@ -4107,10 +4137,10 @@ impl Settings {
             return;
         }
         let backup = settings_path().with_extension("json.bak-presplit");
-        if !backup.exists() {
-            if let Err(e) = std::fs::write(&backup, raw) {
-                log::warn!("settings: backing up to {}: {e}", backup.display());
-            }
+        if !backup.exists()
+            && let Err(e) = std::fs::write(&backup, raw)
+        {
+            log::warn!("settings: backing up to {}: {e}", backup.display());
         }
         let saved: Vec<WorkspaceBundle> = value
             .get("workspaces")
@@ -4232,6 +4262,71 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch folder for the portable tests, its own per process so two
+    /// test binaries can't collide on it.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rox-portable-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A portable run against a folder that takes writes lands in rox-data
+    /// beside the executable, flagged portable.
+    #[test]
+    fn portable_takes_a_writable_exe_folder() {
+        let dir = scratch("writable");
+        let (chosen, portable) = choose_data_dir(true, Some(&dir));
+        assert!(portable);
+        assert_eq!(chosen, dir.join(PORTABLE_DATA));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a portable request the executable's folder is never
+    /// consulted, writable or not.
+    #[test]
+    fn a_stock_run_ignores_the_exe_folder() {
+        let dir = scratch("stock");
+        let (chosen, portable) = choose_data_dir(false, Some(&dir));
+        assert!(!portable);
+        assert!(!chosen.starts_with(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read-only install case (an AppImage mount, /usr/bin, Program
+    /// Files): a portable request can't be honored, so the run falls back
+    /// to the OS data dir instead of a folder every store fails to open.
+    #[test]
+    fn portable_falls_back_when_the_exe_folder_is_read_only() {
+        let dir = scratch("readonly");
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+
+        // Root writes anywhere, so there's nothing to check under it.
+        if dir_writable(&dir) {
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(&dir, perms);
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let (chosen, portable) = choose_data_dir(true, Some(&dir));
+        assert!(!portable);
+        assert!(!chosen.starts_with(&dir));
+
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&dir, perms);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No executable path at all is the same fallback.
+    #[test]
+    fn portable_without_an_exe_folder_falls_back() {
+        let (_, portable) = choose_data_dir(true, None);
+        assert!(!portable);
+    }
 
     /// A picker entry written before the switches were remembered is the
     /// size alone. It reads back with the switches at their first-run
@@ -4771,9 +4866,11 @@ mod tests {
             },
             ..Settings::default()
         };
-        assert!(WorkspaceBundle::from_settings("mine".into(), &parked)
-            .post_shader
-            .is_some());
+        assert!(
+            WorkspaceBundle::from_settings("mine".into(), &parked)
+                .post_shader
+                .is_some()
+        );
 
         assert!(
             WorkspaceBundle::from_settings("mine".into(), &Settings::default())

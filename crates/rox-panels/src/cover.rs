@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, img, prelude::*, px, radians, relative, svg, AnyElement, App, Context, Corners,
-    Div, EventEmitter, FocusHandle, Focusable, Image, ImageFormat, ObjectFit, RenderImage,
-    SharedString, Subscription, Transformation, WeakEntity, Window,
+    AnyElement, App, Context, Corners, Div, EventEmitter, FocusHandle, Focusable, Image,
+    ImageFormat, ObjectFit, RenderImage, SharedString, Subscription, Transformation, WeakEntity,
+    Window, canvas, div, img, prelude::*, px, radians, relative, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use image::Frame;
@@ -26,9 +26,9 @@ use serde::{Deserialize, Serialize};
 use crate::assets::icons;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
-use crate::discs::{bake_disc, DiscShape, DISC_STYLES};
+use crate::discs::{DISC_STYLES, DiscShape, bake_disc};
 use crate::panel::{
-    self, align_row, justify, Align, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit,
+    self, Align, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit, align_row, justify,
 };
 use crate::panel_settings;
 use crate::selection::SelectionEvent;

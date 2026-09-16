@@ -265,7 +265,7 @@ pub fn completeness(projection: &Projection, drill_cap: usize) -> Completeness {
 mod tests {
     use super::*;
     use crate::rusqlite::Connection;
-    use crate::{store, TrackRow};
+    use crate::{TrackRow, store};
 
     /// A row with everything the five checks read filled in; a test blanks
     /// whichever fields it wants missing.

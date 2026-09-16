@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use rox_core::settings;
 
-pub use rox_library::peaks::{identity, PeakBin, PeakLanes};
+pub use rox_library::peaks::{PeakBin, PeakLanes, identity};
 
 /// Where the cache is stored, public so the storage page can size it.
 pub fn cache_dir() -> PathBuf {

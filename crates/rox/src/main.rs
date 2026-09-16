@@ -56,20 +56,20 @@ mod workspace;
 mod workspaces;
 
 use gpui::{
-    point, px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions,
-    WindowBounds, WindowOptions,
+    App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
+    WindowOptions, point, px, size,
 };
 use gpui_component::Root;
 
 use rox_core::settings::{
-    layouts, note_first_run, note_os_appearance, os_decorations, resize_border, seed_os_appearance,
-    set_acoustic_analysis, set_app_font, set_app_frame, set_design_mode, set_experimental,
-    set_fold_case, set_gain_mode, set_hide_menubar, set_language, set_menubar_buttons,
-    set_os_decorations, set_quit_to_tray, set_rating_dots, set_rating_style, set_resize_border,
-    set_resize_lock, set_seams, set_show_readings, set_tempo_analysis, set_theme,
-    set_workspace_migrator, window_decorations, Settings, MIN_WINDOW_SIZE,
+    MIN_WINDOW_SIZE, Settings, layouts, note_first_run, note_os_appearance, os_decorations,
+    resize_border, seed_os_appearance, set_acoustic_analysis, set_app_font, set_app_frame,
+    set_design_mode, set_experimental, set_fold_case, set_gain_mode, set_hide_menubar,
+    set_language, set_menubar_buttons, set_os_decorations, set_quit_to_tray, set_rating_dots,
+    set_rating_style, set_resize_border, set_resize_lock, set_seams, set_show_readings,
+    set_tempo_analysis, set_theme, set_workspace_migrator, window_decorations,
 };
-use rox_core::{logging, APP_ID};
+use rox_core::{APP_ID, logging};
 use rox_design::assets::Assets;
 use rox_design::palette;
 use rox_net::providers;
@@ -152,16 +152,16 @@ fn open_workspace_window(
     // A preset window opens at the preset's stored size when it has one,
     // keeping the restored position; a preset without a size opens like any
     // other window.
-    if let workspace::WorkspaceStart::Preset(name) = &start {
-        if let Some(s) = layouts::resolve(&Settings::load(), name).and_then(|p| p.size) {
-            window_bounds = WindowBounds::Windowed(Bounds {
-                origin: window_bounds.get_bounds().origin,
-                size: size(
-                    px(s.width).max(MIN_WINDOW_SIZE.width),
-                    px(s.height).max(MIN_WINDOW_SIZE.height),
-                ),
-            });
-        }
+    if let workspace::WorkspaceStart::Preset(name) = &start
+        && let Some(s) = layouts::resolve(&Settings::load(), name).and_then(|p| p.size)
+    {
+        window_bounds = WindowBounds::Windowed(Bounds {
+            origin: window_bounds.get_bounds().origin,
+            size: size(
+                px(s.width).max(MIN_WINDOW_SIZE.width),
+                px(s.height).max(MIN_WINDOW_SIZE.height),
+            ),
+        });
     }
     // The pinned dev size beats both the saved frame and a preset's size, so
     // every window this session comes up at exactly what the flag asked for.
@@ -471,9 +471,6 @@ fn main() {
         set_gain_mode(settings.replay_gain.mode, cx);
         set_acoustic_model(&settings.acoustic_model, cx);
         integrations::tray::sync(cx);
-        // Point the icon resolver at the chosen pack before any window
-        // opens, so the first frame already draws it.
-        startup::icon_packs::activate(settings.icon_pack.as_deref());
         providers::set_lyrics_online(settings.accounts.providers.lrclib);
         providers::set_metadata_online(settings.accounts.providers.musicbrainz);
         providers::set_acoustid_online(settings.accounts.providers.acoustid);
@@ -481,6 +478,9 @@ fn main() {
         providers::set_deezer_online(settings.accounts.providers.deezer);
         providers::set_lastfm_art_online(settings.accounts.providers.lastfm_art);
         providers::set_artist_online(settings.accounts.providers.artist);
+        // An AppImage that moved since its menu entry was written has an
+        // entry pointing at nothing; point it at where the file is now.
+        startup::desktop_integration::heal();
         // Sweep what a past update left behind: the rename-aside old exe
         // Windows couldn't delete, a stranded stage. Inline rather than
         // spawned, because the check below may start a download whose

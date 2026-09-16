@@ -3,8 +3,8 @@
 //! is decode-thread and UI-thread only.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 /// A run of contiguous output starting at `at_frame` on the global output
 /// clock. Maps the callback's consumed-frames counter back to a position in a

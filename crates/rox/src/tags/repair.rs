@@ -24,9 +24,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui::{
-    actions, div, prelude::*, px, size, uniform_list, App, Bounds, Context, Div, Entity,
-    FocusHandle, Global, KeyBinding, PathPromptOptions, SharedString, Stateful, Subscription,
-    UniformListScrollHandle, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, FocusHandle, Global, KeyBinding, PathPromptOptions,
+    SharedString, Stateful, Subscription, UniformListScrollHandle, Window, WindowHandle, actions,
+    div, prelude::*, px, size, uniform_list,
 };
 use gpui_component::scroll::Scrollbar;
 use gpui_component::spinner::Spinner;
@@ -36,7 +36,7 @@ use rox_library::writer::{self, Edit};
 
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
-use rox_panel_kit::ui::{checkbox, kbd_line, section, small_button, Seg, MIN_SIZE};
+use rox_panel_kit::ui::{MIN_SIZE, Seg, checkbox, kbd_line, section, small_button};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
 
@@ -118,13 +118,12 @@ impl Global for OpenTagRepair {}
 /// shared catalog it scans and repairs into and the art bake it backs with,
 /// so the settings window can open it from what it already holds.
 pub fn open(library: Entity<Library>, now_art: Entity<NowPlayingArt>, cx: &mut App) {
-    if let Some(handle) = cx.try_global::<OpenTagRepair>().and_then(|o| o.0) {
-        if handle
+    if let Some(handle) = cx.try_global::<OpenTagRepair>().and_then(|o| o.0)
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let bounds = Bounds::centered(None, size(px(720.), px(600.)), cx);
     let handle = rox_panel_api::panel::open_child_window(
@@ -221,15 +220,15 @@ impl TagRepair {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = rx.await {
-                if let Some(root) = paths.pop() {
-                    this.update(cx, |this, cx| {
-                        this.scope = Scope::Folder(root);
-                        this.reset_results();
-                        cx.notify();
-                    })
-                    .ok();
-                }
+            if let Ok(Ok(Some(mut paths))) = rx.await
+                && let Some(root) = paths.pop()
+            {
+                this.update(cx, |this, cx| {
+                    this.scope = Scope::Folder(root);
+                    this.reset_results();
+                    cx.notify();
+                })
+                .ok();
             }
         })
         .detach();
@@ -376,7 +375,7 @@ impl TagRepair {
             .found
             .iter()
             .zip(&self.checked)
-            .filter(|(_, &c)| c)
+            .filter(|&(_, &c)| c)
             .map(|(row, _)| row.path.clone())
             .collect();
         if targets.is_empty() {

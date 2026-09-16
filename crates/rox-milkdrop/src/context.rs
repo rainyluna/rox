@@ -24,7 +24,7 @@
 //! they're written to be read by whoever is looking at a black panel and
 //! wondering why.
 
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 use std::num::NonZeroU32;
 use std::sync::OnceLock;
 
@@ -330,13 +330,13 @@ mod windows_helper {
     use std::num::NonZeroIsize;
 
     use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
-    use windows_sys::core::PCWSTR;
     use windows_sys::Win32::Foundation::{HINSTANCE, HWND};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, CS_OWNDC, CW_USEDEFAULT,
+        CS_OWNDC, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW,
         WNDCLASSW, WS_OVERLAPPED,
     };
+    use windows_sys::core::PCWSTR;
 
     const CLASS_NAME: &[u16] = &[
         b'r' as u16,

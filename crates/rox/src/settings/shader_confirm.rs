@@ -13,8 +13,8 @@
 //! shader it exists to undo.
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Entity, EntityId, FocusHandle,
-    Global, KeyBinding, Subscription, WeakEntity, Window, WindowHandle,
+    App, Bounds, Context, Entity, EntityId, FocusHandle, Global, KeyBinding, Subscription,
+    WeakEntity, Window, WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::Root;
 
@@ -22,7 +22,7 @@ use rox_core::settings::{PostShaderConfig, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel;
-use rox_panel_kit::ui::{chord, kbd_line, small_button, Seg};
+use rox_panel_kit::ui::{Seg, chord, kbd_line, small_button};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 
 /// The caller's after-revert refresh, boxed for the entity to hold.
@@ -48,13 +48,13 @@ pub fn open(
     on_reverted: impl FnOnce(&mut App) + 'static,
     cx: &mut App,
 ) {
-    if let Some((handle, confirm)) = cx.default_global::<OpenConfirm>().0.clone() {
-        if confirm.upgrade().is_some() {
-            handle
-                .update(cx, |_, window, _| window.activate_window())
-                .ok();
-            return;
-        }
+    if let Some((handle, confirm)) = cx.default_global::<OpenConfirm>().0.clone()
+        && confirm.upgrade().is_some()
+    {
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .ok();
+        return;
     }
     let bounds = Bounds::centered(None, size(px(420.), px(170.)), cx);
     let view = std::rc::Rc::new(std::cell::RefCell::new(None));

@@ -268,6 +268,13 @@ impl TabPanel {
         }
     }
 
+    /// Rox addition: the panel body's bounds as of the last paint. Empty
+    /// until this group has painted once, so a caller reading it during the
+    /// first frame gets a miss rather than a wrong hit.
+    pub fn content_bounds(&self) -> Bounds<Pixels> {
+        self.content_bounds.get()
+    }
+
     /// Rox addition: make a specific panel the active tab and hand it the
     /// keyboard, whether or not it was already the active one. Used by the
     /// dock's focus-by-name so a shortcut can jump straight to a panel that

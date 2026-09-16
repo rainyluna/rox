@@ -11,11 +11,11 @@
 //! story.
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, Div, Entity, EntityId, EventEmitter,
-    SharedString, Window,
+    AnyElement, App, Context, Div, Entity, EntityId, EventEmitter, SharedString, Window, div,
+    prelude::*, px, svg,
 };
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::Side;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_library::projection::{FilterField, FilterSet};
 use serde::{Deserialize, Serialize};
 

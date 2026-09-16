@@ -933,7 +933,7 @@ impl SettingsWindow {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    ) -> Option<impl IntoElement + use<>> {
         // A workspace apply reads out what's coming before it runs: who made
         // it, what they say it is, and any shader code inside it that this
         // machine has never approved.

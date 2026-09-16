@@ -22,16 +22,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    canvas, div, prelude::*, px, AnyElement, App, Context, Div, EntityId, EventEmitter,
-    FocusHandle, Focusable, PathPromptOptions, SharedString, Subscription, UserShaderId,
-    WeakEntity, Window,
+    AnyElement, App, Context, Div, EntityId, EventEmitter, FocusHandle, Focusable,
+    PathPromptOptions, SharedString, Subscription, UserShaderId, WeakEntity, Window, canvas, div,
+    prelude::*, px,
 };
 use gpui_component::menu::PopupMenu;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
-use rox_viz::signal::Route;
 use rox_viz::AudioFeed;
+use rox_viz::signal::Route;
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
@@ -40,10 +40,10 @@ use crate::design::{palette, tokens};
 // one letter apart.
 use crate::panel::shader::{self as surface, SlotTargets, SourceWatch};
 use crate::panel::{
-    self, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit, setting_row, toggle,
 };
 use crate::panel_settings;
-use crate::settings::ui::{self as settings_ui, section, SECTION_GAP};
+use crate::settings::ui::{self as settings_ui, SECTION_GAP, section};
 use crate::signal_ui::{self, routes::RouteEditState};
 
 /// The builtin shaders, so a fresh panel draws something before anyone has
@@ -293,10 +293,10 @@ impl ShaderPanel {
         if self.pending() {
             return;
         }
-        if let Some(source) = self.watch.poll(&path) {
-            if source != self.config.source {
-                self.set_source(source, Some(path), cx);
-            }
+        if let Some(source) = self.watch.poll(&path)
+            && source != self.config.source
+        {
+            self.set_source(source, Some(path), cx);
         }
     }
 
@@ -1739,11 +1739,13 @@ mod tests {
             !pure.screen_pass_only(),
             "a shader drawing from its uniforms alone stays an in-scene quad"
         );
-        assert!(gpui::UserShaderCaps {
-            uses_prev: true,
-            ..pure
-        }
-        .screen_pass_only());
+        assert!(
+            gpui::UserShaderCaps {
+                uses_prev: true,
+                ..pure
+            }
+            .screen_pass_only()
+        );
     }
 
     /// The fork is what registration made of the program, not what the
@@ -1768,16 +1770,20 @@ mod tests {
             uses_assets: false,
             uses_mask: false,
         };
-        assert!(gpui::UserShaderCaps {
-            multi_pass: true,
-            ..quad
-        }
-        .screen_pass_only());
-        assert!(gpui::UserShaderCaps {
-            uses_assets: true,
-            ..quad
-        }
-        .screen_pass_only());
+        assert!(
+            gpui::UserShaderCaps {
+                multi_pass: true,
+                ..quad
+            }
+            .screen_pass_only()
+        );
+        assert!(
+            gpui::UserShaderCaps {
+                uses_assets: true,
+                ..quad
+            }
+            .screen_pass_only()
+        );
     }
 
     /// The `// @slot n: name` convention gives the Bindings page something

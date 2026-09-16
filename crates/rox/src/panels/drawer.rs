@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, point, prelude::*, px, size, Along, AnyElement, App, Axis, Bounds, Context, Div,
-    Entity, EntityId, EventEmitter, FocusHandle, Focusable, MouseButton, MouseMoveEvent, Pixels,
-    SharedString, Subscription, WeakEntity, Window,
+    Along, AnyElement, App, Axis, Bounds, Context, Div, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, MouseButton, MouseMoveEvent, Pixels, SharedString, Subscription,
+    WeakEntity, Window, canvas, div, point, prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu};
@@ -37,7 +37,7 @@ use rox_design::{palette, tokens};
 use rox_panel_api::panel::{self, AppState, PanelChrome, PanelSettings};
 use rox_panel_api::panel_settings;
 use rox_panel_kit::ui as settings_ui;
-use rox_panel_kit::{choices_shared, setting_row, ScrubState};
+use rox_panel_kit::{ScrubState, choices_shared, setting_row};
 use rox_services::selection::SelectionEvent;
 
 /// The handle strip's thickness: enough for the grip and label to read,
@@ -669,13 +669,11 @@ impl DrawerPanel {
                                 // so the next frame's handler is the one
                                 // that can close. This closure captured the
                                 // old value and would never fire.
-                                if !entered {
-                                    if let Some(this) = weak.upgrade() {
-                                        this.update(cx, |this, cx| {
-                                            this.entered = true;
-                                            cx.notify();
-                                        });
-                                    }
+                                if !entered && let Some(this) = weak.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.entered = true;
+                                        cx.notify();
+                                    });
                                 }
                                 return;
                             }
@@ -1216,9 +1214,11 @@ mod tests {
 
             // Slot 0 is the wall that publishes picks; slot 1 slides out,
             // and it only shows the pick if it follows the selection.
-            assert!(inner["children"][0]["panel_name"]
-                .as_str()
-                .is_some_and(|name| name.ends_with("grid")));
+            assert!(
+                inner["children"][0]["panel_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with("grid"))
+            );
             let slid_out = &inner["children"][1];
             assert_eq!(slid_out["panel_name"], "library");
             assert_eq!(slid_out["info"]["panel"]["query_source"], "selection");

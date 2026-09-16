@@ -4,7 +4,7 @@
 //! "note" line their empty states show, and the open-or-focus dance the
 //! editor and matcher windows all run over a keyed window registry.
 
-use gpui::{div, prelude::*, px, App, Div, Global, SharedString, WindowHandle};
+use gpui::{App, Div, Global, SharedString, WindowHandle, div, prelude::*, px};
 use gpui_component::Root;
 
 use rox_design::palette;

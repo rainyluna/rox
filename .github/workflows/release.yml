@@ -68,13 +68,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The Linux leg builds inside Debian bookworm: glibc 2.36 is the
+          # floor the AppImage promises, and the tarball and deb inherit it,
+          # which takes Debian 12 along. The other two entries leave the key
+          # out, which evaluates to empty and runs straight on the runner.
           - os: ubuntu-latest
             artifact: linux-x86_64
+            container: debian:bookworm
           - os: macos-latest
             artifact: macos-aarch64
           - os: windows-latest
             artifact: windows-x86_64
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     # Job-level so `cargo build` picks the api identities up without a per-step
     # env block, and so the macOS steps can gate on `env.X != ''` (a step's own
     # env isn't visible to its `if`). Every one is optional: a fork or a run
@@ -93,20 +99,26 @@ jobs:
       DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
       ACOUSTID_CLIENT_KEY: ${{ secrets.ACOUSTID_CLIENT_KEY }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-
-      # cmake is here for rox-milkdrop-sys, which builds libprojectM from
-      # source. The GitHub images already ship it; the line documents the need.
+      # Before the checkout, because the bookworm image is bare: without git
+      # in it actions/checkout falls back to a REST tarball with no .git,
+      # and the metainfo fill and the projectM vendoring both need a real
+      # clone. We're root in the container, so no sudo. git and curl serve
+      # checkout, the toolchain installer and install-action; dpkg-dev is
+      # dpkg-shlibdeps for cargo-deb's $auto; file is for appimagetool;
+      # cmake is for rox-milkdrop-sys, which builds libprojectM from source.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y \
+            build-essential git curl ca-certificates dpkg-dev file \
             pkg-config libasound2-dev libfontconfig1-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-dev libxcb1-dev libvulkan-dev \
             libssl-dev cmake
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       # gpui's build script compiles Metal shaders with `xcrun metal`. Xcode 26
       # ships that toolchain as a separate download, so fetch it if missing.
@@ -163,6 +175,14 @@ jobs:
             -s -k "$pass" "$keychain" >/dev/null
           security list-keychain -d user -s "$keychain" login.keychain-db
 
+      # The metainfo in the tree carries a marker where its release history
+      # goes; the script swaps in one entry per stable tag so the tarball,
+      # the deb and the AppImage all ship the filled file. The checkout has
+      # no tags, so the script fetches them itself.
+      - name: Fill metainfo releases
+        if: runner.os == 'Linux'
+        run: scripts/metainfo-releases.sh crates/rox/assets/app/rox.metainfo.xml
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -173,6 +193,7 @@ jobs:
           cp crates/rox/assets/app/rox.desktop "$staging/"
           cp crates/rox/assets/app/rox-music.svg "$staging/rox.svg"
           cp crates/rox/assets/app/rox.png "$staging/"
+          cp crates/rox/assets/app/rox.metainfo.xml "$staging/"
           cp scripts/dist/README.txt "$staging/"
           cp LICENSE "$staging/"
           tar czf "$staging.tar.gz" "$staging"
@@ -185,13 +206,22 @@ jobs:
           tool: cargo-deb
 
       # Same binaries as the tarball, wrapped with the .desktop entry and
-      # icons for menu integration and clean uninstall. Built on ubuntu-latest
-      # (24.04), so the glibc floor covers Debian 13, Ubuntu 24.04+, and MX
-      # 25, but not Debian 12. Layout and dependencies live in
+      # icons for menu integration and clean uninstall. Built in the bookworm
+      # container, so the glibc floor is 2.36 and Debian 12 is covered along
+      # with everything newer. Layout and dependencies live in
       # [package.metadata.deb] in crates/rox/Cargo.toml.
       - name: Package (Linux .deb)
         if: runner.os == 'Linux'
         run: cargo deb -p rox --no-build -o .
+
+      # Same binaries again as one self-contained file. Nothing is bundled
+      # beyond rox, rox-mcp, the desktop entry, icons and metainfo: every
+      # library rox links is on the AppImage excludelist or is glibc, and
+      # the bookworm build is what makes that glibc floor hold. The script
+      # pins appimagetool and the static runtime by hash.
+      - name: Package (Linux AppImage)
+        if: runner.os == 'Linux'
+        run: scripts/appimage/build.sh "$VERSION" .
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
@@ -282,6 +312,7 @@ jobs:
             rox-v*.zip
             rox-v*.dmg
             rox-v*-setup.exe
+            rox-v*.AppImage
             rox_*.deb
           if-no-files-found: error
 
@@ -370,6 +401,21 @@ jobs:
     # stable release. The stable release that follows publishes as usual.
     permissions: {}
     uses: ./.github/workflows/aur.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+      candidate: ${{ needs.check.outputs.prerelease == 'true' }}
+    secrets: inherit
+
+  # Chained here for the reason the AUR job gives above. Candidates build,
+  # lint, and attach their bundle to the prerelease, so a manifest break
+  # surfaces on the candidate; only a stable run pushes to the Flathub repo,
+  # which tracks stable. contents: write, unlike the AUR job, because the
+  # bundle upload goes through github.token.
+  flatpak:
+    needs: [check, release]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/flatpak.yml
     with:
       version: ${{ needs.check.outputs.version }}
       candidate: ${{ needs.check.outputs.prerelease == 'true' }}

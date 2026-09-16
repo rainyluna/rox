@@ -20,10 +20,10 @@
 //! `&mut` into state the render call is already walking, and one frame of
 //! delay on a preset change nobody can see is a cheap way out of that.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
@@ -261,15 +261,15 @@ impl Worker {
             }
 
             self.feed_audio();
-            if !self.paused {
-                if let Err(message) = self.render() {
-                    // The loop ends here and the worker drops on its own
-                    // thread, context and all. The status is what the
-                    // panel shows over the last frame it got.
-                    log::warn!("milkdrop engine stopped: {message}");
-                    self.shared.set_status(Status::Failed(message));
-                    return;
-                }
+            if !self.paused
+                && let Err(message) = self.render()
+            {
+                // The loop ends here and the worker drops on its own
+                // thread, context and all. The status is what the
+                // panel shows over the last frame it got.
+                log::warn!("milkdrop engine stopped: {message}");
+                self.shared.set_status(Status::Failed(message));
+                return;
             }
             self.drain_callbacks();
         }
@@ -499,10 +499,10 @@ impl Worker {
             self.shared
                 .push_event(Event::PresetFailed { path, message });
         }
-        if let Some(hard_cut) = self.callbacks.switch_requested.take() {
-            if !self.locked {
-                self.advance(!hard_cut);
-            }
+        if let Some(hard_cut) = self.callbacks.switch_requested.take()
+            && !self.locked
+        {
+            self.advance(!hard_cut);
         }
     }
 
@@ -868,13 +868,15 @@ unsafe extern "C" fn on_log(
     if message.is_null() {
         return;
     }
-    let message = CStr::from_ptr(message).to_string_lossy();
+
+    let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let level = match level {
         pm::PROJECTM_LOG_LEVEL_FATAL | pm::PROJECTM_LOG_LEVEL_ERROR => log::Level::Error,
         pm::PROJECTM_LOG_LEVEL_WARN => log::Level::Warn,
         pm::PROJECTM_LOG_LEVEL_INFO => log::Level::Info,
         _ => log::Level::Debug,
     };
+
     log::log!(level, "projectm: {}", message.trim_end());
 }
 
@@ -889,7 +891,8 @@ unsafe extern "C" fn load_proc(name: *const c_char, _user_data: *mut c_void) -> 
     if name.is_null() {
         return std::ptr::null_mut();
     }
-    context::resolve(CStr::from_ptr(name)) as *mut c_void
+
+    context::resolve(unsafe { CStr::from_ptr(name) }) as *mut c_void
 }
 
 /// Fired from inside projectM's render call. Records and returns; the load
@@ -898,7 +901,8 @@ unsafe extern "C" fn on_switch_requested(is_hard_cut: bool, user_data: *mut c_vo
     if user_data.is_null() {
         return;
     }
-    let callbacks = &*(user_data as *const Callbacks);
+
+    let callbacks = unsafe { &*(user_data as *const Callbacks) };
     callbacks.switch_requested.set(Some(is_hard_cut));
 }
 
@@ -912,11 +916,12 @@ unsafe extern "C" fn on_switch_failed(
     if user_data.is_null() {
         return;
     }
+
     let path = if preset_filename.is_null() {
         PathBuf::new()
     } else {
         PathBuf::from(
-            CStr::from_ptr(preset_filename)
+            unsafe { CStr::from_ptr(preset_filename) }
                 .to_string_lossy()
                 .into_owned(),
         )
@@ -924,9 +929,12 @@ unsafe extern "C" fn on_switch_failed(
     let message = if message.is_null() {
         "libprojectM did not say why".to_string()
     } else {
-        CStr::from_ptr(message).to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned()
     };
-    let callbacks = &*(user_data as *const Callbacks);
+
+    let callbacks = unsafe { &*(user_data as *const Callbacks) };
     if let Ok(mut failures) = callbacks.failures.try_borrow_mut() {
         failures.push((path, message));
     }
@@ -934,14 +942,14 @@ unsafe extern "C" fn on_switch_failed(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{c_char, c_void, CStr};
+    use std::ffi::{CStr, c_char, c_void};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use rox_milkdrop_sys as pm;
 
     use super::context;
-    use super::{resolve_rotation, Trail};
+    use super::{Trail, resolve_rotation};
     use crate::{Command, Engine, EngineOptions, Event, PresetLibrary, Rotation, Status};
 
     fn touch(path: &std::path::Path) {
@@ -1221,7 +1229,8 @@ mod tests {
             if name.is_null() {
                 return std::ptr::null_mut();
             }
-            context::resolve(CStr::from_ptr(name)) as *mut c_void
+
+            context::resolve(unsafe { CStr::from_ptr(name) }) as *mut c_void
         }
 
         // A context has to be current on this thread before projectM will

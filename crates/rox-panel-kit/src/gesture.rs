@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    fill, point, px, size, Along, App, Axis, Bounds, Context, MouseButton, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollHandle, UniformListScrollHandle, Window,
+    Along, App, Axis, Bounds, Context, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollHandle, UniformListScrollHandle, Window, fill, point, px, size,
 };
 use rox_design::{palette, tokens};
 

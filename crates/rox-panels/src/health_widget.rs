@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Task, WeakEntity, Window,
+    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    Task, WeakEntity, Window, div, prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Side};
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::assets::icons;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
-use crate::panel::{self, setting_row, toggle, AppState, PanelChrome, PanelSettings};
+use crate::panel::{self, AppState, PanelChrome, PanelSettings, setting_row, toggle};
 use crate::panel_settings;
 use crate::settings::ui as settings_ui;
 

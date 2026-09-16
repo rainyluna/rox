@@ -31,11 +31,11 @@ mod cursor;
 pub mod edit;
 
 pub use chain::{
-    fallback_cover, parse_chain, register_program, resolve_assets, uses_cover, uses_mask,
-    validate_frame_pass, validate_program, AssetImage, AssetRef, ChainSpec, PassSpec, ProgramCtx,
-    COVER_SOURCE,
+    AssetImage, AssetRef, COVER_SOURCE, ChainSpec, PassSpec, ProgramCtx, fallback_cover,
+    parse_chain, register_program, resolve_assets, uses_cover, uses_mask, validate_frame_pass,
+    validate_program,
 };
-pub use cursor::{cursor_presence, reads_cursor, watch_cursor, CURSOR_FADE, CURSOR_HOLD};
+pub use cursor::{CURSOR_FADE, CURSOR_HOLD, cursor_presence, reads_cursor, watch_cursor};
 
 /// How many signal slots a shader sees, the uniform block's width.
 pub const SLOTS: usize = 16;
@@ -670,16 +670,16 @@ fn pool_reload(
         // A file that has gone leaves the entry alone, since the source is
         // what runs and the file is only the working copy. The stamp stays
         // put, so the file coming back reads as news.
-        if let Some(stamp) = rox_core::settings::file_stamp(&path) {
-            if marks.source != Some(stamp) {
-                marks.source = Some(stamp);
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if text.trim() != entry.source.trim() {
-                        entry.source = text.clone();
-                        edits.fresh.push(text);
-                        edits.changed = true;
-                    }
-                }
+        if let Some(stamp) = rox_core::settings::file_stamp(&path)
+            && marks.source != Some(stamp)
+        {
+            marks.source = Some(stamp);
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && text.trim() != entry.source.trim()
+            {
+                entry.source = text.clone();
+                edits.fresh.push(text);
+                edits.changed = true;
             }
         }
         let (Some(dir), Ok(spec)) = (path.parent(), parse_chain(&entry.source)) else {
@@ -1116,8 +1116,7 @@ pub fn unsupported(error: &str) -> bool {
 
 /// What to say instead, since "unsupported" under a "didn't compile"
 /// heading sends people hunting through WGSL that's perfectly fine.
-pub const NO_PIPELINE_NOTE: &str =
-    "This build renders through a backend with no shader pipeline. Shaders ride \
+pub const NO_PIPELINE_NOTE: &str = "This build renders through a backend with no shader pipeline. Shaders ride \
      blade's render pipelines, so every source gets turned down whatever it says.";
 
 /// The headline over that. No full stop: it's a banner headline first, and
@@ -1459,16 +1458,16 @@ impl PanelSurface {
                 entry.watch = SourceWatch::seeded(self.path.as_deref());
             }
             entry.touched = Instant::now();
-            if let Some(path) = &self.path {
-                if let Some(text) = entry.watch.poll(path) {
-                    let running = entry.hot.as_deref().unwrap_or(&self.source);
-                    if text.trim() != running.trim() {
-                        // The user pointed rox at this file, so what comes
-                        // out of it is theirs; approving here keeps the
-                        // edit from tripping the gate on restart.
-                        fresh = Some(text.clone());
-                        entry.hot = Some(text);
-                    }
+            if let Some(path) = &self.path
+                && let Some(text) = entry.watch.poll(path)
+            {
+                let running = entry.hot.as_deref().unwrap_or(&self.source);
+                if text.trim() != running.trim() {
+                    // The user pointed rox at this file, so what comes
+                    // out of it is theirs; approving here keeps the
+                    // edit from tripping the gate on restart.
+                    fresh = Some(text.clone());
+                    entry.hot = Some(text);
                 }
             }
             (
@@ -1617,8 +1616,8 @@ static POOL_GUARD: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rox_viz::signal::Source;
     use rox_viz::AudioFeed;
+    use rox_viz::signal::Source;
 
     #[test]
     fn slot_targets_round_trip() {

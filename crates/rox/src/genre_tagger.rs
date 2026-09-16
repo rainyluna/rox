@@ -43,13 +43,13 @@
 //! that track survives.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
-    div, img, prelude::*, px, size, svg, AnyElement, App, AsyncApp, Bounds, ClickEvent, Context,
-    Div, Entity, FocusHandle, Global, KeyDownEvent, ObjectFit, ScrollHandle, SharedString,
-    Stateful, Subscription, Window, WindowHandle,
+    AnyElement, App, AsyncApp, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Global,
+    KeyDownEvent, ObjectFit, ScrollHandle, SharedString, Stateful, Subscription, Window,
+    WindowHandle, div, img, prelude::*, px, size, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::Scrollbar;
@@ -68,7 +68,7 @@ use rox_library::writer::{self, Change, Field};
 use rox_net::providers;
 use rox_panel_api::panel::{self, AppState};
 use rox_panel_api::suggest;
-use rox_panel_kit::ui::{checkbox, section, small_button, MIN_SIZE};
+use rox_panel_kit::ui::{MIN_SIZE, checkbox, section, small_button};
 use rox_services::backdrop::WindowBackdrop;
 use rox_services::catalog::LibraryEvent;
 use rox_services::thumbs::Thumb;
@@ -111,13 +111,12 @@ impl Global for OpenTagger {}
 
 /// Open the genre tagger, or bring the open one forward.
 pub fn open(state: AppState, cx: &mut App) {
-    if let Some(handle) = cx.try_global::<OpenTagger>().and_then(|o| o.0) {
-        if handle
+    if let Some(handle) = cx.try_global::<OpenTagger>().and_then(|o| o.0)
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let bounds = Bounds::centered(None, size(px(720.), px(640.)), cx);
     let handle = rox_panel_api::panel::open_child_window(

@@ -5,11 +5,11 @@
 //! the panels stay out of the color business entirely.
 
 use gpui::{
-    div, prelude::*, px, relative, App, Bounds, Context, Div, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Path, Pixels, Rgba, SharedString, Window,
+    App, Bounds, Context, Div, MouseButton, MouseDownEvent, MouseMoveEvent, Path, Pixels, Rgba,
+    SharedString, Window, div, prelude::*, px, relative,
 };
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::Icon;
+use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use rox_core::fmt::fmt_time;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};

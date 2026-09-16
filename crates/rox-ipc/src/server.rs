@@ -19,14 +19,14 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::PathBuf;
-use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::sync::Arc;
+use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::events::Events;
-use crate::protocol::{RequestFrame, ResponseFrame, RpcError, PROTOCOL_VERSION};
+use crate::protocol::{PROTOCOL_VERSION, RequestFrame, ResponseFrame, RpcError};
 
 /// The longest frame a client may send, one megabyte. A queue insert of a
 /// few thousand paths fits many times over; what this stops is a peer

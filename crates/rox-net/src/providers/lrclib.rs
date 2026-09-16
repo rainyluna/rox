@@ -6,7 +6,7 @@
 //! mistagged album would drop good candidates the confidence score can
 //! sort out instead.
 
-use super::{agent, net_reason, LyricsCandidate, LyricsProvider, TrackQuery};
+use super::{LyricsCandidate, LyricsProvider, TrackQuery, agent, net_reason};
 
 const API: &str = "https://lrclib.net/api/search";
 

@@ -36,6 +36,18 @@ it's a custom context server with that command. rox has to be running: the proxy
 connects to the socket on the first tool call and reconnects by itself when rox
 restarts.
 
+The Flatpak names a different command: `flatpak` with the args `run`,
+`--command=rox-mcp`, `com.zealsprince.rox`. The binary lives in `/app/bin`, which
+the host can't reach, and the runtime dir the socket sits in is only shared among
+processes of that app id, so the proxy has to start inside the sandbox.
+
+The AppImage names the `.AppImage` file itself with the single arg `--mcp`, which
+its launcher turns into `rox-mcp`. The mount the executable runs from gets a new
+random path every launch, so a path into it would be stale by the next start.
+
+The snippet on Settings > MCP already comes out in the right shape for the install
+it's running from, so copying it there is enough on every channel.
+
 Two flags cover the non-default socket, and a third opens the drive tools:
 
 | Flag                | Use                                                          |

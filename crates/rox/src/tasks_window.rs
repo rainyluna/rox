@@ -32,12 +32,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, prelude::*, px, relative, size, AnyElement, App, Bounds, Context, Div, Entity, EntityId,
-    FocusHandle, Global, ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window,
-    WindowHandle,
+    AnyElement, App, Bounds, Context, Div, Entity, EntityId, FocusHandle, Global, ScrollHandle,
+    SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle, div, prelude::*, px,
+    relative, size,
 };
-use gpui_component::scroll::Scrollbar;
 use gpui_component::Root;
+use gpui_component::scroll::Scrollbar;
 
 use crate::lastfm::import;
 use crate::{
@@ -78,25 +78,27 @@ pub fn repaint_while_running(cx: &mut App) {
         return;
     }
     cx.set_global(Ticking(true));
-    cx.spawn(async move |cx| loop {
-        cx.background_executor().timer(TICK).await;
-        let live = cx.update(|cx| {
-            // The falling edge repaints too, then ends the loop: the last
-            // thing a pass does is stop, and that's the tick that swaps a
-            // chip for nothing and a bar for a finished line.
-            cx.refresh_windows();
-            embeddings::progress(cx).is_some()
-                || replaygain_job::progress(cx).is_some()
-                || tempo_job::progress(cx).is_some()
-                || sortnames_job::progress(cx).is_some()
-                || romanize_job::progress(cx).is_some()
-                || import::progress(cx).is_some()
-                || convert::progress(cx).is_some()
-                || bake::progress(cx).is_some()
-        });
-        if !matches!(live, Ok(true)) {
-            cx.update(|cx| cx.set_global(Ticking(false))).ok();
-            break;
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(TICK).await;
+            let live = cx.update(|cx| {
+                // The falling edge repaints too, then ends the loop: the last
+                // thing a pass does is stop, and that's the tick that swaps a
+                // chip for nothing and a bar for a finished line.
+                cx.refresh_windows();
+                embeddings::progress(cx).is_some()
+                    || replaygain_job::progress(cx).is_some()
+                    || tempo_job::progress(cx).is_some()
+                    || sortnames_job::progress(cx).is_some()
+                    || romanize_job::progress(cx).is_some()
+                    || import::progress(cx).is_some()
+                    || convert::progress(cx).is_some()
+                    || bake::progress(cx).is_some()
+            });
+            if !matches!(live, Ok(true)) {
+                cx.update(|cx| cx.set_global(Ticking(false))).ok();
+                break;
+            }
         }
     })
     .detach();
@@ -930,56 +932,56 @@ impl TasksWindow {
     /// one just stopped, and picking the new counts up with it.
     fn sample(&mut self, cx: &mut Context<Self>) {
         let mut ended = false;
-        if let Some(job) = self.live.acoustic.take() {
-            if embeddings::progress(cx).is_none() {
-                self.acoustic_done = Some(Finished {
-                    done: job.done(),
-                    failed: job.failed(),
-                    stopped: job.stopping(),
-                });
-                ended = true;
-            }
+        if let Some(job) = self.live.acoustic.take()
+            && embeddings::progress(cx).is_none()
+        {
+            self.acoustic_done = Some(Finished {
+                done: job.done(),
+                failed: job.failed(),
+                stopped: job.stopping(),
+            });
+            ended = true;
         }
-        if let Some(job) = self.live.replaygain.take() {
-            if replaygain_job::progress(cx).is_none() {
-                self.replaygain_done = Some(Finished {
-                    done: job.done(),
-                    failed: job.failed(),
-                    stopped: job.stopping(),
-                });
-                ended = true;
-            }
+        if let Some(job) = self.live.replaygain.take()
+            && replaygain_job::progress(cx).is_none()
+        {
+            self.replaygain_done = Some(Finished {
+                done: job.done(),
+                failed: job.failed(),
+                stopped: job.stopping(),
+            });
+            ended = true;
         }
-        if let Some(job) = self.live.tempo.take() {
-            if tempo_job::progress(cx).is_none() {
-                self.tempo_done = Some(Finished {
-                    done: job.done(),
-                    failed: job.failed(),
-                    stopped: job.stopping(),
-                });
-                ended = true;
-            }
+        if let Some(job) = self.live.tempo.take()
+            && tempo_job::progress(cx).is_none()
+        {
+            self.tempo_done = Some(Finished {
+                done: job.done(),
+                failed: job.failed(),
+                stopped: job.stopping(),
+            });
+            ended = true;
         }
-        if let Some(job) = self.live.sortnames.take() {
-            if sortnames_job::progress(cx).is_none() {
-                self.sortnames_done = Some(Finished {
-                    done: job.done(),
-                    failed: job.failed(),
-                    stopped: job.stopping(),
-                });
-                ended = true;
-            }
+        if let Some(job) = self.live.sortnames.take()
+            && sortnames_job::progress(cx).is_none()
+        {
+            self.sortnames_done = Some(Finished {
+                done: job.done(),
+                failed: job.failed(),
+                stopped: job.stopping(),
+            });
+            ended = true;
         }
-        if let Some(job) = self.live.romanize.take() {
-            if romanize_job::progress(cx).is_none() {
-                self.romanize_done = Some(Finished {
-                    done: job.done(),
-                    failed: job.failed(),
-                    stopped: job.stopping(),
-                });
-                self.romanize_skipped = job.skipped();
-                ended = true;
-            }
+        if let Some(job) = self.live.romanize.take()
+            && romanize_job::progress(cx).is_none()
+        {
+            self.romanize_done = Some(Finished {
+                done: job.done(),
+                failed: job.failed(),
+                stopped: job.stopping(),
+            });
+            self.romanize_skipped = job.skipped();
+            ended = true;
         }
         self.live.acoustic = embeddings::progress(cx);
         self.live.replaygain = replaygain_job::progress(cx);
@@ -1566,7 +1568,7 @@ impl TasksWindow {
         }
     }
 
-    fn body(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn body(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let dynamic = self.dynamic(cx);
         div()
             .id("tasks")

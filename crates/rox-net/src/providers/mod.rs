@@ -244,10 +244,10 @@ fn collect_candidates<T>(
             }
         }
     }
-    if found.is_empty() {
-        if let Some(e) = first_error {
-            return Err(e);
-        }
+    if found.is_empty()
+        && let Some(e) = first_error
+    {
+        return Err(e);
     }
     Ok(found)
 }
@@ -920,9 +920,11 @@ mod tests {
         let cache: SessionCache<Vec<i32>> = SessionCache::default();
         // A failed compute stores nothing, so a retry runs again and can
         // return the real result instead of a pinned miss.
-        assert!(cache
-            .get_or_compute("k".into(), || Err("boom".into()))
-            .is_err());
+        assert!(
+            cache
+                .get_or_compute("k".into(), || Err("boom".into()))
+                .is_err()
+        );
         let mut runs = 0;
         let got = cache
             .get_or_compute("k".into(), || {

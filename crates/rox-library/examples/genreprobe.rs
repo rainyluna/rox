@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use rox_library::genre_suggest::{self, Weights, NEIGHBOURS};
+use rox_library::genre_suggest::{self, NEIGHBOURS, Weights};
 use rox_library::projection::Projection;
 use rox_library::{embeddings, genre, genre_meta, store};
 

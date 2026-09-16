@@ -234,10 +234,12 @@ pub fn check_on_launch(cx: &mut gpui::App) {
             Ok(release) => {
                 Settings::update(|s| s.session.update_cache = Some(cache(&release)));
                 refresh_available(&Settings::load());
-                if auto_download && release.is_new() && updater::can_update() {
-                    if let Some(job) = updater::begin(&release) {
-                        job();
-                    }
+                if auto_download
+                    && release.is_new()
+                    && updater::can_update()
+                    && let Some(job) = updater::begin(&release)
+                {
+                    job();
                 }
             }
             Err(e) => log::warn!("update check: {e}"),

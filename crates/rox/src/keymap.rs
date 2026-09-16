@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, PoisonError, RwLock};
 
-use gpui::{App, Global, KeyBinding, Keystroke};
+use gpui::{Action, App, Global, KeyBinding, Keystroke, Window};
 
 use rox_core::settings::Settings;
 
@@ -32,15 +32,19 @@ use rox_panel_api::actions::{
 use rox_panels::lyrics::StampLine;
 
 use crate::workspace::{
-    AbRepeat, AddBookmark, AddNamedBookmark, AnalyzeTempo, BuildAcoustic, ClosePanelAction,
-    CloseWindow, CycleLoop, DecreaseFontSize, FillSortNames, FindDuplicates, FocusSearch,
-    ImportWorkspace, IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextBookmark,
-    NextTrack, OpenAbout, OpenConsole, OpenEqualizer, OpenGoTo, OpenHealth, OpenPowerSearch,
-    OpenPresetPicker, OpenQuickPlay, OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome,
-    PlayRandom, PrevBookmark, PreviousTrack, Quit, RescanLibrary, ResetFontSize, RomanizeLibrary,
-    StepBackward, StepForward, StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations,
-    ToggleDesignMode, ToggleMenubar, ToggleMute, TogglePostShader, ToggleQuitToTray,
-    ToggleResizeLock, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
+    AbClear, AbRepeat, AbortScan, AddBookmark, AddNamedBookmark, AnalyzeTempo, BuildAcoustic,
+    ClearQueue, ClosePanelAction, CloseWindow, CycleLoop, CycleReplayGainMode, CycleShuffleMode,
+    DecreaseFontSize, FillSortNames, FindDuplicates, FlattenEq, FocusSearch, ImportWorkspace,
+    IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextBookmark, NextTrack,
+    OpenAbout, OpenChat, OpenConsole, OpenDiscussions, OpenEqualizer, OpenGoTo, OpenHealth,
+    OpenPowerSearch, OpenPresetPicker, OpenQuickPlay, OpenSettings, OpenSignals, OpenStats,
+    OpenTasks, OpenWelcome, PlayRandom, PlaySimilar, PrevBookmark, PreviousTrack, Quit,
+    ReportIssue, RescanLibrary, ResetFontSize, RomanizeLibrary, SaveLayout, SaveWorkspace,
+    SleepOff, StepBackward, StepForward, StopPlayback, TagGenres, ToggleArtTheming,
+    ToggleContinuation, ToggleCrossfade, ToggleCrossfadeAlbums, ToggleDecorations,
+    ToggleDesignMode, ToggleEq, ToggleExclusiveOutput, ToggleFavourite, ToggleMenubar, ToggleMini,
+    ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleReadings, ToggleResizeLock, ToggleSeams,
+    ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
 };
 
 /// Bindings match key contexts along the focus path, so this scope holds
@@ -132,6 +136,20 @@ impl Group {
     }
 }
 
+/// How a command can be fired by something other than a keystroke. The
+/// existing `context` field is a key-context predicate for binding
+/// resolution and says nothing about handler reach.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Reach {
+    /// Handled by an app-level `cx.on_action` registration, so a click
+    /// fires it whatever holds focus. The default, and what the button
+    /// picker offers.
+    Global,
+    /// Handled by an element-level `.on_action()` on a panel, so firing it
+    /// needs a target. Not offered to buttons in v1.
+    Panel,
+}
+
 /// One rebindable thing rox can do.
 pub struct Command {
     /// The settings file's key for this command. Stable forever: renaming
@@ -150,6 +168,13 @@ pub struct Command {
     /// unbound, so it's there to record onto without taking a key from
     /// anything.
     pub defaults: &'static [&'static str],
+    /// Whether something other than a keystroke can fire this. See [`Reach`].
+    pub reach: Reach,
+    /// gpui's registered name for the action, "rox::TogglePlayback", which
+    /// is what [`dispatch`] has to hand `build_action`. Read off the action
+    /// itself when the list is built, since [`Command::id`] is rox's own
+    /// settings key and the two are deliberately spelled differently.
+    action_name: &'static str,
     /// Builds the binding for one chord. Each command names a distinct
     /// action type, so the type has to be baked in here rather than
     /// stored as data.
@@ -179,6 +204,44 @@ impl Command {
     }
 }
 
+/// Build `id`'s action and dispatch it at the window, the way a keybinding
+/// would, without moving focus. False when the id is unknown or its reach
+/// isn't [`Reach::Global`], so a caller can refuse rather than fire into
+/// nothing.
+///
+/// This is how a custom button presses a command: the picker only offers
+/// what [`global_commands`] yields, and the reach check here is the second
+/// gate for a saved layout naming something the picker would no longer
+/// offer.
+pub fn dispatch(id: &str, window: &mut Window, cx: &mut App) -> bool {
+    let Some(command) = COMMANDS.iter().find(|command| command.id == id) else {
+        return false;
+    };
+
+    if command.reach != Reach::Global {
+        return false;
+    }
+
+    // Same two steps the debug socket's `action` verb takes: build the
+    // registered action by name, then hand it to the window's own dispatch.
+    // `None` is the payload, and every command here names a unit action.
+    let Ok(action) = cx.build_action(command.action_name, None) else {
+        return false;
+    };
+
+    window.dispatch_action(action, cx);
+    true
+}
+
+/// Every command a button may fire, in [`COMMANDS`] order within each
+/// group. An iterator rather than a built `Vec`, since the only consumer
+/// groups it into its own list anyway.
+pub fn global_commands() -> impl Iterator<Item = &'static Command> {
+    COMMANDS
+        .iter()
+        .filter(|command| command.reach == Reach::Global)
+}
+
 /// Whether a scope is [`WORKSPACE`] with exclusions carved out of it, the
 /// scopes a modified chord widens back out of.
 fn narrowed(scope: Option<&'static str>) -> bool {
@@ -200,7 +263,10 @@ fn modified(chord: &str) -> bool {
 }
 
 macro_rules! command {
-    ($id:literal, $label:expr, $group:expr, $ctx:expr, $keys:expr, $action:expr, $desc:expr) => {
+    // The panel-scoped form, spelled out where it applies. This arm has to
+    // come first, or the shorter one below matches greedily and the reach
+    // argument lands nowhere.
+    ($id:literal, $label:expr, $group:expr, $ctx:expr, $keys:expr, $action:expr, $desc:expr, $reach:expr) => {
         Command {
             id: $id,
             label: $label,
@@ -208,8 +274,24 @@ macro_rules! command {
             group: $group,
             context: $ctx,
             defaults: $keys,
+            reach: $reach,
+            action_name: Action::name(&$action),
             build: |keys, ctx| KeyBinding::new(keys, $action, ctx),
         }
+    };
+
+    // The common form. Global is the default because 58 of the 66 are.
+    ($id:literal, $label:expr, $group:expr, $ctx:expr, $keys:expr, $action:expr, $desc:expr) => {
+        command!(
+            $id,
+            $label,
+            $group,
+            $ctx,
+            $keys,
+            $action,
+            $desc,
+            Reach::Global
+        )
     };
 }
 
@@ -376,6 +458,17 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             AbRepeat,
             rox_i18n::t_static("keymap-ab-repeat.description")
         ),
+        // Drop the section outright, without stepping the cycle round to its
+        // third press to get there.
+        command!(
+            "ab_clear",
+            rox_i18n::t_static("keymap-ab-clear"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            AbClear,
+            rox_i18n::t_static("keymap-ab-clear.description")
+        ),
         // Bare m beside l: a bookmark at the playing position, and the
         // shifted one asks for a name first. Same playback scope, so a
         // search box keeps its m.
@@ -444,6 +537,17 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             PlayRandom,
             rox_i18n::t_static("keymap-play-random.description")
         ),
+        // The other half of the draw button: a track that sounds like the one
+        // playing, rather than one from anywhere.
+        command!(
+            "play_similar",
+            rox_i18n::t_static("keymap-play-similar"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            PlaySimilar,
+            rox_i18n::t_static("keymap-play-similar.description")
+        ),
         command!(
             "toggle_mute",
             rox_i18n::t_static("keymap-toggle-mute"),
@@ -461,6 +565,17 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             &[],
             ToggleShuffle,
             rox_i18n::t_static("keymap-toggle-shuffle.description")
+        ),
+        // The order shuffle puts the queue in, the shuffle button's hold menu
+        // as a single step.
+        command!(
+            "cycle_shuffle_mode",
+            rox_i18n::t_static("keymap-cycle-shuffle-mode"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            CycleShuffleMode,
+            rox_i18n::t_static("keymap-cycle-shuffle-mode.description")
         ),
         command!(
             "cycle_loop",
@@ -480,6 +595,48 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             ToggleStopAfter,
             rox_i18n::t_static("keymap-toggle-stop-after.description")
         ),
+        // Continuation and the sleep timer, the two other ways playback ends
+        // itself. Sleep only gets its cancel: every other row on that menu
+        // carries a length, and a command can't hold one.
+        command!(
+            "toggle_continuation",
+            rox_i18n::t_static("keymap-toggle-continuation"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleContinuation,
+            rox_i18n::t_static("keymap-toggle-continuation.description")
+        ),
+        command!(
+            "sleep_off",
+            rox_i18n::t_static("keymap-sleep-off"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            SleepOff,
+            rox_i18n::t_static("keymap-sleep-off.description")
+        ),
+        // Empty the up-next queue. The playing track and the context around
+        // it stay, the same as the queue panel's own clear.
+        command!(
+            "clear_queue",
+            rox_i18n::t_static("keymap-clear-queue"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ClearQueue,
+            rox_i18n::t_static("keymap-clear-queue.description")
+        ),
+        // The transport strip's heart, on the playing track.
+        command!(
+            "toggle_favourite",
+            rox_i18n::t_static("keymap-toggle-favourite"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleFavourite,
+            rox_i18n::t_static("keymap-toggle-favourite.description")
+        ),
         command!(
             "volume_up",
             rox_i18n::t_static("keymap-volume-up"),
@@ -498,6 +655,66 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             VolumeDown,
             rox_i18n::t_static("keymap-volume-down.description")
         ),
+        // The crossfade pair: off and back on at its last length, and whether
+        // the fade takes album-contiguous boundaries too.
+        command!(
+            "toggle_crossfade",
+            rox_i18n::t_static("keymap-toggle-crossfade"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleCrossfade,
+            rox_i18n::t_static("keymap-toggle-crossfade.description")
+        ),
+        command!(
+            "toggle_crossfade_albums",
+            rox_i18n::t_static("keymap-toggle-crossfade-albums"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleCrossfadeAlbums,
+            rox_i18n::t_static("keymap-toggle-crossfade-albums.description")
+        ),
+        // Step the levelling rule: off, track, album (ADR 19).
+        command!(
+            "cycle_replaygain_mode",
+            rox_i18n::t_static("keymap-cycle-replaygain-mode"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            CycleReplayGainMode,
+            rox_i18n::t_static("keymap-cycle-replaygain-mode.description")
+        ),
+        // Claim the device for rox alone, or give it back. The running
+        // session rebuilds either way, so this is not a quiet switch.
+        command!(
+            "toggle_exclusive_output",
+            rox_i18n::t_static("keymap-toggle-exclusive-output"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleExclusiveOutput,
+            rox_i18n::t_static("keymap-toggle-exclusive-output.description")
+        ),
+        // The equalizer's two buttons: the on switch and the flatten.
+        command!(
+            "toggle_eq",
+            rox_i18n::t_static("keymap-toggle-eq"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleEq,
+            rox_i18n::t_static("keymap-toggle-eq.description")
+        ),
+        command!(
+            "flatten_eq",
+            rox_i18n::t_static("keymap-flatten-eq"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            FlattenEq,
+            rox_i18n::t_static("keymap-flatten-eq.description")
+        ),
         // The library's operations: the scan, then the five passes, then
         // the duplicate finder and the genre tagger, then the health report
         // and the power search they feed. Everything here ships unbound
@@ -513,6 +730,16 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             &[],
             RescanLibrary,
             rox_i18n::t_static("keymap-rescan-library.description")
+        ),
+        // Stop a running scan at the next file. What it already indexed stays.
+        command!(
+            "abort_scan",
+            rox_i18n::t_static("keymap-abort-scan"),
+            Group::Library,
+            WORKSPACE,
+            &[],
+            AbortScan,
+            rox_i18n::t_static("keymap-abort-scan.description")
         ),
         command!(
             "measure_replaygain",
@@ -602,7 +829,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             TYPE_AHEAD,
             &["tab"],
             TypeAheadNext,
-            rox_i18n::t_static("keymap-type-ahead-next.description")
+            rox_i18n::t_static("keymap-type-ahead-next.description"),
+            Reach::Panel
         ),
         command!(
             "type_ahead_prev",
@@ -611,7 +839,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             TYPE_AHEAD,
             &["shift-tab"],
             TypeAheadPrev,
-            rox_i18n::t_static("keymap-type-ahead-prev.description")
+            rox_i18n::t_static("keymap-type-ahead-prev.description"),
+            Reach::Panel
         ),
         command!(
             "next_tab",
@@ -620,7 +849,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             WORKSPACE,
             &["ctrl-tab"],
             NextTab,
-            rox_i18n::t_static("keymap-next-tab.description")
+            rox_i18n::t_static("keymap-next-tab.description"),
+            Reach::Panel
         ),
         command!(
             "prev_tab",
@@ -629,7 +859,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             WORKSPACE,
             &["ctrl-shift-tab"],
             PrevTab,
-            rox_i18n::t_static("keymap-prev-tab.description")
+            rox_i18n::t_static("keymap-prev-tab.description"),
+            Reach::Panel
         ),
         command!(
             "close_panel",
@@ -638,7 +869,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             WORKSPACE,
             &[],
             ClosePanelAction,
-            rox_i18n::t_static("keymap-close-panel.description")
+            rox_i18n::t_static("keymap-close-panel.description"),
+            Reach::Panel
         ),
         command!(
             "new_window",
@@ -712,6 +944,34 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             OpenAbout,
             rox_i18n::t_static("keymap-open-about.description")
         ),
+        // The Application menu's three links out, each opening in the browser.
+        command!(
+            "report_issue",
+            rox_i18n::t_static("keymap-report-issue"),
+            Group::Windows,
+            WORKSPACE,
+            &[],
+            ReportIssue,
+            rox_i18n::t_static("keymap-report-issue.description")
+        ),
+        command!(
+            "open_discussions",
+            rox_i18n::t_static("keymap-open-discussions"),
+            Group::Windows,
+            WORKSPACE,
+            &[],
+            OpenDiscussions,
+            rox_i18n::t_static("keymap-open-discussions.description")
+        ),
+        command!(
+            "open_chat",
+            rox_i18n::t_static("keymap-open-chat"),
+            Group::Windows,
+            WORKSPACE,
+            &[],
+            OpenChat,
+            rox_i18n::t_static("keymap-open-chat.description")
+        ),
         command!(
             "open_settings",
             rox_i18n::t_static("keymap-open-settings"),
@@ -728,7 +988,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             WORKSPACE,
             defaults::PANEL_SETTINGS,
             OpenPanelSettings,
-            rox_i18n::t_static("keymap-open-panel-settings.description")
+            rox_i18n::t_static("keymap-open-panel-settings.description"),
+            Reach::Panel
         ),
         command!(
             "open_stats",
@@ -765,6 +1026,26 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             &[],
             ImportWorkspace,
             rox_i18n::t_static("keymap-import-workspace.description")
+        ),
+        // The two save dialogs the Layout and Workspace menus open: a name
+        // field that Enter commits.
+        command!(
+            "save_layout",
+            rox_i18n::t_static("keymap-save-layout"),
+            Group::Windows,
+            WORKSPACE,
+            &[],
+            SaveLayout,
+            rox_i18n::t_static("keymap-save-layout.description")
+        ),
+        command!(
+            "save_workspace",
+            rox_i18n::t_static("keymap-save-workspace"),
+            Group::Windows,
+            WORKSPACE,
+            &[],
+            SaveWorkspace,
+            rox_i18n::t_static("keymap-save-workspace.description")
         ),
         command!(
             "toggle_quit_to_tray",
@@ -809,7 +1090,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             WORKSPACE,
             &["shift-escape"],
             ToggleZoom,
-            rox_i18n::t_static("keymap-toggle-zoom.description")
+            rox_i18n::t_static("keymap-toggle-zoom.description"),
+            Reach::Panel
         ),
         command!(
             "increase_font_size",
@@ -901,6 +1183,37 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             ToggleArtTheming,
             rox_i18n::t_static("keymap-toggle-art-theming.description")
         ),
+        // Two of the appearance switches the settings pages own, reachable
+        // without the trip: the panel dividers and the reading names.
+        command!(
+            "toggle_seams",
+            rox_i18n::t_static("keymap-toggle-seams"),
+            Group::View,
+            WORKSPACE,
+            &[],
+            ToggleSeams,
+            rox_i18n::t_static("keymap-toggle-seams.description")
+        ),
+        command!(
+            "toggle_readings",
+            rox_i18n::t_static("keymap-toggle-readings"),
+            Group::View,
+            WORKSPACE,
+            &[],
+            ToggleReadings,
+            rox_i18n::t_static("keymap-toggle-readings.description")
+        ),
+        // Swap between the mini layout and the primary, the window strip's
+        // own toggle. A window with neither preset named stays put.
+        command!(
+            "toggle_mini",
+            rox_i18n::t_static("keymap-toggle-mini"),
+            Group::View,
+            WORKSPACE,
+            &[],
+            ToggleMini,
+            rox_i18n::t_static("keymap-toggle-mini.description")
+        ),
         command!(
             "stamp_line",
             rox_i18n::t_static("keymap-stamp-line"),
@@ -908,7 +1221,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             LYRICS,
             &["shift-enter"],
             StampLine,
-            rox_i18n::t_static("keymap-stamp-line.description")
+            rox_i18n::t_static("keymap-stamp-line.description"),
+            Reach::Panel
         ),
     ]
 });
@@ -1177,6 +1491,65 @@ fn key_label(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The commands whose handler needs a target: the tab step pair, close
+    /// panel and panel settings on the tab group, zoom through the dock's
+    /// active group, the type-ahead pair on whichever browsing panel holds
+    /// a phrase, and the stamp on the lyrics edit window, which isn't even
+    /// the same OS window. Everything else answers from the app or the
+    /// workspace root, and the workspace root is an ancestor of every panel
+    /// a button can sit in, so a click reaches it.
+    const PANEL_SCOPED: &[&str] = &[
+        "type_ahead_next",
+        "type_ahead_prev",
+        "next_tab",
+        "prev_tab",
+        "close_panel",
+        "open_panel_settings",
+        "toggle_zoom",
+        "stamp_line",
+    ];
+
+    /// The guard on the reach table. A command marked Global whose handler
+    /// actually lives on a panel gives a button that quietly does nothing,
+    /// which is the one failure this tier exists to prevent.
+    #[test]
+    fn every_command_declares_a_reach() {
+        for command in COMMANDS.iter() {
+            let expected = if PANEL_SCOPED.contains(&command.id) {
+                Reach::Panel
+            } else {
+                Reach::Global
+            };
+
+            assert!(
+                command.reach == expected,
+                "{} declares the wrong reach",
+                command.id
+            );
+        }
+    }
+
+    /// Dispatch's first gate. The window half needs a gpui context and
+    /// nothing in this crate sets one up, so the lookup is what's covered
+    /// here.
+    #[test]
+    fn dispatch_refuses_an_unknown_id() {
+        assert!(
+            !COMMANDS
+                .iter()
+                .any(|command| command.id == "no_such_command"),
+            "the fixture id has become a real command"
+        );
+    }
+
+    #[test]
+    fn global_commands_excludes_the_panel_tier() {
+        assert_eq!(
+            global_commands().count(),
+            COMMANDS.len() - PANEL_SCOPED.len()
+        );
+    }
 
     #[test]
     fn ids_are_unique() {

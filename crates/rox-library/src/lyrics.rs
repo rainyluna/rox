@@ -76,18 +76,18 @@ pub fn load(path: &Path, store_dir: Option<&Path>) -> Option<Lyrics> {
         return None;
     }
     for side in sidecar_candidates(path) {
-        if let Ok(text) = fs::read_to_string(&side) {
-            if !text.trim().is_empty() {
-                return Some(build(text, Source::Sidecar(side)));
-            }
+        if let Ok(text) = fs::read_to_string(&side)
+            && !text.trim().is_empty()
+        {
+            return Some(build(text, Source::Sidecar(side)));
         }
     }
     if let Some(dir) = store_dir {
         let file = store_file(dir, path);
-        if let Ok(text) = fs::read_to_string(&file) {
-            if !text.trim().is_empty() {
-                return Some(build(text, Source::Store(file)));
-            }
+        if let Ok(text) = fs::read_to_string(&file)
+            && !text.trim().is_empty()
+        {
+            return Some(build(text, Source::Store(file)));
         }
     }
     Some(build(tag_lyrics(path)?, Source::Tag))
@@ -205,10 +205,8 @@ fn save_file(file: &Path, text: &str, make_dir: bool) -> Result<(), String> {
     if text.trim().is_empty() {
         return remove_if_present(file).map_err(|e| format!("remove lyrics file: {e}"));
     }
-    if make_dir {
-        if let Some(parent) = file.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create lyrics folder: {e}"))?;
-        }
+    if make_dir && let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create lyrics folder: {e}"))?;
     }
     // A sibling clone and rename, so a crash mid-write never leaves the
     // sheet truncated.

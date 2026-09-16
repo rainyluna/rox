@@ -13,18 +13,19 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, img, prelude::*, px, size, App, Bounds, Context, Div, Entity, EntityId, Global, Image,
-    ObjectFit, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, EntityId, Global, Image, ObjectFit, ScrollHandle,
+    SharedString, Subscription, Task, WeakEntity, Window, WindowHandle, div, img, prelude::*, px,
+    size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Root, Sizable as _};
 
-use crate::cover::editor::{decode, sniff_mime, CoverEditor};
-use crate::matching::{note, open_or_focus, Phase, WindowRegistry};
+use crate::cover::editor::{CoverEditor, decode, sniff_mime};
+use crate::matching::{Phase, WindowRegistry, note, open_or_focus};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_net::providers::{self, ArtCandidate, TrackQuery};
-use rox_panel_kit::ui::{self as settings_ui, section, SECTION_GAP};
+use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 
 /// The default window size: room for a few rows of preview tiles beside
@@ -244,13 +245,12 @@ impl CoverMatch {
                     return;
                 };
                 this.update(cx, |this, cx| {
-                    if let Phase::Ready(loaded) = &mut this.phase {
-                        if let Some(slot) = loaded.get_mut(i) {
-                            if slot.candidate.thumb_url == url {
-                                slot.thumb = Some(image);
-                                cx.notify();
-                            }
-                        }
+                    if let Phase::Ready(loaded) = &mut this.phase
+                        && let Some(slot) = loaded.get_mut(i)
+                        && slot.candidate.thumb_url == url
+                    {
+                        slot.thumb = Some(image);
+                        cx.notify();
                     }
                 })
                 .ok();

@@ -11,18 +11,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, svg, uniform_list, App, Context, Div, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, SharedString,
-    Stateful, Subscription, UniformListScrollHandle, WeakEntity, Window,
+    App, Context, Div, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyDownEvent,
+    Modifiers, MouseButton, MouseDownEvent, SharedString, Stateful, Subscription,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, svg, uniform_list,
 };
+use gpui_component::Icon;
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::Icon;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
 use rox_library::cue::TrackKey;
-use rox_library::projection::{parse_query, FilterSet, Filterable, TrackFields};
+use rox_library::projection::{FilterSet, Filterable, TrackFields, parse_query};
 use rox_library::store::TrackMeta;
 
 use crate::assets::icons;
@@ -716,10 +716,10 @@ impl QueuePanel {
                 t.rating = r;
             }
         }
-        if let Some(playing) = &mut self.playing {
-            if let Some(&r) = playing.track_id.and_then(|id| ratings.get(&id)) {
-                playing.rating = r;
-            }
+        if let Some(playing) = &mut self.playing
+            && let Some(&r) = playing.track_id.and_then(|id| ratings.get(&id))
+        {
+            playing.rating = r;
         }
         cx.notify();
     }
@@ -850,7 +850,7 @@ impl QueuePanel {
     /// The multi-selection drag set as a shared Arc, resolved through
     /// `selected_ids` once per selection or row change and cached after.
     fn drag_ids(&mut self) -> Arc<[u64]> {
-        if self.drag_set.as_ref().map(|(gen, _)| *gen) != Some(self.drag_gen) {
+        if self.drag_set.as_ref().map(|(generation, _)| *generation) != Some(self.drag_gen) {
             let ids: Arc<[u64]> = self.selected_ids().into();
             self.drag_set = Some((self.drag_gen, ids));
         }
@@ -1480,6 +1480,12 @@ impl Panel for QueuePanel {
     }
 
     rox_panel_api::opens_settings!();
+
+    /// The body enqueues a library drag and an OS file drop alike, so the
+    /// workspace's drop zones stand down over this panel.
+    fn accepts_drop(&self, cx: &App) -> bool {
+        cx.active_drag_is::<PlayDrag>() || cx.active_drag_is::<ExternalPaths>()
+    }
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         panel::title_text(

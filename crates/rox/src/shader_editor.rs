@@ -27,20 +27,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Focusable, Global,
-    KeyBinding, KeyDownEvent, SharedString, Stateful, Subscription, Window, WindowHandle,
+    App, Bounds, Context, Div, Entity, Focusable, Global, KeyBinding, KeyDownEvent, SharedString,
+    Stateful, Subscription, Window, WindowHandle, actions, div, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Root, Sizable};
 
-use crate::matching::{open_or_focus, WindowRegistry};
+use crate::matching::{WindowRegistry, open_or_focus};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
+use rox_panel_api::panel::AppState;
 use rox_panel_api::panel::shader::edit::{EditKey, ShaderEditTarget};
 use rox_panel_api::panel::shader::{self as surface};
-use rox_panel_api::panel::AppState;
 use rox_panel_api::signal_ui;
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, Seg};
+use rox_panel_kit::ui::{self as settings_ui, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_viz::signal::SignalHub;
 
@@ -307,11 +307,11 @@ impl ShaderEditor {
     /// on, and only the timer that still matches it runs.
     fn check_soon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.check_gen = self.check_gen.wrapping_add(1);
-        let gen = self.check_gen;
+        let generation = self.check_gen;
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(CHECK_AFTER).await;
             this.update_in(cx, |this, window, cx| {
-                if this.check_gen == gen {
+                if this.check_gen == generation {
                     this.check(false, window, cx);
                 }
             })

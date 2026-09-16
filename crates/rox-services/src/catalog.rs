@@ -392,13 +392,12 @@ impl Library {
         // A library indexed before roots were persisted still has one in
         // its paths: the deepest directory shared by every track. Session
         // only; the next Open Folder persists the whole list.
-        if scan_roots.is_empty() {
-            if let Some(root) = conn
+        if scan_roots.is_empty()
+            && let Some(root) = conn
                 .as_ref()
                 .and_then(|conn| store::common_root(conn).ok().flatten())
-            {
-                scan_roots.push(root);
-            }
+        {
+            scan_roots.push(root);
         }
 
         let mut this = Library {
@@ -645,10 +644,10 @@ impl Library {
     /// Reinstall the live alias map off the table and reload the
     /// projection, so every surface re-derives under the new opinions.
     fn refresh_genre_aliases(&mut self, cx: &mut Context<Self>) {
-        if let Some(conn) = &self.conn {
-            if let Ok(aliases) = rox_library::genre_meta::aliases(conn) {
-                rox_library::genre::set_aliases(aliases);
-            }
+        if let Some(conn) = &self.conn
+            && let Ok(aliases) = rox_library::genre_meta::aliases(conn)
+        {
+            rox_library::genre::set_aliases(aliases);
         }
         self.reload_projection(cx);
     }
@@ -1248,14 +1247,14 @@ impl Library {
         let conn = self.conn.as_ref()?;
         let path = key.path.to_str()?;
         let id = store::queue_meta_for_key(conn, path, key.sub).ok()?.id;
-        if let Some(id) = id {
-            if let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id)) {
-                // The guard a rating click uses too: a projection swapped
-                // between paint and lookup would leave the row pointing at
-                // somebody else's track.
-                if projection.db_id.get(row as usize) == Some(&id) {
-                    return Some((id, meta_from_row(&projection.resolve(row))));
-                }
+        if let Some(id) = id
+            && let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id))
+        {
+            // The guard a rating click uses too: a projection swapped
+            // between paint and lookup would leave the row pointing at
+            // somebody else's track.
+            if projection.db_id.get(row as usize) == Some(&id) {
+                return Some((id, meta_from_row(&projection.resolve(row))));
             }
         }
         // No projection row to read: only a sub 0 key can be resolved from
@@ -1699,6 +1698,36 @@ impl Library {
         }
     }
 
+    /// Add tracks to a playlist as a block placed before `before` (a member id
+    /// already in the playlist), or at the end when None. The drop-from-elsewhere
+    /// path: `add` makes the rows, `place_members` moves the block into position.
+    pub fn add_to_playlist_at(
+        &mut self,
+        id: i64,
+        track_ids: &[i64],
+        before: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
+
+        let Ok(members) = playlists::add(conn, id, track_ids, now_secs()) else {
+            return;
+        };
+        if members.is_empty() {
+            return;
+        }
+
+        // The rows land at the end, so only a drop with a target needs the
+        // second pass to splice them in.
+        if before.is_some() {
+            let _ = playlists::place_members(conn, id, &members, before, now_secs());
+        }
+
+        cx.emit(LibraryEvent::PlaylistsChanged);
+    }
+
     /// Drop a drag of members into `playlist_id` before `before` (or at the
     /// end when None): the one call behind every playlist drag, single or
     /// multi, reorder or cross-playlist move.
@@ -1767,11 +1796,11 @@ impl Library {
         // The caller already wrote the file; note it so the watch batch it
         // triggers does not bounce back as a redundant reindex.
         self.note_self_write([key.path.clone()]);
-        if let Some((id, conn)) = self.id_for_key(key).zip(self.conn.as_ref()) {
-            if let Err(e) = store::apply_changes(conn, id, changes) {
-                self.status = format!("library: {e}").into();
-                cx.notify();
-            }
+        if let Some((id, conn)) = self.id_for_key(key).zip(self.conn.as_ref())
+            && let Err(e) = store::apply_changes(conn, id, changes)
+        {
+            self.status = format!("library: {e}").into();
+            cx.notify();
         }
         self.reload(Refresh::Reindex(vec![key.path.clone()]), cx);
     }
@@ -1846,10 +1875,10 @@ impl Library {
                     break;
                 }
             }
-            if failure.is_none() {
-                if let Err(e) = playlists::reattach(conn).and_then(|_| listens::reattach(conn)) {
-                    failure = Some(format!("library: {e}"));
-                }
+            if failure.is_none()
+                && let Err(e) = playlists::reattach(conn).and_then(|_| listens::reattach(conn))
+            {
+                failure = Some(format!("library: {e}"));
             }
         }
         if let Some(e) = failure {
@@ -1876,10 +1905,10 @@ impl Library {
             cx.notify();
             return;
         }
-        if let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id)) {
-            if projection.db_id.get(row as usize) == Some(&id) {
-                projection.rating[row as usize].store(rating, Ordering::Relaxed);
-            }
+        if let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id))
+            && projection.db_id.get(row as usize) == Some(&id)
+        {
+            projection.rating[row as usize].store(rating, Ordering::Relaxed);
         }
         self.queue_rating_write(id, rating, cx);
         cx.emit(LibraryEvent::Rated);
@@ -2528,7 +2557,10 @@ fn watch_sync(
                 // A dir is not is_audio, so without walking it the tracks
                 // inside never get indexed. Its counterpart, a dir moved out,
                 // is a non-existent path that remove_subtree already prunes.
-                if under_root(&path) {
+                // The full scan never descends into a junk folder, so a
+                // .Trashes dragged into a root must not get walked here
+                // either, or the tracks I threw away come back as rows.
+                if under_root(&path) && !scanner::is_junk_dir(&path) {
                     changed.extend(scanner::audio_files(&path));
                 }
             } else if scanner::is_relevant(&path) {
@@ -2651,12 +2683,12 @@ pub fn browse(library: &Entity<Library>, cx: &mut App) {
     });
     let library = library.clone();
     cx.spawn(async move |cx| {
-        if let Ok(Ok(Some(mut paths))) = rx.await {
-            if let Some(root) = paths.pop() {
-                library
-                    .update(cx, |library, cx| library.add_root(root, cx))
-                    .ok();
-            }
+        if let Ok(Ok(Some(mut paths))) = rx.await
+            && let Some(root) = paths.pop()
+        {
+            library
+                .update(cx, |library, cx| library.add_root(root, cx))
+                .ok();
         }
     })
     .detach();
@@ -2664,7 +2696,7 @@ pub fn browse(library: &Entity<Library>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_m3u_entry, watch_sync, Touched};
+    use super::{Touched, resolve_m3u_entry, watch_sync};
     use rox_library::store;
 
     /// The watcher's per-change sync: a new file on disk becomes a row, a
@@ -2733,9 +2765,11 @@ mod tests {
             Some(one_id),
             "a correlated rename keeps the id"
         );
-        assert!(store::id_for_path(&conn, one.to_str().unwrap())
-            .unwrap()
-            .is_none());
+        assert!(
+            store::id_for_path(&conn, one.to_str().unwrap())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(store::count(&conn).unwrap(), 2);
 
         // Delete one file on disk, then sync its path: only its row goes.
@@ -2751,9 +2785,11 @@ mod tests {
         .unwrap();
         assert_eq!(store::count(&conn).unwrap(), 1);
         assert_eq!(touched.removed.len(), 1);
-        assert!(store::id_for_path(&conn, renamed.to_str().unwrap())
-            .unwrap()
-            .is_some());
+        assert!(
+            store::id_for_path(&conn, renamed.to_str().unwrap())
+                .unwrap()
+                .is_some()
+        );
 
         // Delete the whole Album folder, sync its path: the subtree prunes
         // with no walk.

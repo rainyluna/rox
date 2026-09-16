@@ -8,9 +8,9 @@ use std::collections::VecDeque;
 use std::io::{BufRead as _, BufReader, Read, Write};
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::protocol::{RpcError, PROTOCOL_VERSION};
+use crate::protocol::{PROTOCOL_VERSION, RpcError};
 
 /// One connection past its handshake. Calls are strictly serial: one frame
 /// out, one frame back. Pushed events (id-less frames, flowing once
@@ -136,8 +136,8 @@ fn open(path: &Path) -> Result<Halves, String> {
 
 #[cfg(windows)]
 fn open(path: &Path) -> Result<Halves, String> {
-    use interprocess::local_socket::traits::Stream as _;
     use interprocess::local_socket::Stream;
+    use interprocess::local_socket::traits::Stream as _;
 
     let name = crate::pipe_name(path).map_err(|e| e.to_string())?;
     let stream = Stream::connect(name)

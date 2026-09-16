@@ -331,7 +331,7 @@ pub fn group_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{store, TrackRow};
+    use crate::{TrackRow, store};
 
     #[allow(clippy::too_many_arguments)]
     fn track(

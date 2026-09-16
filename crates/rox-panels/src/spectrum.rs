@@ -15,25 +15,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, relative, size,
     AnyElement, App, BorderStyle, Bounds, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, Path, Rgba, SharedString, Subscription, WeakEntity, Window,
+    Focusable, Path, Rgba, SharedString, Subscription, WeakEntity, Window, canvas, div, fill,
+    linear_color_stop, linear_gradient, point, prelude::*, px, relative, size,
 };
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::PopupMenu;
-use gpui_component::Sizable as _;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_panel_kit::axis::{fmt_axis_hz, fmt_hz};
 use serde::{Deserialize, Serialize};
 
-use rox_viz::analysis::{hz_ladder, log_bands, Analyzer, MAX_FFT_SIZE, MIN_FFT_SIZE};
 use rox_viz::AudioFeed;
+use rox_viz::analysis::{Analyzer, MAX_FFT_SIZE, MIN_FFT_SIZE, hz_ladder, log_bands};
 
 use crate::assets::icons;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, choices, choices_shared, setting_row, toggle, AppState, PanelChrome, PanelSettings,
-    ScrubState,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, choices, choices_shared, setting_row,
+    toggle,
 };
 use crate::panel_settings;
 use crate::settings::ui as settings_ui;
@@ -947,11 +947,7 @@ impl Bars {
         for &reflect in halves {
             let pos = move |a: f32| {
                 let a = if reversed { half - a } else { a };
-                if reflect {
-                    axis - a
-                } else {
-                    a
-                }
+                if reflect { axis - a } else { a }
             };
             let solid = (point(0., 1.), point(0., 1.), point(0., 1.));
             let mut area = Path::new(at(pos(tips[0].0), 0.0));

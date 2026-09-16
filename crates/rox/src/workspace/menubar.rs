@@ -5,7 +5,7 @@
 
 use super::*;
 
-use gpui::{anchored, point, Corner, MouseDownEvent, Stateful};
+use gpui::{Corner, MouseDownEvent, Stateful, anchored, point};
 use gpui_component::scroll::Scrollbar;
 use rox_core::settings::MenubarButtons;
 
@@ -724,13 +724,18 @@ impl Workspace {
         }
     }
 
+    // `+ use<>` here and on the element builders below: under 2024 an `impl
+    // Trait` return captures every lifetime in scope unless it's told which
+    // ones to keep. These build their element out of owned values and hand it
+    // back while the caller still holds `cx`, so the capture list is pinned
+    // empty and the return borrows nothing.
     fn menu_button(
         &self,
         index: usize,
         menu: &'static Menu,
         letter: Option<std::ops::Range<usize>>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_menu == Some(index);
         // The keyboard cursor lights the button the same way an open menu
         // does, so walking the bar with the arrows reads as one cursor
@@ -770,7 +775,7 @@ impl Workspace {
     /// The one button a collapsed bar keeps: the menus behind a hamburger,
     /// the menu panel's shape. Its dropdown is the root list of top menus,
     /// each flying its real dropdown out to the side.
-    fn collapsed_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn collapsed_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let open = self.menu_root;
         div()
             .relative()
@@ -825,7 +830,7 @@ impl Workspace {
         menu: &'static Menu,
         letter: Option<std::ops::Range<usize>>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_menu == Some(index);
         let cursor = self.menubar_keys && self.menu_top == index;
         div()
@@ -910,7 +915,7 @@ impl Workspace {
 
     /// A paint-time capture of the bar's own bounds, the first thing the
     /// bar paints so [`Self::menubar_fit_capture`] finds them set.
-    fn menubar_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn menubar_capture(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let view = cx.entity();
         canvas(
             move |bounds, window, cx| {
@@ -929,7 +934,7 @@ impl Workspace {
     /// A zero-width marker after the status side's last control. Where it
     /// lands is where the row's content ends, past the bar's edge when the
     /// row overflows, which is what decides the fold.
-    fn menubar_fit_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn menubar_fit_capture(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let view = cx.entity();
         canvas(
             move |bounds, _, cx| {
@@ -970,7 +975,11 @@ impl Workspace {
     /// draws its own chrome. With OS decorations on, the real ones are up in
     /// the native titlebar and a second set here would just be a copy; off
     /// every other platform there are no traffic lights to match.
-    fn traffic_lights(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn traffic_lights(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         if !cfg!(target_os = "macos") || settings::os_decorations() {
             return None;
         }
@@ -996,7 +1005,7 @@ impl Workspace {
     /// scan or load runs, the tasks and sleep timer buttons, a rescan
     /// button once a folder is known, and an abort button while a scan
     /// runs.
-    fn library_status(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn library_status(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (busy, status, can_rescan, scanning) = {
             let library = self.state.library.read(cx);
             (
@@ -1163,7 +1172,7 @@ impl Workspace {
     /// runs, with the minutes left in its tip. A press drops the same
     /// picks the Playback menu offers, so the bar is the short way to the
     /// timer and the menu stays for the keyboard.
-    fn sleep_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sleep_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let left = sleep_minutes_left(
             self.state
                 .player
@@ -1299,7 +1308,7 @@ impl Workspace {
     /// which offers the download where the install can replace itself and
     /// the release page everywhere else; the x dismisses it for this
     /// release, so it only returns with the next one.
-    fn update_chip(&self, version: String, cx: &mut Context<Self>) -> impl IntoElement {
+    fn update_chip(&self, version: String, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let dismiss_version = version.clone();
         let chip = div()
             .flex()
@@ -1350,7 +1359,11 @@ impl Workspace {
     /// A paint-time capture of a menu surface's bounds into
     /// [`Workspace::menu_surfaces`], with the viewport width alongside. The
     /// next frame's flyout side decisions read both.
-    fn menu_surface_capture(&self, level: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn menu_surface_capture(
+        &self,
+        level: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let view = cx.entity();
         canvas(
             move |bounds, window, cx| {
@@ -1516,19 +1529,20 @@ impl Workspace {
                 .children(menu.entries.iter().enumerate().flat_map(
                     |(i, entry)| -> Vec<AnyElement> {
                         match entry {
-                            MenuEntry::Item(item) => vec![self
-                                .action_item(*item, cx)
-                                .id(("menu-entry", i))
-                                // Sliding onto a plain item retracts a flyout a
-                                // sibling submenu left open.
-                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                    if *hovered && this.open_submenu.is_some() {
-                                        this.open_flyout(None);
-                                        cx.notify();
-                                    }
-                                }))
-                                .when(self.nav_on(i, None), nav_lit)
-                                .into_any_element()],
+                            MenuEntry::Item(item) => vec![
+                                self.action_item(*item, cx)
+                                    .id(("menu-entry", i))
+                                    // Sliding onto a plain item retracts a flyout a
+                                    // sibling submenu left open.
+                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                        if *hovered && this.open_submenu.is_some() {
+                                            this.open_flyout(None);
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .when(self.nav_on(i, None), nav_lit)
+                                    .into_any_element(),
+                            ],
                             MenuEntry::Section(label) => {
                                 vec![menu_section(label).into_any_element()]
                             }
@@ -1554,36 +1568,41 @@ impl Workspace {
                                             .into_any_element()
                                     })
                                     .collect(),
-                                Some((label, icon)) => vec![self
-                                    .submenu_row(i, label, icon, section.panels, cx)
-                                    .into_any_element()],
+                                Some((label, icon)) => vec![
+                                    self.submenu_row(i, label, icon, section.panels, cx)
+                                        .into_any_element(),
+                                ],
                             },
                             MenuEntry::LayoutsSubmenu {
                                 label,
                                 icon,
                                 target,
                                 with_new,
-                            } => vec![self
-                                .layouts_submenu_row(i, label, icon, *target, *with_new, cx)
-                                .into_any_element()],
+                            } => vec![
+                                self.layouts_submenu_row(i, label, icon, *target, *with_new, cx)
+                                    .into_any_element(),
+                            ],
                             MenuEntry::WorkspacesSubmenu {
                                 label,
                                 icon,
                                 target,
                                 with_new,
-                            } => vec![self
-                                .workspaces_submenu_row(i, label, icon, *target, *with_new, cx)
-                                .into_any_element()],
+                            } => vec![
+                                self.workspaces_submenu_row(i, label, icon, *target, *with_new, cx)
+                                    .into_any_element(),
+                            ],
                             MenuEntry::PresetsSubmenu {
                                 label,
                                 icon,
                                 target,
-                            } => vec![self
-                                .presets_submenu_row(i, label, icon, *target, cx)
-                                .into_any_element()],
-                            MenuEntry::PanelWindowsSubmenu { label, icon } => vec![self
-                                .panel_windows_submenu_row(i, label, icon, cx)
-                                .into_any_element()],
+                            } => vec![
+                                self.presets_submenu_row(i, label, icon, *target, cx)
+                                    .into_any_element(),
+                            ],
+                            MenuEntry::PanelWindowsSubmenu { label, icon } => vec![
+                                self.panel_windows_submenu_row(i, label, icon, cx)
+                                    .into_any_element(),
+                            ],
                         }
                     },
                 ));
@@ -1674,7 +1693,7 @@ impl Workspace {
         icon: &'static str,
         panels: &'static [PanelDef],
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_submenu == Some(index);
         div()
             .id(("menu-entry", index))
@@ -1743,7 +1762,7 @@ impl Workspace {
         target: LayoutTarget,
         with_new: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_submenu == Some(index);
         div()
             .id(("menu-entry", index))
@@ -1887,7 +1906,7 @@ impl Workspace {
         icon: &'static str,
         target: PanelTarget,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_submenu == Some(index);
         let lit = open || self.nav_on(index, None);
         submenu_shell(index, label, icon, lit, cx).when(open, |d| {
@@ -1922,7 +1941,7 @@ impl Workspace {
         label: &'static str,
         icon: &'static str,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_submenu == Some(index);
         let lit = open || self.nav_on(index, None);
         submenu_shell(index, label, icon, lit, cx).when(open, |d| {
@@ -1987,7 +2006,7 @@ impl Workspace {
         icon: &'static str,
         rows: Vec<Div>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_subgroup == Some(index);
         div()
             .id(("panel-window-group", index))
@@ -2119,7 +2138,7 @@ impl Workspace {
         target: WorkspaceTarget,
         with_new: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let open = self.open_submenu == Some(index);
         div()
             .id(("menu-entry", index))

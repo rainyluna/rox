@@ -9,15 +9,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    canvas, div, prelude::*, px, svg, Action, AnyElement, App, Bounds, Context, Div, Element,
-    ElementId, Entity, Focusable as _, GlobalElementId, InspectorElementId, LayoutId, MouseButton,
-    MouseDownEvent, Pixels, Point, Rgba, SharedString, Stateful, Subscription, Window,
+    Action, AnyElement, App, Bounds, Context, Div, Element, ElementId, Entity, Focusable as _,
+    GlobalElementId, InspectorElementId, LayoutId, MouseButton, MouseDownEvent, Pixels, Point,
+    Rgba, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*, px, svg,
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{h_flex, Disableable, Icon, IconName, Sizable};
+use gpui_component::{Disableable, Icon, IconName, Sizable, h_flex};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use serde::{Deserialize, Serialize};
@@ -34,10 +34,12 @@ pub mod wall;
 
 mod font_picker;
 pub use font_picker::font_picker;
+mod icon_picker;
+pub use icon_picker::icon_picker;
 mod language_picker;
 pub use language_picker::language_picker;
 mod search_picker;
-pub use search_picker::{search_picker, PickRow};
+pub use search_picker::{PickRow, search_picker};
 
 mod gesture;
 pub use gesture::*;
@@ -1488,17 +1490,23 @@ pub fn tracking_section<P: 'static>(
 /// it where [`choices`] would run out of room, a picker whose list is
 /// however many the machine happens to have rather than a fixed two or
 /// three. `disabled` draws it inert, for a knob whose mode doesn't apply.
-pub fn picker<P, K>(
+// `use<..>` keeps the returned element off the `cx` borrow. It's built from
+// owned values and clones, so nothing in it needs the borrow, and holding
+// one would stop callers touching `cx` before they mount it. The capture
+// list has to name every type parameter, which is why `apply` is a named
+// `A` rather than an `impl Fn` argument.
+pub fn picker<P, K, A>(
     id: &'static str,
     current: K,
     options: Vec<(K, SharedString)>,
     disabled: bool,
-    apply: impl Fn(&mut P, K, &mut Context<P>) + Clone + 'static,
+    apply: A,
     cx: &mut Context<P>,
-) -> impl IntoElement
+) -> impl IntoElement + use<P, K, A>
 where
     P: 'static,
     K: PartialEq + Clone + 'static,
+    A: Fn(&mut P, K, &mut Context<P>) + Clone + 'static,
 {
     // An id that isn't in the list still has to label the button, so fall
     // back to the head rather than drawing an empty one: a device that was

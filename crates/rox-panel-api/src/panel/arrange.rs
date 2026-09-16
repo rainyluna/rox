@@ -8,8 +8,18 @@
 //! can hold several. A panel whose layout stacks rows edits them through
 //! [`arrange_rows_editor`]: one well per row, a button below adding the
 //! next; the flat [`arrange_editor`] is the same thing capped at one well.
+//!
+//! Most panels know their catalog at compile time and declare it as a
+//! static slice of [`ArrangeSpec`]. A panel whose items are whatever the
+//! user made of them, the custom controls strip whose chips are buttons
+//! that didn't exist when the binary was built, hands over a `Vec` of
+//! [`ArrangeEntry`] instead, with its labels already resolved.
+//! [`Arrangement`] is the seam between those two: everything below it
+//! works over the one type, and both forms convert into it.
 
-use gpui::{div, prelude::*, px, svg, Context, Div, Stateful, Window};
+use std::rc::Rc;
+
+use gpui::{Context, Div, SharedString, Stateful, Window, div, prelude::*, px, svg};
 
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
@@ -33,6 +43,107 @@ pub struct ArrangeSpec<V: 'static> {
     pub repeats: bool,
 }
 
+/// One arrangeable item a panel builds at runtime, carrying the text an
+/// [`ArrangeSpec`] would have looked up. A catalog that only exists while
+/// the app runs has no message key to name its items by, so it spells out
+/// both halves the key stood for.
+#[derive(Clone)]
+pub struct ArrangeEntry<V> {
+    /// The chip's element id, under the same rule the static form's key
+    /// is: stable across locales and across a rebuild of the registry, or
+    /// a drag loses its state mid-gesture. Derive it from the item's own
+    /// identity, never from its label.
+    pub id: SharedString,
+    pub label: SharedString,
+    pub icon: Option<&'static str>,
+    pub value: V,
+    pub repeats: bool,
+}
+
+/// The catalog an editor works over, in whichever form its panel has it.
+/// The built side is refcounted rather than copied: every drag and drop
+/// handler on the page needs the catalog, and they outlive the render
+/// that made them.
+pub enum Arrangement<V: 'static> {
+    /// A catalog baked into the binary, which is nearly every panel.
+    Stock(&'static [ArrangeSpec<V>]),
+    /// A catalog assembled this frame out of what the user configured.
+    Built(Rc<[ArrangeEntry<V>]>),
+}
+
+impl<V: 'static> Clone for Arrangement<V> {
+    /// By hand rather than derived, so the item type doesn't have to be
+    /// `Clone` for the registry to be.
+    fn clone(&self) -> Self {
+        match self {
+            Arrangement::Stock(specs) => Arrangement::Stock(specs),
+
+            Arrangement::Built(entries) => Arrangement::Built(entries.clone()),
+        }
+    }
+}
+
+impl<V: 'static> From<&'static [ArrangeSpec<V>]> for Arrangement<V> {
+    fn from(specs: &'static [ArrangeSpec<V>]) -> Self {
+        Arrangement::Stock(specs)
+    }
+}
+
+impl<V: 'static> From<Vec<ArrangeEntry<V>>> for Arrangement<V> {
+    fn from(entries: Vec<ArrangeEntry<V>>) -> Self {
+        Arrangement::Built(entries.into())
+    }
+}
+
+impl<V: PartialEq + Copy + 'static> Arrangement<V> {
+    /// Whether the catalog allows `value` twice on one row.
+    fn repeats(&self, value: V) -> bool {
+        match self {
+            Arrangement::Stock(specs) => specs
+                .iter()
+                .find(|spec| spec.value == value)
+                .is_some_and(|spec| spec.repeats),
+
+            Arrangement::Built(entries) => entries
+                .iter()
+                .find(|entry| entry.value == value)
+                .is_some_and(|entry| entry.repeats),
+        }
+    }
+
+    /// Where `value` sits in the catalog, which is the order a re-shown
+    /// item slots back at. An item the catalog doesn't carry ranks last.
+    fn rank(&self, value: V) -> usize {
+        let place = match self {
+            Arrangement::Stock(specs) => specs.iter().position(|spec| spec.value == value),
+
+            Arrangement::Built(entries) => entries.iter().position(|entry| entry.value == value),
+        };
+
+        place.unwrap_or(usize::MAX)
+    }
+
+    /// The catalog as the editor draws it. A stock catalog resolves its
+    /// message keys here, once per render, which is what keeps a
+    /// translated label out of the element ids.
+    fn entries(&self) -> Vec<ArrangeEntry<V>> {
+        match self {
+            Arrangement::Stock(specs) => specs
+                .iter()
+                .map(|spec| ArrangeEntry {
+                    id: SharedString::new_static(spec.key),
+                    label: rox_i18n::t!(spec.key),
+                    icon: spec.icon,
+                    value: spec.value,
+                    repeats: spec.repeats,
+                })
+                .collect(),
+
+            Arrangement::Built(entries) => entries.to_vec(),
+        }
+    }
+}
+
 /// The value a chip drag carries. The type is generic over the item enum,
 /// so a drop only ever dispatches to editors of the same panel kind; the
 /// editor id guards the one case left, two settings windows of the same
@@ -44,26 +155,26 @@ struct ArrangeDrag<V: Clone + 'static> {
     editor: &'static str,
     value: V,
     from: Option<(usize, usize)>,
-    key: &'static str,
+    label: SharedString,
     icon: Option<&'static str>,
 }
 
 /// The chip that floats under the pointer while one is dragged.
 struct ChipPreview {
-    key: &'static str,
+    label: SharedString,
     icon: Option<&'static str>,
 }
 
 impl Render for ChipPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        chip(self.key, self.icon, false)
+        chip(self.label.clone(), self.icon, false)
             .border_1()
             .border_color(palette::border_light())
     }
 }
 
 /// The chip look shared by the bar, the tray, and the drag preview.
-fn chip(key: &'static str, icon: Option<&'static str>, dimmed: bool) -> Div {
+fn chip(label: SharedString, icon: Option<&'static str>, dimmed: bool) -> Div {
     div()
         .flex()
         .flex_row()
@@ -90,7 +201,7 @@ fn chip(key: &'static str, icon: Option<&'static str>, dimmed: bool) -> Div {
                 } else {
                     palette::text()
                 })
-                .child(rox_i18n::t!(key)),
+                .child(label),
         )
 }
 
@@ -135,14 +246,6 @@ fn caption(text: gpui::SharedString) -> Div {
         .child(text)
 }
 
-/// Whether the catalog allows `value` twice on one row.
-fn can_repeat<V: PartialEq + Copy>(registry: &[ArrangeSpec<V>], value: V) -> bool {
-    registry
-        .iter()
-        .find(|s| s.value == value)
-        .is_some_and(|s| s.repeats)
-}
-
 /// Insert `value` into `row` at `at`. Uniqueness is per row: a
 /// non-repeatable value already on the row leaves first, pulling the
 /// drop point along when it was before it, so a drop replaces the row's
@@ -166,7 +269,7 @@ fn insert_row_unique<V: PartialEq + Copy>(row: &mut Vec<V>, value: V, at: usize,
 /// `rows` with the chip at `from` moved to `to`, both (row, index)
 /// places into the rows as they stand before the move.
 fn moved_at<V: PartialEq + Copy>(
-    registry: &[ArrangeSpec<V>],
+    registry: &Arrangement<V>,
     rows: &[Vec<V>],
     from: (usize, usize),
     to: (usize, usize),
@@ -181,7 +284,7 @@ fn moved_at<V: PartialEq + Copy>(
     if to_row == from.0 && from.1 < to_ix {
         to_ix -= 1;
     }
-    let unique = !can_repeat(registry, value);
+    let unique = !registry.repeats(value);
     if let Some(row) = rows.get_mut(to_row) {
         insert_row_unique(row, value, to_ix, unique);
     }
@@ -190,13 +293,13 @@ fn moved_at<V: PartialEq + Copy>(
 
 /// `rows` with `value` inserted at `to`, the tray-to-well drop.
 fn inserted<V: PartialEq + Copy>(
-    registry: &[ArrangeSpec<V>],
+    registry: &Arrangement<V>,
     rows: &[Vec<V>],
     value: V,
     to: (usize, usize),
 ) -> Vec<Vec<V>> {
     let mut rows = rows.to_vec();
-    let unique = !can_repeat(registry, value);
+    let unique = !registry.repeats(value);
     if let Some(row) = rows.get_mut(to.0) {
         insert_row_unique(row, value, to.1, unique);
     }
@@ -206,10 +309,10 @@ fn inserted<V: PartialEq + Copy>(
 /// `rows` without the chip at `at`.
 fn removed_at<V: Copy>(rows: &[Vec<V>], at: (usize, usize)) -> Vec<Vec<V>> {
     let mut rows = rows.to_vec();
-    if let Some(row) = rows.get_mut(at.0) {
-        if at.1 < row.len() {
-            row.remove(at.1);
-        }
+    if let Some(row) = rows.get_mut(at.0)
+        && at.1 < row.len()
+    {
+        row.remove(at.1);
     }
     rows
 }
@@ -233,19 +336,9 @@ fn without<V: PartialEq + Copy>(items: &[V], value: V) -> Vec<V> {
 /// item that precedes it in the catalog. On a list still in catalog
 /// order that restores exactly where the item used to be; on a
 /// rearranged list it stays deterministic.
-fn insert_stock<V: PartialEq + Copy>(
-    registry: &'static [ArrangeSpec<V>],
-    items: &[V],
-    value: V,
-) -> Vec<V> {
-    let rank = |v: V| {
-        registry
-            .iter()
-            .position(|s| s.value == v)
-            .unwrap_or(usize::MAX)
-    };
-    let target = rank(value);
-    let at = items.iter().filter(|v| rank(**v) < target).count();
+fn insert_stock<V: PartialEq + Copy>(registry: &Arrangement<V>, items: &[V], value: V) -> Vec<V> {
+    let target = registry.rank(value);
+    let at = items.iter().filter(|v| registry.rank(**v) < target).count();
     let mut items = items.to_vec();
     items.insert(at.min(items.len()), value);
     items
@@ -254,15 +347,15 @@ fn insert_stock<V: PartialEq + Copy>(
 /// Show or hide `value` on the list: the panels' quick menu toggles go
 /// through this, hiding a shown item and slotting a hidden one back at its
 /// stock position.
-pub fn toggled<V: PartialEq + Copy>(
-    registry: &'static [ArrangeSpec<V>],
+pub fn toggled<V: PartialEq + Copy + 'static>(
+    registry: impl Into<Arrangement<V>>,
     items: &[V],
     value: V,
 ) -> Vec<V> {
     if items.contains(&value) {
         without(items, value)
     } else {
-        insert_stock(registry, items, value)
+        insert_stock(&registry.into(), items, value)
     }
 }
 
@@ -289,8 +382,8 @@ fn restored<V: PartialEq + Copy>(stash: &[V], items: &[V], hidden: &[V]) -> Opti
 /// One stash slot per toggle, so hiding a second group forgets the first.
 /// [`restored`] catches that, along with any edit made while the group was
 /// hidden, and the stock insert takes over.
-pub fn toggled_stashed<V: PartialEq + Copy>(
-    registry: &'static [ArrangeSpec<V>],
+pub fn toggled_stashed<V: PartialEq + Copy + 'static>(
+    registry: impl Into<Arrangement<V>>,
     items: &[V],
     stash: &mut Option<Vec<V>>,
     values: &[V],
@@ -309,10 +402,11 @@ pub fn toggled_stashed<V: PartialEq + Copy>(
     {
         return kept;
     }
+    let registry = registry.into();
     let mut out = items.to_vec();
     for value in values {
         if !out.contains(value) {
-            out = insert_stock(registry, &out, *value);
+            out = insert_stock(&registry, &out, *value);
         }
     }
     out
@@ -321,16 +415,15 @@ pub fn toggled_stashed<V: PartialEq + Copy>(
 /// Drop repeated values from a dump's list, keeping first positions, so a
 /// hand-edited layout can't render an item twice. Items the catalog marks
 /// repeatable pass through as often as they appear.
-pub fn dedup<V: PartialEq + Copy>(registry: &'static [ArrangeSpec<V>], items: Vec<V>) -> Vec<V> {
-    let repeats = |v: &V| {
-        registry
-            .iter()
-            .find(|s| s.value == *v)
-            .is_some_and(|s| s.repeats)
-    };
+pub fn dedup<V: PartialEq + Copy + 'static>(
+    registry: impl Into<Arrangement<V>>,
+    items: Vec<V>,
+) -> Vec<V> {
+    let registry = registry.into();
+
     let mut out: Vec<V> = Vec::with_capacity(items.len());
     for item in items {
-        if repeats(&item) || !out.contains(&item) {
+        if registry.repeats(item) || !out.contains(&item) {
             out.push(item);
         }
     }
@@ -341,7 +434,7 @@ pub fn dedup<V: PartialEq + Copy>(registry: &'static [ArrangeSpec<V>], items: Ve
 /// well, so `apply` gets the single row back as the plain list it stores.
 pub fn arrange_editor<P: 'static, V: PartialEq + Copy + 'static>(
     id: &'static str,
-    registry: &'static [ArrangeSpec<V>],
+    registry: impl Into<Arrangement<V>>,
     items: &[V],
     apply: impl Fn(&mut P, Vec<V>, &mut Context<P>) + Clone + 'static,
     cx: &mut Context<P>,
@@ -366,7 +459,7 @@ pub fn arrange_editor<P: 'static, V: PartialEq + Copy + 'static>(
 /// otherwise share a chip's drag state.
 pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
     id: &'static str,
-    registry: &'static [ArrangeSpec<V>],
+    registry: impl Into<Arrangement<V>>,
     rows: &[Vec<V>],
     max_rows: Option<usize>,
     apply: impl Fn(&mut P, Vec<Vec<V>>, &mut Context<P>) + Clone + 'static,
@@ -379,6 +472,12 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
         rows.to_vec()
     };
 
+    // Resolved once for the whole subtree. The handlers each keep a
+    // refcounted copy of the registry itself, since a drop rearranges
+    // the rows long after this render is gone.
+    let registry = registry.into();
+    let entries = registry.entries();
+
     // The wells: every shown chip drags, drops before the chip it lands
     // on, and hides on its x. The tail past a well's last chip catches
     // drops meant for the end of that row.
@@ -386,16 +485,17 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
     for (row_ix, row) in rows.iter().enumerate() {
         let mut bar = well();
         for (ix, value) in row.iter().copied().enumerate() {
-            let Some(spec) = registry.iter().find(|s| s.value == value) else {
+            let Some(entry) = entries.iter().find(|entry| entry.value == value) else {
                 continue;
             };
             let drag = ArrangeDrag {
                 editor: id,
                 value,
                 from: Some((row_ix, ix)),
-                key: spec.key,
-                icon: spec.icon,
+                label: entry.label.clone(),
+                icon: entry.icon,
             };
+            let drop_registry = registry.clone();
             let drop_rows = rows.clone();
             let drop_apply = apply.clone();
             let hide_rows = rows.clone();
@@ -404,12 +504,12 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
                 // Keyed by position as well as label: two spacers on a
                 // well are two chips, and sharing an id would share their
                 // drag state. The place folds to one integer for the id.
-                chip(spec.key, spec.icon, false)
-                    .id((spec.key, (row_ix << 16) | ix))
+                chip(entry.label.clone(), entry.icon, false)
+                    .id((entry.id.clone(), (row_ix << 16) | ix))
                     .cursor_pointer()
                     .on_drag(drag, |drag, _pos, _window, cx| {
                         cx.new(|_| ChipPreview {
-                            key: drag.key,
+                            label: drag.label.clone(),
                             icon: drag.icon,
                         })
                     })
@@ -425,8 +525,8 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
                             return;
                         }
                         let rows = match drag.from {
-                            Some(from) => moved_at(registry, &drop_rows, from, (row_ix, ix)),
-                            None => inserted(registry, &drop_rows, drag.value, (row_ix, ix)),
+                            Some(from) => moved_at(&drop_registry, &drop_rows, from, (row_ix, ix)),
+                            None => inserted(&drop_registry, &drop_rows, drag.value, (row_ix, ix)),
                         };
                         drop_apply(this, rows, cx);
                     }))
@@ -438,6 +538,7 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
                     )),
             );
         }
+        let tail_registry = registry.clone();
         let tail_rows = rows.clone();
         let tail_apply = apply.clone();
         let tail_to = (row_ix, row.len());
@@ -459,8 +560,8 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
                         return;
                     }
                     let rows = match drag.from {
-                        Some(from) => moved_at(registry, &tail_rows, from, tail_to),
-                        None => inserted(registry, &tail_rows, drag.value, tail_to),
+                        Some(from) => moved_at(&tail_registry, &tail_rows, from, tail_to),
+                        None => inserted(&tail_registry, &tail_rows, drag.value, tail_to),
                     };
                     tail_apply(this, rows, cx);
                 })),
@@ -480,6 +581,7 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
     if max_rows.is_none_or(|max| rows.len() < max) {
         let add_rows = rows.clone();
         let add_apply = apply.clone();
+        let drop_registry = registry.clone();
         let drop_rows = rows.clone();
         let drop_apply = apply.clone();
         wells = wells.child(
@@ -531,8 +633,8 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
                     rows.push(Vec::new());
                     let to = (rows.len() - 1, 0);
                     let rows = match drag.from {
-                        Some(from) => moved_at(registry, &rows, from, to),
-                        None => inserted(registry, &rows, drag.value, to),
+                        Some(from) => moved_at(&drop_registry, &rows, from, to),
+                        None => inserted(&drop_registry, &rows, drag.value, to),
                     };
                     drop_apply(this, rows, cx);
                 })),
@@ -564,27 +666,28 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
             };
             tray_apply(this, removed_at(&tray_rows, from), cx);
         }));
-    for spec in registry
+    for entry in entries
         .iter()
-        .filter(|s| s.repeats || rows.iter().any(|row| !row.contains(&s.value)))
+        .filter(|entry| entry.repeats || rows.iter().any(|row| !row.contains(&entry.value)))
     {
         let drag = ArrangeDrag {
             editor: id,
-            value: spec.value,
+            value: entry.value,
             from: None,
-            key: spec.key,
-            icon: spec.icon,
+            label: entry.label.clone(),
+            icon: entry.icon,
         };
+        let show_registry = registry.clone();
         let show_rows = rows.clone();
         let show_apply = apply.clone();
-        let value = spec.value;
+        let value = entry.value;
         tray = tray.child(
-            chip(spec.key, spec.icon, true)
-                .id(spec.key)
+            chip(entry.label.clone(), entry.icon, true)
+                .id(entry.id.clone())
                 .cursor_pointer()
                 .on_drag(drag, |drag, _pos, _window, cx| {
                     cx.new(|_| ChipPreview {
-                        key: drag.key,
+                        label: drag.label.clone(),
                         icon: drag.icon,
                     })
                 })
@@ -596,7 +699,7 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
                             .iter()
                             .position(|row| !row.contains(&value))
                             .unwrap_or(0);
-                        rows[target] = insert_stock(registry, &rows[target], value);
+                        rows[target] = insert_stock(&show_registry, &rows[target], value);
                         show_apply(this, rows, cx);
                     }),
                 )),
@@ -616,18 +719,23 @@ pub fn arrange_rows_editor<P: 'static, V: PartialEq + Copy + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use gpui::SharedString;
+
     use super::{
-        dedup, insert_stock, inserted, moved_at, removed_at, removed_row, toggled, toggled_stashed,
-        without, ArrangeSpec,
+        ArrangeEntry, ArrangeSpec, Arrangement, dedup, insert_stock, inserted, moved_at,
+        removed_at, removed_row, toggled, toggled_stashed, without,
     };
 
     /// The place ops that read the catalog for repeatability, pinned to
     /// the test registry.
     fn moved(rows: &[Vec<u8>], from: (usize, usize), to: (usize, usize)) -> Vec<Vec<u8>> {
-        moved_at(REGISTRY, rows, from, to)
+        moved_at(&Arrangement::Stock(REGISTRY), rows, from, to)
     }
     fn insert(rows: &[Vec<u8>], value: u8, to: (usize, usize)) -> Vec<Vec<u8>> {
-        inserted(REGISTRY, rows, value, to)
+        inserted(&Arrangement::Stock(REGISTRY), rows, value, to)
+    }
+    fn stock(items: &[u8], value: u8) -> Vec<u8> {
+        insert_stock(&Arrangement::Stock(REGISTRY), items, value)
     }
 
     /// Value 3 stands in for a spacer: the one repeatable entry.
@@ -710,8 +818,8 @@ mod tests {
     /// in the catalog, restoring stock order on a stock list.
     #[test]
     fn stock_insert_restores_catalog_order() {
-        assert_eq!(insert_stock(REGISTRY, &[0, 1, 3], 2), vec![0, 1, 2, 3]);
-        assert_eq!(insert_stock(REGISTRY, &[1, 2], 0), vec![0, 1, 2]);
+        assert_eq!(stock(&[0, 1, 3], 2), vec![0, 1, 2, 3]);
+        assert_eq!(stock(&[1, 2], 0), vec![0, 1, 2]);
     }
 
     /// Duplicates in a hand-edited dump collapse to first positions,
@@ -734,7 +842,7 @@ mod tests {
         let hidden = toggled_stashed(REGISTRY, &row, &mut stash, &[0]);
         assert_eq!(hidden, vec![2, 1]);
         assert_eq!(toggled_stashed(REGISTRY, &hidden, &mut stash, &[0]), row);
-        assert_eq!(insert_stock(REGISTRY, &hidden, 0), vec![0, 2, 1]);
+        assert_eq!(stock(&hidden, 0), vec![0, 2, 1]);
         assert!(stash.is_none(), "the stash is spent once it's used");
     }
 
@@ -773,5 +881,33 @@ mod tests {
             toggled_stashed(REGISTRY, &[2, 1], &mut stash, &[0]),
             toggled(REGISTRY, &[2, 1], 0)
         );
+    }
+
+    /// A catalog built while the app runs answers the same questions the
+    /// static one does. This is the custom controls panel's case, where
+    /// the items are user-made buttons keyed by their persisted id.
+    #[test]
+    fn a_runtime_registry_behaves_like_a_static_one() {
+        let built: Vec<ArrangeEntry<u8>> = [(0u8, false), (1, false), (2, false), (3, true)]
+            .iter()
+            .map(|(value, repeats)| ArrangeEntry {
+                id: SharedString::from(format!("b{value}")),
+                label: SharedString::from(format!("Button {value}")),
+                icon: None,
+                value: *value,
+                repeats: *repeats,
+            })
+            .collect();
+        let registry = Arrangement::from(built);
+
+        // The same three answers the static registry gives, off a
+        // registry the compiler never saw.
+        assert_eq!(dedup(registry.clone(), vec![2, 0, 2, 1, 0]), vec![2, 0, 1]);
+        assert_eq!(dedup(registry.clone(), vec![3, 0, 3, 3]), vec![3, 0, 3, 3]);
+        assert_eq!(
+            inserted(&registry, &[vec![0, 1]], 2, (0, 1)),
+            [vec![0, 2, 1]]
+        );
+        assert_eq!(insert_stock(&registry, &[0, 1, 3], 2), vec![0, 1, 2, 3]);
     }
 }

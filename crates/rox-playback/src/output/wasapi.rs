@@ -111,10 +111,10 @@ fn pick_format(
     want: Option<&str>,
     mut supported: impl FnMut(&Candidate) -> bool,
 ) -> Option<&'static Candidate> {
-    if let Some(named) = want.and_then(|want| FORMATS.iter().find(|c| c.name == want)) {
-        if supported(named) {
-            return Some(named);
-        }
+    if let Some(named) = want.and_then(|want| FORMATS.iter().find(|c| c.name == want))
+        && supported(named)
+    {
+        return Some(named);
     }
     FORMATS.iter().find(|c| supported(c))
 }
@@ -167,23 +167,22 @@ fn aligned_hns(frames: u32, rate: u32) -> i64 {
 
 #[cfg(target_os = "windows")]
 mod platform {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, Sender};
-    use std::sync::Arc;
     use std::thread::JoinHandle;
     use std::time::Duration;
 
     use cpal::{FromSample, SizedSample};
     use rtrb::{Consumer, Producer};
-    use windows::core::{Error, HRESULT, PCWSTR};
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
     use windows::Win32::Media::Audio::{
-        eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-        MMDeviceEnumerator, AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_INVALIDATED,
-        AUDCLNT_E_NOT_INITIALIZED, AUDCLNT_E_OUT_OF_ORDER, AUDCLNT_E_RESOURCES_INVALIDATED,
-        AUDCLNT_E_SERVICE_NOT_RUNNING, AUDCLNT_SHAREMODE_EXCLUSIVE, DEVICE_STATE_ACTIVE,
-        WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
+        AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_NOT_INITIALIZED,
+        AUDCLNT_E_OUT_OF_ORDER, AUDCLNT_E_RESOURCES_INVALIDATED, AUDCLNT_E_SERVICE_NOT_RUNNING,
+        AUDCLNT_SHAREMODE_EXCLUSIVE, DEVICE_STATE_ACTIVE, IAudioClient, IAudioRenderClient,
+        IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+        WAVEFORMATEXTENSIBLE_0, eConsole, eRender,
     };
     use windows::Win32::Media::KernelStreaming::{
         KSDATAFORMAT_SUBTYPE_PCM, SPEAKER_BACK_LEFT, SPEAKER_BACK_RIGHT, SPEAKER_FRONT_CENTER,
@@ -193,19 +192,20 @@ mod platform {
     use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
     use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-        COINIT_MULTITHREADED, STGM_READ,
+        CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+        CoUninitialize, STGM_READ,
     };
     use windows::Win32::System::Threading::{
-        CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
-        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
+        TIMER_ALL_ACCESS, WaitForSingleObject,
     };
     use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::core::{Error, HRESULT, PCWSTR};
 
-    use super::super::{fill, rings, Device, Mode, Negotiated, OpenOutput, OutputStream, Request};
+    use super::super::{Device, Mode, Negotiated, OpenOutput, OutputStream, Request, fill, rings};
     use super::{
-        aligned_hns, buffer_hns, period_hns, pick_format, wake_frames, Candidate, Sample,
-        DEFAULT_RATE,
+        Candidate, DEFAULT_RATE, Sample, aligned_hns, buffer_hns, period_hns, pick_format,
+        wake_frames,
     };
     use crate::shared::Shared;
 

@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, App, Context, Div,
-    EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, WeakEntity, Window,
+    App, Context, Div, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, WeakEntity,
+    Window, canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};

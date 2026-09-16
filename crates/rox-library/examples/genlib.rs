@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use rox_library::replaygain::ReplayGain;
-use rox_library::{store, TrackRow};
+use rox_library::{TrackRow, store};
 
 /// Distinct artists as a share of tracks, and distinct album names the same
 /// way. Straight off the research doc's 10M row: 272k artists, 433k albums.
@@ -54,11 +54,7 @@ impl Rng {
     }
 
     fn below(&mut self, n: u64) -> u64 {
-        if n == 0 {
-            0
-        } else {
-            self.next_u64() % n
-        }
+        if n == 0 { 0 } else { self.next_u64() % n }
     }
 
     fn unit(&mut self) -> f64 {
@@ -177,11 +173,7 @@ fn name(index: u64) -> String {
 /// symbol merge.
 fn stride(n: u64) -> u64 {
     fn gcd(a: u64, b: u64) -> u64 {
-        if b == 0 {
-            a
-        } else {
-            gcd(b, a % b)
-        }
+        if b == 0 { a } else { gcd(b, a % b) }
     }
     let mut k = (n / 3).max(1) | 1;
     while gcd(k, n) != 1 {

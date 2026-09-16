@@ -18,12 +18,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, svg, Context, Div, MouseButton, SharedString};
+use gpui::{Context, Div, MouseButton, SharedString, div, prelude::*, px, svg};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 
 use rox_viz::signal::{Route, Signal, SignalHub};
 
-use crate::panel::shader::{slot_label, slot_target, target_slot, SLOTS};
+use crate::panel::shader::{SLOTS, slot_label, slot_target, target_slot};
 use crate::panel::{self, ScrubState, ValueEdit};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};

@@ -125,14 +125,14 @@ pub fn start(library: Entity<Library>, cx: &mut App) {
             // Worker-seconds per track, so the Library page can price any
             // worker setting against it. Only off a decent stretch: a pass
             // over a handful of files measures its own startup, not the rate.
-            if progress.done() >= rox_acoustic::PACE_FLOOR {
-                if let Some(per) = progress.secs_per_track() {
-                    let pace = (per * workers as f64) as f32;
-                    let id = name.clone();
-                    Settings::update(move |s| {
-                        s.session.acoustic_pace.insert(id, pace);
-                    });
-                }
+            if progress.done() >= rox_acoustic::PACE_FLOOR
+                && let Some(per) = progress.secs_per_track()
+            {
+                let pace = (per * workers as f64) as f32;
+                let id = name.clone();
+                Settings::update(move |s| {
+                    s.session.acoustic_pace.insert(id, pace);
+                });
             }
             match result {
                 Ok(analyzed) => {

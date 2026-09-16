@@ -347,7 +347,7 @@ fn windows_tray_thread(
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG, PM_NOREMOVE, WM_USER,
+        DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, TranslateMessage, WM_USER,
     };
 
     // PostThreadMessage throws messages away for a thread that has never
@@ -514,12 +514,15 @@ fn shutdown(cx: &mut App) {
 fn apply(command: TrayCommand, cx: &mut App) -> bool {
     match command {
         TrayCommand::Open => {
-            if let Some((window, _)) = rox_panel_api::windows::front_workspace(cx) {
-                window
-                    .update(cx, |_, window, _| window.activate_window())
-                    .ok();
-            } else {
-                reopen(cx);
+            match rox_panel_api::windows::front_workspace(cx) {
+                Some((window, _)) => {
+                    window
+                        .update(cx, |_, window, _| window.activate_window())
+                        .ok();
+                }
+                _ => {
+                    reopen(cx);
+                }
             }
             false
         }

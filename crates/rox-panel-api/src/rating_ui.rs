@@ -5,13 +5,13 @@
 //! does with the value is the caller's business: the library writes the
 //! catalog, the tag editor arms a pending field.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use gpui::{div, prelude::*, px, svg, App, Div, MouseButton, SharedString, Window};
+use gpui::{App, Div, MouseButton, SharedString, Window, div, prelude::*, px, svg};
 
 use rox_library::rating;
 
-use rox_core::settings::{rating_dots, rating_style, RatingStyle};
+use rox_core::settings::{RatingStyle, rating_dots, rating_style};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 

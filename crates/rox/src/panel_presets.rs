@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use gpui::{App, Context, WeakEntity, Window};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::Icon;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
 use rox_core::settings::{PanelPreset, Settings};
 use rox_design::assets::icons;

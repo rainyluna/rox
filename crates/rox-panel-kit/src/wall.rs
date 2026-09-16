@@ -5,7 +5,7 @@
 //! It computes in gpui [`Pixels`] against the panel's measured cross
 //! extent, so it belongs in the widget layer rather than down in rox-viz.
 
-use gpui::{px, Along, Axis, Pixels, Point};
+use gpui::{Along, Axis, Pixels, Point, px};
 
 /// The dim knob's ceiling, in percent of fully hidden: 100 fades the other
 /// tiles out entirely.
@@ -93,11 +93,7 @@ impl WallLayout {
 
     /// The caption's height when labels are on, else zero.
     pub fn label_height(&self) -> f32 {
-        if self.labels {
-            TILE_LABEL_H
-        } else {
-            0.
-        }
+        if self.labels { TILE_LABEL_H } else { 0. }
     }
 
     /// The caption's share of the cross extent: a horizontal wall has to

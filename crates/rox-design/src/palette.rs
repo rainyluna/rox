@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
-use gpui::{px, rgb, App, EntityId, Rgba};
+use gpui::{App, EntityId, Rgba, px, rgb};
 use gpui_component::{Theme, ThemeColor, ThemeMode};
 use serde::{Deserialize, Serialize};
 
@@ -521,10 +521,10 @@ impl Palette {
         // The heading strips read the elevated tint before they had a role
         // of their own, so a palette that recolors bg_elevated without
         // naming bg_header keeps the look it was saved with. [compat]
-        if !map.contains_key("bg_header") {
-            if let Some(color) = map.get("bg_elevated").and_then(|hex| parse_hex(hex)) {
-                palette.bg_header = color;
-            }
+        if !map.contains_key("bg_header")
+            && let Some(color) = map.get("bg_elevated").and_then(|hex| parse_hex(hex))
+        {
+            palette.bg_header = color;
         }
         palette
     }

@@ -22,9 +22,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    actions, div, prelude::*, px, size, svg, App, Bounds, ClickEvent, Context, Div, ElementId,
-    Entity, FocusHandle, Focusable as _, Global, KeyBinding, MouseButton, MouseDownEvent,
-    ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle,
+    App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _, Global,
+    KeyBinding, MouseButton, MouseDownEvent, ScrollHandle, SharedString, Stateful, Subscription,
+    WeakEntity, Window, WindowHandle, actions, div, prelude::*, px, size, svg,
 };
 use gpui_component::input::{Enter, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -37,17 +37,17 @@ use rox_library::cue::TrackKey;
 use rox_library::rating;
 use rox_library::writer::{self, Change, Edit, Field, UnknownValue};
 
-use crate::matching::{open_or_focus, WindowRegistry};
+use crate::matching::{WindowRegistry, open_or_focus};
 use crate::tags::guess;
 use crate::tags::replace;
-use rox_core::settings::{rating_style, RatingStyle, Settings};
+use rox_core::settings::{RatingStyle, Settings, rating_style};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_net::providers;
 use rox_panel_api::panel::AppState;
 use rox_panel_api::suggest;
 use rox_panel_kit::ui::{
-    self as settings_ui, kbd_line, section, section_with_control, Seg, SECTION_GAP,
+    self as settings_ui, SECTION_GAP, Seg, kbd_line, section, section_with_control,
 };
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
@@ -1767,10 +1767,9 @@ impl TagEditor {
                 window,
                 cx,
             );
-            if drifted {
-                if let Some(row) = self.additional.as_mut().and_then(|a| a.rows.get_mut(ix)) {
-                    row.initial = form_value.into();
-                }
+            if drifted && let Some(row) = self.additional.as_mut().and_then(|a| a.rows.get_mut(ix))
+            {
+                row.initial = form_value.into();
             }
         }
     }
@@ -4002,11 +4001,11 @@ impl Render for TagEditor {
 #[cfg(test)]
 mod tests {
     use super::{
+        ColumnKind, FIELDS, LABEL_MIN_W, LEAD, OPT_IN_COLUMNS, TagColumn, TagIntent,
         baseline_value, change_for, column_keys, column_kind, column_rank, column_shown,
         default_widths, file_tag_key, fills_sort_field, fold_cell, fold_tag_intents, form_fields,
         grid_columns, label_column_w, placed_widths, shared_value, sort_columns_to_show,
-        sort_field, tag_change_for, tag_key_of, title_case, ColumnKind, TagColumn, TagIntent,
-        FIELDS, LABEL_MIN_W, LEAD, OPT_IN_COLUMNS,
+        sort_field, tag_change_for, tag_key_of, title_case,
     };
     use rox_library::writer::{Field, UnknownValue};
     use std::collections::{BTreeMap, HashSet};

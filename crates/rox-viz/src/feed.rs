@@ -5,8 +5,8 @@
 //! ring itself, inside rox-playback.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::analysis::MAX_FFT_SIZE;
 

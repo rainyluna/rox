@@ -13,24 +13,24 @@
 //! left with no matching songs drop out.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{PathBuf, MAIN_SEPARATOR};
+use std::path::{MAIN_SEPARATOR, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    div, prelude::*, px, svg, uniform_list, App, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ScrollStrategy,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, UniformListScrollHandle, WeakEntity,
-    Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
+    Subscription, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, svg,
+    uniform_list,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::{Icon, Side};
-use rox_core::fmt::fmt_ms;
 use rox_core::QUEUE_CAP;
+use rox_core::fmt::fmt_ms;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
-use rox_library::folders::{build_roots, node_at, sum_counts, Node};
+use rox_library::folders::{Node, build_roots, node_at, sum_counts};
 use rox_library::projection::FilterField;
 use rox_library::sort::natural_cmp;
 use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
@@ -388,7 +388,13 @@ pub struct FolderTreePanel {
     /// drag-set cache so a grab inside a big selection shares one Arc across
     /// every visible selected row instead of rebuilding the set per row.
     drag_gen: u64,
-    drag_set: Option<(u64, Arc<[TrackKey]>)>,
+    drag_set: Option<DragSet>,
+    /// The folder row the pointer is on, by path, and its drag payload once
+    /// something asks for it. Only that one row carries a drag, so the
+    /// subtree walk happens on hover instead of on every visible folder row
+    /// every frame.
+    hover_folder: Option<String>,
+    folder_drag: Option<FolderDrag>,
     /// The idle clock behind resume: a browse gesture arms it, its wake
     /// scrolls back to the playing track once the panel goes untouched.
     resume_idle: ResumeIdle,
@@ -410,6 +416,19 @@ pub struct FolderTreePanel {
     /// Drops the phrase when focus leaves the panel, so tab goes back to
     /// walking panels instead of cycling a phrase from a past visit.
     _type_ahead_blur: Subscription,
+}
+
+/// A cached multi-selection drag: the generation that built it, the keys a
+/// drop plays, and the catalog ids a playlist drop stores.
+type DragSet = (u64, Arc<[TrackKey]>, Arc<[i64]>);
+
+/// The hovered folder's drag payload, held across frames so the subtree only
+/// resolves once per hover. `drag` is None when the folder's subtree came out
+/// empty, so a dead branch isn't re-walked every frame either.
+struct FolderDrag {
+    path: String,
+    generation: u64,
+    drag: Option<PlayDrag>,
 }
 
 impl FolderTreePanel {
@@ -496,6 +515,8 @@ impl FolderTreePanel {
             drag_keys: HashMap::new(),
             drag_gen: 0,
             drag_set: None,
+            hover_folder: None,
+            folder_drag: None,
             resume_idle: ResumeIdle::default(),
             glide_to: None,
             glide_tick: Instant::now(),
@@ -1131,14 +1152,17 @@ impl FolderTreePanel {
     /// A song row's drag payload: the whole selection in view order when the
     /// dragged row is part of a multi-selection, otherwise just this row.
     /// Keys resolve through the shared cache, the library table's route
-    /// into the play-drag story.
+    /// into the play-drag story, and the ids they came from ride along for a
+    /// playlist drop.
     fn song_drag(&mut self, ix: usize, title: &SharedString, cx: &App) -> Option<PlayDrag> {
         let id = self.song_id_at(ix)?;
         // A grab inside a multi-selection takes the whole set in visible order,
         // built once per selection or reflow and shared behind an Arc so it's a
         // refcount bump per row, not a rebuild. Outside it, just this song.
-        let keys: Arc<[TrackKey]> = if self.selected.len() > 1 && self.selected.contains(&id) {
-            if self.drag_set.as_ref().map(|(gen, _)| *gen) != Some(self.drag_gen) {
+        let (keys, ids): (Arc<[TrackKey]>, Arc<[i64]>) = if self.selected.len() > 1
+            && self.selected.contains(&id)
+        {
+            if self.drag_set.as_ref().map(|(generation, ..)| *generation) != Some(self.drag_gen) {
                 let ids: Vec<i64> = self
                     .visible
                     .iter()
@@ -1149,17 +1173,79 @@ impl FolderTreePanel {
                     .collect();
                 let set: Arc<[TrackKey]> =
                     ids.iter().filter_map(|&id| self.key_for(id, cx)).collect();
-                self.drag_set = Some((self.drag_gen, set));
+                self.drag_set = Some((self.drag_gen, set, ids.into()));
             }
-            self.drag_set.as_ref().map(|(_, set)| set.clone())?
+            self.drag_set
+                .as_ref()
+                .map(|(_, set, ids)| (set.clone(), ids.clone()))?
         } else {
-            self.key_for(id, cx).into_iter().collect()
+            (self.key_for(id, cx).into_iter().collect(), vec![id].into())
         };
         if keys.is_empty() {
             return None;
         }
         Some(PlayDrag {
             keys,
+            ids,
+            title: title.clone(),
+        })
+    }
+
+    /// A folder row's drag payload: its whole subtree in tree order, capped
+    /// like a folder play, so dropping it on the queue or a playlist lands
+    /// the same set the double click would.
+    ///
+    /// gpui takes a drag value eagerly at render time, once per row per
+    /// frame, and a root folder's subtree runs to tens of thousands of rows.
+    /// So only the hovered row asks for a payload at all, and the answer is
+    /// kept until the pointer moves to another folder or the tree reflows
+    /// under it. The generation is the same one the song rows' drag set
+    /// rides on, bumped by every reflatten.
+    fn folder_drag(&mut self, path: &str, title: &SharedString, cx: &App) -> Option<PlayDrag> {
+        if self.hover_folder.as_deref() != Some(path) {
+            return None;
+        }
+
+        let fresh = self
+            .folder_drag
+            .as_ref()
+            .is_some_and(|cached| cached.path == path && cached.generation == self.drag_gen);
+        if !fresh {
+            let rows = self.subtree_rows(path);
+            let drag = self.build_folder_drag(&rows, title, cx);
+            self.folder_drag = Some(FolderDrag {
+                path: path.to_string(),
+                generation: self.drag_gen,
+                drag,
+            });
+        }
+
+        self.folder_drag
+            .as_ref()
+            .and_then(|cached| cached.drag.clone())
+    }
+
+    /// Resolve a folder's projection rows into a payload: ids straight off
+    /// the projection, keys in one batch through the library, both capped
+    /// the way a folder play caps. None when nothing came back, which is
+    /// what keeps a folder of unresolvable files from offering a drag.
+    fn build_folder_drag(&self, rows: &[u32], title: &SharedString, cx: &App) -> Option<PlayDrag> {
+        let library = self.state.library.read(cx);
+        let projection = library.projection()?;
+        let ids: Vec<i64> = rows
+            .iter()
+            .take(QUEUE_CAP)
+            .map(|&row| projection.db_id[row as usize])
+            .collect();
+        let keys: Arc<[TrackKey]> = library.keys_for(&ids).ok()?.into();
+
+        if keys.is_empty() {
+            return None;
+        }
+
+        Some(PlayDrag {
+            keys,
+            ids: ids.into(),
             title: title.clone(),
         })
     }
@@ -1513,10 +1599,10 @@ impl FolderTreePanel {
                         this.cursor = Some(ix);
                         // A right click on a song outside the selection
                         // reselects just it, so the menu acts on what's lit.
-                        if let Some(id) = row_song_id {
-                            if !this.selected.contains(&id) {
-                                this.select(ix, Modifiers::default(), cx);
-                            }
+                        if let Some(id) = row_song_id
+                            && !this.selected.contains(&id)
+                        {
+                            this.select(ix, Modifiers::default(), cx);
                         }
                         cx.notify();
                     }),
@@ -1589,6 +1675,8 @@ impl FolderTreePanel {
                         .then(|| self.folder_cover_row(&path))
                         .flatten()
                         .and_then(|row| self.cover_for(row, cx));
+                    let drag = self.folder_drag(&path, &row.label, cx);
+                    let (fold_path, hover_path) = (path.clone(), path.clone());
                     base.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1597,17 +1685,53 @@ impl FolderTreePanel {
                             this.cursor = Some(ix);
                             if event.click_count > 1 {
                                 this.play_folder(&path.clone(), cx);
-                            } else if event.modifiers.alt || event.modifiers.shift {
-                                // Shift or Alt folds the whole branch, the
-                                // file manager's deep toggle. Both spellings
-                                // because Linux WMs commonly grab Alt+click
-                                // for window drags before the app sees it.
-                                this.toggle_expand_deep(&path.clone(), cx);
-                            } else {
-                                this.toggle_expand(ix, cx);
                             }
                         }),
                     )
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        // The fold waits for the click instead of the press,
+                        // so a drag off a folder row carries the folder
+                        // rather than flipping it open on the way out. gpui
+                        // drops the click once a drag starts, the same split
+                        // the song rows lean on for their collapse. The
+                        // second press of a double click plays, and its
+                        // click lands here, so it has to pass through.
+                        if event.click_count() > 1 {
+                            return;
+                        }
+                        let mods = event.modifiers();
+                        if mods.alt || mods.shift {
+                            // Shift or Alt folds the whole branch, the file
+                            // manager's deep toggle. Both spellings because
+                            // Linux WMs commonly grab Alt+click for window
+                            // drags before the app sees it.
+                            this.toggle_expand_deep(&fold_path, cx);
+                        } else {
+                            this.toggle_expand(ix, cx);
+                        }
+                    }))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        // The hover is what arms the drag, so it stays armed
+                        // after the pointer leaves: gpui calls hover off the
+                        // moment a button goes down, and dropping the payload
+                        // there would pull the drag out from under the press
+                        // that was starting it. The next folder the pointer
+                        // reaches takes it over.
+                        if !hovered || this.hover_folder.as_deref() == Some(hover_path.as_str()) {
+                            return;
+                        }
+                        this.hover_folder = Some(hover_path.clone());
+                        this.folder_drag = None;
+                        cx.notify();
+                    }))
+                    .when_some(drag, |d, drag| {
+                        d.on_drag(drag, |drag, _pos, _window, cx| {
+                            cx.new(|_| PlayDragPreview {
+                                title: drag.title.clone(),
+                                extra: drag.len().saturating_sub(1),
+                            })
+                        })
+                    })
                     .child(
                         div()
                             .flex_none()

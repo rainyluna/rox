@@ -4,14 +4,14 @@
 
 use std::collections::HashMap;
 
-use gpui::{px, SharedString};
+use gpui::{SharedString, px};
 use gpui_component::table::{Column, ColumnSort};
 use rox_library::projection::SortKey;
 use rox_panel_kit::config::default_true;
 use serde::{Deserialize, Serialize};
 
 use crate::group_head::{self, ArtSide, HeadPiece, Headers, TileFace};
-use crate::panel::{dedup, PanelChrome};
+use crate::panel::{PanelChrome, dedup};
 use crate::query::shared_query::QuerySource;
 use crate::settings::GainModeSetting;
 
@@ -40,10 +40,10 @@ pub fn columns() -> &'static [ColumnDef] {
         std::sync::Mutex::new(None);
     let locale = rox_i18n::locale();
     let mut cache = CACHE.lock().unwrap();
-    if let Some((cached_locale, cached_columns)) = *cache {
-        if cached_locale == locale {
-            return cached_columns;
-        }
+    if let Some((cached_locale, cached_columns)) = *cache
+        && cached_locale == locale
+    {
+        return cached_columns;
     }
     let built: Vec<ColumnDef> = vec![
         ColumnDef {
@@ -407,9 +407,9 @@ impl GroupBy {
 /// `columns::*` glob keep working.
 use crate::track_ui::track_columns::fold_row_height;
 pub use crate::track_ui::track_columns::{
-    fold_head_text, fold_margin, ART_MARGIN_MAX, HEAD_GAP_MAX, HEAD_HEIGHT_MAX, HEAD_LINE_SLOTS,
-    HEAD_TEXT_MAX, HEAD_TEXT_MIN, HEAD_TEXT_STOCK, ROW_HEIGHT_MAX, ROW_HEIGHT_MIN,
-    ROW_HEIGHT_STOCK, ROW_SPACING_MAX,
+    ART_MARGIN_MAX, HEAD_GAP_MAX, HEAD_HEIGHT_MAX, HEAD_LINE_SLOTS, HEAD_TEXT_MAX, HEAD_TEXT_MIN,
+    HEAD_TEXT_STOCK, ROW_HEIGHT_MAX, ROW_HEIGHT_MIN, ROW_HEIGHT_STOCK, ROW_SPACING_MAX,
+    fold_head_text, fold_margin,
 };
 
 fn default_head_text() -> f32 {
@@ -767,9 +767,9 @@ pub fn sort_key(key: &str) -> Option<SortKey> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fold_head_lines, label_overrides, mirror_sort, reword, track_columns, ColumnSort,
-        ColumnSpec, HashMap, HeadPiece, LibraryConfig, SharedString, HEAD_HEIGHT_MAX,
-        HEAD_LINE_SLOTS, ROW_HEIGHT_MIN,
+        ColumnSort, ColumnSpec, HEAD_HEIGHT_MAX, HEAD_LINE_SLOTS, HashMap, HeadPiece,
+        LibraryConfig, ROW_HEIGHT_MIN, SharedString, fold_head_lines, label_overrides, mirror_sort,
+        reword, track_columns,
     };
     use crate::panel::letter_initial;
     use crate::settings::ui as settings_ui;

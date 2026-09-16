@@ -7,7 +7,7 @@ use std::path::Path;
 
 use gpui::{App, Entity};
 
-use rox_core::settings::{lyrics_dir, LyricsSave, Settings};
+use rox_core::settings::{LyricsSave, Settings, lyrics_dir};
 use rox_library::cue::TrackKey;
 use rox_library::lyrics::{self, Source};
 use rox_net::providers::TrackQuery;

@@ -12,8 +12,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use memchr::memmem;
 use rayon::prelude::*;
@@ -1395,15 +1395,15 @@ pub fn parse_query(query: &str) -> Vec<Term> {
                     // No colon: a known field name on its own asks for the
                     // field being absent, everything else is literal text.
                     let name = body.to_lowercase();
-                    if let Some(&(_, field)) = QUERY_FIELDS.iter().find(|(n, _)| *n == name) {
-                        if field.absence() {
-                            return Term {
-                                field: Some(field),
-                                needle: String::new(),
-                                num: None,
-                                mode: TermMode::Absent,
-                            };
-                        }
+                    if let Some(&(_, field)) = QUERY_FIELDS.iter().find(|(n, _)| *n == name)
+                        && field.absence()
+                    {
+                        return Term {
+                            field: Some(field),
+                            needle: String::new(),
+                            num: None,
+                            mode: TermMode::Absent,
+                        };
                     }
                 }
                 None => {
@@ -2698,10 +2698,10 @@ impl Projection {
                     if self.dead[i] {
                         return false;
                     }
-                    if let Some(pinned) = pinned {
-                        if !pinned.contains(&self.db_id[i]) {
-                            return false;
-                        }
+                    if let Some(pinned) = pinned
+                        && !pinned.contains(&self.db_id[i])
+                    {
+                        return false;
                     }
                     checks.iter().all(|c| match c {
                         Check::Sym { column, ok } => ok[column[i] as usize],
@@ -3105,11 +3105,7 @@ impl Projection {
         } else {
             (self.track_gain[i], self.album_gain[i])
         };
-        if first != NO_GAIN {
-            first
-        } else {
-            second
-        }
+        if first != NO_GAIN { first } else { second }
     }
 
     /// The shared sort skeleton behind [`Self::sort_view`]: primary key,
@@ -3287,13 +3283,13 @@ impl Projection {
                 self.spans.insert(row, span);
             }
             // The row this id used to sit on retires now, span and all.
-            if let Some(&old) = index.get(&id) {
-                if !self.dead[old as usize] {
-                    self.dead[old as usize] = true;
-                    self.dead_rows += 1;
-                    self.spans.remove(&old);
-                    patch.dropped.push(old);
-                }
+            if let Some(&old) = index.get(&id)
+                && !self.dead[old as usize]
+            {
+                self.dead[old as usize] = true;
+                self.dead_rows += 1;
+                self.spans.remove(&old);
+                patch.dropped.push(old);
             }
             patch.added.push(row);
         }
@@ -3472,7 +3468,7 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{listens, TrackRow};
+    use crate::{TrackRow, listens};
 
     fn row(path: &str, album: &str, disc_no: u16, track_no: u16) -> TrackRow {
         TrackRow {

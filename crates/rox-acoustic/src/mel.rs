@@ -787,7 +787,9 @@ mod tests {
         // Pad of 4 either side of a 5-sample clip.
         assert_eq!(
             out,
-            vec![5.0, 4.0, 3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+            vec![
+                5.0, 4.0, 3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0
+            ]
         );
         // A single sample has nothing to mirror and repeats instead.
         assert_eq!(padded(&[7.0], &config), vec![7.0; 9]);
@@ -1012,27 +1014,35 @@ mod tests {
     #[test]
     fn an_impossible_config_is_refused_up_front() {
         let base = librosa_default();
-        assert!(Mel::new(Config {
-            n_fft: 1000,
-            ..base
-        })
-        .is_err());
-        assert!(Mel::new(Config {
-            win_length: 4096,
-            ..base
-        })
-        .is_err());
-        assert!(Mel::new(Config {
-            hop_length: 0,
-            ..base
-        })
-        .is_err());
+        assert!(
+            Mel::new(Config {
+                n_fft: 1000,
+                ..base
+            })
+            .is_err()
+        );
+        assert!(
+            Mel::new(Config {
+                win_length: 4096,
+                ..base
+            })
+            .is_err()
+        );
+        assert!(
+            Mel::new(Config {
+                hop_length: 0,
+                ..base
+            })
+            .is_err()
+        );
         // fmax past Nyquist means the config was written for another rate.
-        assert!(Mel::new(Config {
-            fmax: 12000.0,
-            ..base
-        })
-        .is_err());
+        assert!(
+            Mel::new(Config {
+                fmax: 12000.0,
+                ..base
+            })
+            .is_err()
+        );
         assert!(Mel::new(base).is_ok());
     }
 }

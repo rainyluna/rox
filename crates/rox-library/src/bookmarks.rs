@@ -11,7 +11,7 @@
 //! track (a cue track's own clock, not its image's), which is the unit
 //! the cue sheet and the player already speak.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// The table beside the tracks it points at. No foreign key: a deleted
 /// track keeps its marks dangling for the reattach, like listens.

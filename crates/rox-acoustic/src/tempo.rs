@@ -55,7 +55,7 @@
 
 use std::path::Path;
 
-use crate::{novelty_split, HOP, RATE};
+use crate::{HOP, RATE, novelty_split};
 
 /// How much audio one window reads. Thirty seconds is sixty beats at 120
 /// BPM, enough for a lag to repeat often enough to stand out of the noise;

@@ -13,10 +13,10 @@
 //! pixels stay a screenshot job.
 
 use gpui::{
-    point, px, App, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase,
+    App, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use rox_ipc::RpcError;
 
@@ -189,7 +189,7 @@ fn click(params: &Value, cx: &mut App) -> Result<Value, RpcError> {
         other => {
             return Err(RpcError::invalid_params(format!(
                 "unknown button {other:?}: left, right, or middle"
-            )))
+            )));
         }
     };
     let count = params

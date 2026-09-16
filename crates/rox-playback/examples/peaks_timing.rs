@@ -14,8 +14,8 @@ use std::time::Instant;
 /// Probe-only sweep: paths on stdin, one failure line per unprobeable file,
 /// then a total. Mirrors the hint construction in engine::Source::open.
 fn probe_scan() {
-    use symphonia::core::formats::probe::Hint;
     use symphonia::core::formats::FormatOptions;
+    use symphonia::core::formats::probe::Hint;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
 

@@ -14,12 +14,12 @@
 
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, svg, Context, Div};
+use gpui::{Context, Div, div, prelude::*, px, svg};
 
 use rox_viz::signal::{Route, SignalHub};
 
 use crate::panel::shader::{
-    seed_manual, slot_accessor, slot_label, target_slot, SlotTargets, SLOTS,
+    SLOTS, SlotTargets, seed_manual, slot_accessor, slot_label, target_slot,
 };
 use crate::panel::{self, ScrubState, ValueEdit};
 use rox_design::assets::icons;

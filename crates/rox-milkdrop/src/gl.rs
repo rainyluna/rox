@@ -13,7 +13,7 @@
 //! pointers resolved by name is the whole thing, and it makes the GL surface
 //! this crate depends on readable in one screen.
 
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 
 pub type GLenum = u32;
 pub type GLuint = u32;

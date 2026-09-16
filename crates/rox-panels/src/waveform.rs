@@ -23,13 +23,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, size, AnyElement, App, BorderStyle, Bounds, Context,
-    Div, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, Pixels, Rgba, SharedString,
-    Subscription, WeakEntity, Window,
+    AnyElement, App, BorderStyle, Bounds, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, MouseButton, Pixels, Rgba, SharedString, Subscription, WeakEntity, Window, canvas,
+    div, fill, point, prelude::*, px, size,
 };
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::Sizable as _;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::bookmarks::Bookmark;
 use rox_library::cue::TrackKey;
@@ -43,12 +43,12 @@ use crate::bookmark_ui;
 use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::panel::{
-    self, choices_shared, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState,
+    self, AppState, PanelChrome, PanelSettings, ScrubState, choices_shared, setting_row, toggle,
 };
 use crate::panel_settings;
 use crate::peaks;
 use crate::settings::ui as settings_ui;
-use crate::spectrum::{gradient_choices, ramp_color, Gradient};
+use crate::spectrum::{Gradient, gradient_choices, ramp_color};
 
 /// Resolution of the in-memory peaks. The paint resamples these down to
 /// however many bars fit the width.
@@ -374,7 +374,7 @@ impl WaveformPanel {
         marker: Option<f32>,
         ab: Option<(f32, Option<f32>)>,
         marks: Vec<bookmark_ui::Mark>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let scrub = self.scrub.clone();
         let player = self.state.player.clone();
         let from = self.from.clone();

@@ -11,8 +11,8 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, size, Bounds, ClickEvent, Context, Div,
-    MouseMoveEvent, Path, PathBuilder, Pixels, Point, Rgba, Stateful,
+    Bounds, ClickEvent, Context, Div, MouseMoveEvent, Path, PathBuilder, Pixels, Point, Rgba,
+    Stateful, canvas, div, fill, point, prelude::*, px, size,
 };
 
 use rox_design::palette;

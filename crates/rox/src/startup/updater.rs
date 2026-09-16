@@ -17,6 +17,17 @@
 //! and updates in place beside its data. Platforms the release workflow
 //! doesn't build for resolve no artifact and stay notify-only too.
 //!
+//! ## The AppImage
+//!
+//! An AppImage is one file that mounts itself to run, so `current_exe()`
+//! is a squashfs path under /tmp, read-only and gone on exit. The target
+//! is the .AppImage the launcher named in `$APPIMAGE`, never the mount,
+//! and the artifact is already the whole build with rox-mcp inside: it
+//! copies beside the file and takes the same rename-over the tarball's
+//! binary does, one file instead of two. The restart can't go through
+//! gpui's, which would re-run the mount of the build just replaced;
+//! [`relaunch`] waits for this pid and execs the .AppImage instead.
+//!
 //! ## Why a failed download can't hurt
 //!
 //! Everything up to the swap happens in the OS temp dir, and the swap only
@@ -38,6 +49,7 @@ use crate::startup::updates::{self, Release};
 
 /// This build's artifact suffix, matching release.yml's matrix. None on a
 /// platform the workflow doesn't build, which leaves the check notify-only.
+/// [`platform`] is the read: an AppImage run swaps in its own suffix.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PLATFORM: Option<&str> = Some("linux-x86_64.tar.gz");
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -50,6 +62,29 @@ const PLATFORM: Option<&str> = Some("windows-x86_64.zip");
     all(target_os = "windows", target_arch = "x86_64"),
 )))]
 const PLATFORM: Option<&str> = None;
+
+/// The artifact suffix this run installs: the AppImage when running out of
+/// one, the platform's archive otherwise.
+fn platform() -> Option<&'static str> {
+    platform_for(rox_core::install::appimage())
+}
+
+/// The suffix over the AppImage answer rather than the process, so the
+/// tests can hand one in. Only the Linux x86_64 build ships as an AppImage,
+/// so only there does the answer change anything.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn platform_for(appimage: Option<&Path>) -> Option<&'static str> {
+    if appimage.is_some() {
+        return Some("linux-x86_64.AppImage");
+    }
+
+    PLATFORM
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn platform_for(_appimage: Option<&Path>) -> Option<&'static str> {
+    PLATFORM
+}
 
 /// The checksum manifest the release workflow publishes beside the
 /// artifacts, one `sha256sum` line per file.
@@ -108,14 +143,59 @@ impl Progress {
 /// is about where the executable lives, which doesn't move mid-run.
 pub fn can_update() -> bool {
     static CAN: OnceLock<bool> = OnceLock::new();
-    *CAN.get_or_init(|| PLATFORM.is_some() && install_writable())
+    *CAN.get_or_init(|| platform().is_some() && install_writable())
+}
+
+/// Restart into the build now on disk. Everywhere but an AppImage that's
+/// gpui's own restart. Under an AppImage, gpui would wait for this pid and
+/// then run `current_exe()`, the mount of the build just replaced, and
+/// its script pastes the path into bash unquoted, which breaks on the
+/// first folder with a space in its name. So the wait-then-exec is spawned
+/// here with the .AppImage as an argument, and this process quits.
+pub fn relaunch(cx: &mut gpui::App) {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(appimage) = rox_core::install::appimage() {
+            match spawn_relauncher(std::process::id(), appimage) {
+                Ok(()) => cx.quit(),
+                Err(e) => log::error!("update: can't spawn the relauncher: {e}"),
+            }
+            return;
+        }
+    }
+
+    cx.restart();
+}
+
+/// The detached shell that outlives this process: poll until `pid` is
+/// gone, then exec `appimage`. Both arrive as positional arguments, so
+/// the path is never parsed by the shell.
+#[cfg(target_os = "linux")]
+fn spawn_relauncher(pid: u32, appimage: &Path) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg("while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$2\"")
+        .arg("sh")
+        .arg(pid.to_string())
+        .arg(appimage)
+        // Its own group and no inherited stdio, so it survives this
+        // process's exit and holds nothing of its terminal open.
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(drop)
 }
 
 /// Claim the one download slot and hand back the blocking job, or None
 /// when a download is already running or a build is already applied. The
 /// claim happens on the caller's thread so the UI sees Downloading the
 /// moment it asks, however long the executor takes to start the job.
-pub fn begin(release: &Release) -> Option<impl FnOnce() + Send + 'static> {
+pub fn begin(release: &Release) -> Option<impl FnOnce() + Send + 'static + use<>> {
     let progress = Arc::new(Progress::default());
     {
         let mut state = STATE.lock().unwrap();
@@ -185,7 +265,7 @@ fn download_and_apply(release: &Release, progress: &Progress) -> Result<String, 
 /// matches the release's manifest. The download half of the journey, with
 /// no writes anywhere near the install.
 fn fetch_verified(release: &Release, progress: &Progress) -> Result<PathBuf, String> {
-    let platform = PLATFORM.ok_or_else(|| rox_i18n::t_static("updater-no-release-build"))?;
+    let platform = platform().ok_or_else(|| rox_i18n::t_static("updater-no-release-build"))?;
     let name = format!("rox-v{}-{platform}", release.version);
     let asset = release
         .assets
@@ -279,12 +359,11 @@ fn download(
     if let Some(claimed) = response
         .header("Content-Length")
         .and_then(|v| v.parse::<u64>().ok())
+        && claimed != bytes
     {
-        if claimed != bytes {
-            return Err(
-                rox_i18n::t!("updater-size-mismatch", claimed = claimed, bytes = bytes).to_string(),
-            );
-        }
+        return Err(
+            rox_i18n::t!("updater-size-mismatch", claimed = claimed, bytes = bytes).to_string(),
+        );
     }
     let part = path.with_extension("part");
     let outcome = stream(response.into_reader(), &part, bytes, expected, progress);
@@ -353,6 +432,12 @@ fn hex(bytes: &[u8]) -> String {
 /// app bundle, since a build is the whole bundle, Info.plist's version and all.
 #[cfg(not(target_os = "macos"))]
 fn install_target() -> Result<PathBuf, String> {
+    // The .AppImage file, never its mount: the mount is read-only and a
+    // different path every run.
+    if let Some(appimage) = rox_core::install::appimage() {
+        return Ok(appimage.to_path_buf());
+    }
+
     std::env::current_exe().map_err(|e| format!("can't locate the running executable: {e}"))
 }
 
@@ -438,6 +523,16 @@ fn apply(archive: &Path) -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 fn apply(archive: &Path) -> Result<(), String> {
     let target = install_target()?;
+
+    // An AppImage is the whole install in one file, rox-mcp inside it, so
+    // the download is already the staged build.
+    #[cfg(target_os = "linux")]
+    {
+        if rox_core::install::appimage().is_some() {
+            return apply_appimage(archive, &target);
+        }
+    }
+
     let binary = format!("rox{}", std::env::consts::EXE_SUFFIX);
     let helper_target = target.with_file_name(helper_name());
     let staged = sibling(&target, "new");
@@ -453,6 +548,28 @@ fn apply(archive: &Path) -> Result<(), String> {
         swap(&helper_staged, &helper_target)?;
     }
     swap(&staged, &target)
+}
+
+/// The AppImage flavor: copy the downloaded file beside the installed one,
+/// make it executable, sync it, and rename over. No helper to stage; the
+/// proxy rides inside the file.
+#[cfg(target_os = "linux")]
+fn apply_appimage(archive: &Path, target: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let staged = sibling(target, "new");
+    remove_any(&staged);
+    std::fs::copy(archive, &staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("{}: {e}", staged.display()))?;
+
+    // Synced before the rename, so a power cut after the swap can't leave
+    // the name on a file whose bytes never reached the disk.
+    std::fs::File::open(&staged)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("{}: {e}", staged.display()))?;
+
+    swap(&staged, target)
 }
 
 /// The proxy's file name beside the executable, the same shape the MCP
@@ -689,6 +806,50 @@ mod tests {
         assert!(archive.exists());
         assert_eq!(progress.fraction(), 1.0);
         let _ = std::fs::remove_file(&archive);
+    }
+
+    /// An AppImage run resolves the AppImage artifact; anything else gets
+    /// the platform's archive, which on this build is the tarball.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn an_appimage_run_resolves_its_own_artifact() {
+        assert_eq!(
+            platform_for(Some(Path::new("/home/me/Apps/rox.AppImage"))),
+            Some("linux-x86_64.AppImage")
+        );
+        assert_eq!(platform_for(None), Some("linux-x86_64.tar.gz"));
+    }
+
+    /// The whole AppImage swap against a scratch folder: the target ends
+    /// up with the archive's bytes, executable, and no stage left over.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_appimage_swaps_in_as_one_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("rox-appimage-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("rox.AppImage");
+        let archive = dir
+            .join("download")
+            .join("rox-v9.9.9-linux-x86_64.AppImage");
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"old build").unwrap();
+        // The download lands without the executable bit; the swap adds it.
+        std::fs::write(&archive, b"new build").unwrap();
+        std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        apply_appimage(&archive, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new build");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "mode {mode:o}");
+        assert!(!sibling(&target, "new").exists(), "no stage left behind");
+        // The download itself is the caller's to remove, as with the tarball.
+        assert!(archive.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

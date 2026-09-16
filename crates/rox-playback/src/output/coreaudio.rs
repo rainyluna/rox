@@ -25,13 +25,13 @@
 use std::ffi::{c_char, c_long, c_void};
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use rtrb::{Consumer, Producer};
 
-use super::{fill, rings, Device, Mode, Negotiated, OpenOutput, OutputStream, Request};
+use super::{Device, Mode, Negotiated, OpenOutput, OutputStream, Request, fill, rings};
 use crate::shared::Shared;
 
 /// The rate to ask for when the caller doesn't name one, which is every

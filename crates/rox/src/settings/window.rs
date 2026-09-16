@@ -21,10 +21,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, size, svg, AnyElement, AnyWindowHandle, App, Axis, Bounds, ClipboardItem,
-    Context, Div, ElementId, Entity, EntityId, FocusHandle, Global, Hsla, MouseButton,
-    MouseDownEvent, PathPromptOptions, Pixels, ScrollHandle, SharedString, Stateful, Subscription,
-    WeakEntity, Window, WindowHandle,
+    AnyElement, AnyWindowHandle, App, Axis, Bounds, ClipboardItem, Context, Div, ElementId, Entity,
+    EntityId, FocusHandle, Global, Hsla, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle, div,
+    prelude::*, px, size, svg,
 };
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -45,26 +45,26 @@ use crate::tempo_job;
 use crate::workspace::{ApplyShaders, Workspace};
 use rox_core::settings::layouts::Preset;
 use rox_core::settings::{
-    self, data_dir, settings_path, AcousticSave, Frame, GainModeSetting, LayoutSize, LyricsSave,
-    NamedLayout, Providers, RatingStyle, ReplayGainSave, Settings, ShuffleMode, Theme,
-    WorkspaceMeta, BORDER_MAX, MARGIN_MAX, PADDING_MAX, ROUNDING_MAX,
+    self, AcousticSave, BORDER_MAX, Frame, GainModeSetting, LayoutSize, LyricsSave, MARGIN_MAX,
+    NamedLayout, PADDING_MAX, Providers, ROUNDING_MAX, RatingStyle, ReplayGainSave, Settings,
+    ShuffleMode, Theme, WorkspaceMeta, data_dir, settings_path,
 };
 use rox_design::assets::icons;
-use rox_design::palette::{self, Palette, Role, Side, Sides, ROLES};
+use rox_design::palette::{self, Palette, ROLES, Role, Side, Sides};
 use rox_design::tokens;
 use rox_dock::{DockAreaState, DockEvent, PanelView, StackPanel, TabPanel};
 use rox_library::store::{BpmCoverage, GainCoverage, Stats, Storage};
-use rox_net::lastfm::{has_builtin_keys, AuthPhase};
+use rox_net::lastfm::{AuthPhase, has_builtin_keys};
 use rox_net::providers;
 use rox_panel_api::panel::{self, AppState};
 use rox_panel_api::panel_settings::{ShaderNameField, ShaderSource};
 use rox_panel_api::query::search::{SearchBox, SearchEvent};
 use rox_panel_api::signal_ui::{self, routes::RouteEditState};
-use rox_panel_kit::ui::{
-    self as settings_ui, chord, dialog_button, grid_columns, icon_button, kbd, kbd_line, sidebar,
-    small_button, PageBody, Query, Rows, Section, Seg, SidesScrub, SECTION_GAP,
-};
 use rox_panel_kit::ScrubState;
+use rox_panel_kit::ui::{
+    self as settings_ui, PageBody, Query, Rows, SECTION_GAP, Section, Seg, SidesScrub, chord,
+    dialog_button, grid_columns, icon_button, kbd, kbd_line, sidebar, small_button,
+};
 use rox_playback::continuation;
 use rox_playback::engine;
 use rox_playback::output;
@@ -306,7 +306,7 @@ struct StorageInfo {
     /// The downloaded model weights (models/).
     weights: u64,
     /// The look the app is using plus everything set up around it: the
-    /// saved workspaces, the ejected shaders, the icon packs.
+    /// saved workspaces, the ejected shaders.
     app_data: u64,
     /// The log file and its rolled back file (logs/).
     logs: u64,
@@ -346,8 +346,7 @@ impl StorageInfo {
             weights: dir_size(&rox_acoustic::models::dir()),
             app_data: file_size(&settings::look_path())
                 + dir_size(&settings::workspaces_dir())
-                + dir_size(&settings::shaders_dir())
-                + dir_size(&crate::startup::icon_packs::packs_dir()),
+                + dir_size(&settings::shaders_dir()),
             // The log file follows an override, so the size comes off
             // whichever folder the Reveal button opens rather than the
             // default one beside it.
@@ -617,8 +616,6 @@ struct SettingsWindow {
     /// worth of layout dumps. Refreshed by the page's own writes,
     /// which are the only thing that moves it while the window is up.
     workspace_authors: BTreeMap<String, String>,
-    /// The Appearance page's new-icon-pack name field.
-    pack_name: Entity<InputState>,
     /// The mini-player roles the Workspace page assigns, by preset name, kept
     /// beside the settings file so the badges reflect edits without a
     /// reload; pushed back to the workspace so its button follows along.
@@ -753,18 +750,10 @@ struct SettingsWindow {
     /// downloads of different things for different jobs, and one Stop
     /// button that could cancel either would be a bug waiting to happen.
     dictionary_job: Option<Arc<rox_romanize::dictionary::Progress>>,
-    /// The stored language pick, copied from settings like the icon
-    /// pack below: None is System, and the row marks its segment without
-    /// re-reading the settings file per render.
+    /// The stored language pick, copied from settings: None is System, and
+    /// the row marks its segment without re-reading the settings file per
+    /// render.
     language: Option<String>,
-    /// The active icon pack, copied from settings so the Appearance page's
-    /// pack list marks the current one without re-reading the settings file
-    /// (which contains the dock dumps) on every render.
-    active_icon_pack: Option<String>,
-    /// The pack folders as last listed, so the Icons section doesn't walk
-    /// the directory on every Appearance render; create, switch, and
-    /// delete refresh it.
-    icon_packs: Vec<String>,
     /// The screen shader's file and all-windows option, copied from
     /// settings so the Shader page doesn't re-read the file per
     /// render. The enable switch isn't copied: the hotkey and menu row
@@ -1326,10 +1315,6 @@ impl SettingsWindow {
             }),
             workspace_card: None,
             workspace_authors: crate::workspaces::saved_authors(),
-            pack_name: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(rox_i18n::t!("settings-appearance-pack-name-placeholder"))
-            }),
             primary_layout: settings.look.bundle.primary_layout.clone(),
             mini_layout: settings.look.bundle.mini_layout.clone(),
             pending: None,
@@ -1373,8 +1358,6 @@ impl SettingsWindow {
             model_sizes: Self::measure_models(),
             dictionary_job,
             language: settings.language.clone(),
-            active_icon_pack: settings.icon_pack.clone(),
-            icon_packs: crate::startup::icon_packs::all(),
             post_shader_path: settings.post_shader.path.clone(),
             post_shader_name: settings.post_shader.name.clone(),
             post_shader_source: settings.post_shader.source.clone(),
@@ -1539,11 +1522,11 @@ impl SettingsWindow {
     /// every apply repaints all windows. This window's own edits move the
     /// counter too, and end up back on the values they just wrote.
     fn sync_post_shader(&mut self) {
-        let gen = crate::workspace::post_shader_gen();
-        if gen == self.post_shader_gen {
+        let generation = crate::workspace::post_shader_gen();
+        if generation == self.post_shader_gen {
             return;
         }
-        self.post_shader_gen = gen;
+        self.post_shader_gen = generation;
         let Some(config) = crate::workspace::post_shader_applied() else {
             return;
         };
@@ -1985,7 +1968,7 @@ impl SettingsWindow {
     /// file write needs to wait for the last tick.
     fn persist_appearance_soon(&mut self, cx: &mut Context<Self>) {
         self.persist_gen += 1;
-        let gen = self.persist_gen;
+        let generation = self.persist_gen;
         let (surface, backdrop, frame) = (self.surface_opacity, self.backdrop_strength, self.frame);
         let palette = self
             .persist_palette
@@ -1994,11 +1977,11 @@ impl SettingsWindow {
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
-            // A later tick bumped the gen past this capture, so only the last
-            // edit in a burst writes. The palette rereads at fire time so an
-            // immediate writer (reset, import) that runs inside the wait isn't
-            // undone; the capture only stands in when the window closed
-            // before the timer.
+            // A later tick bumped the generation past this capture, so only
+            // the last edit in a burst writes. The palette rereads at fire
+            // time so an immediate writer (reset, import) that runs inside
+            // the wait isn't undone; the capture only stands in when the
+            // window closed before the timer.
             let (latest, palette) = this
                 .update(cx, |this, _| {
                     (
@@ -2007,8 +1990,8 @@ impl SettingsWindow {
                             .then(|| (this.editor_mode, this.base.to_map())),
                     )
                 })
-                .unwrap_or((gen, palette));
-            if latest == gen {
+                .unwrap_or((generation, palette));
+            if latest == generation {
                 // The font size comes off the live static rather than a
                 // capture: the zoom shortcuts write it from outside this
                 // window, and one that runs inside the wait would otherwise
@@ -2355,7 +2338,6 @@ impl SettingsWindow {
                     )
                 },
             ))
-            .section(self.icons_section(q, cx))
             .section(Section::new(
                 q,
                 icons::EYE,
@@ -3073,15 +3055,15 @@ impl SettingsWindow {
         // cancel a pending palette write, and the two bursts overlap the
         // moment someone tunes a shader against a color.
         self.route_persist_gen += 1;
-        let gen = self.route_persist_gen;
+        let generation = self.route_persist_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
             let latest = this
                 .update(cx, |this, _| this.route_persist_gen)
-                .unwrap_or(gen);
-            if latest == gen {
+                .unwrap_or(generation);
+            if latest == generation {
                 Settings::update(move |s| s.post_shader.routes = routes);
             }
         })
@@ -3104,15 +3086,15 @@ impl SettingsWindow {
         let manual = self.post_shader_manual.clone();
         crate::workspace::set_post_shader_manual(manual.clone());
         self.manual_persist_gen += 1;
-        let gen = self.manual_persist_gen;
+        let generation = self.manual_persist_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
             let latest = this
                 .update(cx, |this, _| this.manual_persist_gen)
-                .unwrap_or(gen);
-            if latest == gen {
+                .unwrap_or(generation);
+            if latest == generation {
                 Settings::update(move |s| s.post_shader.manual = manual);
             }
         })
@@ -3657,15 +3639,15 @@ impl SettingsWindow {
         settings::note_backdrop_shader(Some(config.clone()));
         crate::workspace::refresh_backdrop(cx);
         self.backdrop_route_persist_gen += 1;
-        let gen = self.backdrop_route_persist_gen;
+        let generation = self.backdrop_route_persist_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
             let latest = this
                 .update(cx, |this, _| this.backdrop_route_persist_gen)
-                .unwrap_or(gen);
-            if latest == gen {
+                .unwrap_or(generation);
+            if latest == generation {
                 Settings::update(move |s| s.look.bundle.backdrop_shader = Some(config));
             }
         })
@@ -3680,15 +3662,15 @@ impl SettingsWindow {
         settings::note_backdrop_shader(Some(config.clone()));
         crate::workspace::refresh_backdrop(cx);
         self.backdrop_manual_persist_gen += 1;
-        let gen = self.backdrop_manual_persist_gen;
+        let generation = self.backdrop_manual_persist_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
             let latest = this
                 .update(cx, |this, _| this.backdrop_manual_persist_gen)
-                .unwrap_or(gen);
-            if latest == gen {
+                .unwrap_or(generation);
+            if latest == generation {
                 Settings::update(move |s| s.look.bundle.backdrop_shader = Some(config));
             }
         })
@@ -3864,176 +3846,6 @@ impl SettingsWindow {
                 )
             },
         )
-    }
-
-    /// The Icons section: the built-in set and every pack the user has as a
-    /// list, each a set to switch to; the current one gets an Active
-    /// badge. Creating a new pack, seeded with the built-in icons for an
-    /// author to edit, is in the header.
-    fn icons_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
-        let active = self.active_icon_pack.clone();
-        let packs = self.icon_packs.clone();
-
-        // New-pack-from-name is in the header, so a pack is one name away
-        // and arrives pre-filled with the current icons.
-        let controls = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(tokens::SPACE_XS)
-            .child(Input::new(&self.pack_name).small().w(px(150.)))
-            .child(small_button(
-                rox_i18n::t!("settings-appearance-new-pack"),
-                icons::FOLDER_PLUS,
-                false,
-                cx.listener(|this, _, window, cx| this.create_pack(window, cx)),
-            ));
-
-        Section::new(
-            q,
-            icons::IMAGE,
-            rox_i18n::t!("settings-appearance-section-icons"),
-            Some(controls.into_any_element()),
-            |rows| {
-                rows.custom(&["icon pack", "svg", "glyphs", "built-in"], || {
-                    let mut list = div().flex().flex_col().gap(tokens::SPACE_XS).child(
-                        div()
-                            .text_xs()
-                            .text_color(palette::text_muted())
-                            .child(rox_i18n::t!("settings-appearance-icons-intro")),
-                    );
-                    // The built-in set heads the list, its own row so switching back is
-                    // one click like any pack.
-                    list = list.child(self.icon_pack_row(None, active.is_none(), cx));
-                    list = list.child(
-                        div().flex().flex_col().children(
-                            packs
-                                .into_iter()
-                                .map(|name| {
-                                    let is_active = active.as_deref() == Some(name.as_str());
-                                    self.icon_pack_row(Some(name), is_active, cx)
-                                })
-                                .collect::<Vec<_>>(),
-                        ),
-                    );
-                    list.into_any_element()
-                })
-            },
-        )
-    }
-
-    /// One icons row: the built-in set (None) or a pack by name, an Active
-    /// badge on the current one and a Use button on the rest. A pack also
-    /// gets Open Folder, to edit its SVGs, and Delete.
-    fn icon_pack_row(
-        &self,
-        name: Option<String>,
-        active: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let label: SharedString = name
-            .clone()
-            .map(SharedString::from)
-            .unwrap_or_else(|| rox_i18n::t!("settings-common-built-in"));
-        div()
-            // Named after the pack, which names its buttons: every row
-            // here says Use and Open Folder. See
-            // `rox_panel_kit::ui::control_focus`.
-            .id(ElementId::Name(format!("icon-pack-row:{label}").into()))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(tokens::SPACE_SM)
-            .py(tokens::SPACE_XS)
-            .child(div().flex_1().min_w_0().truncate().child(label.clone()))
-            .map(|d| {
-                if active {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(palette::text_muted())
-                            .child(rox_i18n::t!("settings-common-active")),
-                    )
-                } else {
-                    d.child(small_button(
-                        rox_i18n::t!("settings-common-use"),
-                        icons::CHECK,
-                        false,
-                        {
-                            let name = name.clone();
-                            cx.listener(move |this, _, _, cx| this.set_icon_pack(name.clone(), cx))
-                        },
-                    ))
-                }
-            })
-            .when_some(name, |d, name| {
-                // Open Folder reveals the pack so its SVGs can be edited in
-                // place; delete drops the folder and everything in it.
-                d.child(small_button(
-                    rox_i18n::t!("settings-appearance-icons-open-folder"),
-                    icons::FOLDER,
-                    false,
-                    {
-                        let name = name.clone();
-                        cx.listener(move |this, _, _, cx| this.reveal_pack(&name, cx))
-                    },
-                ))
-                .child(icon_button(icons::TRASH, false, {
-                    cx.listener(move |this, _, _, cx| this.delete_pack(&name, cx))
-                }))
-            })
-            .into_any_element()
-    }
-
-    /// Switch the active icon pack, or the built-in set for None. Persists
-    /// the pick and points the resolver at it; icons already on screen keep
-    /// their tiles until the next launch, so the switch reads as pending.
-    fn set_icon_pack(&mut self, name: Option<String>, cx: &mut Context<Self>) {
-        crate::startup::icon_packs::activate(name.as_deref());
-        self.active_icon_pack = name.clone();
-        self.icon_packs = crate::startup::icon_packs::all();
-        let persist = name.clone();
-        Settings::update(move |s| s.icon_pack = persist);
-        // Repaint every window so any not-yet-cached icon picks up the pack.
-        for window in cx.windows() {
-            window.update(cx, |_, window, _| window.refresh()).ok();
-        }
-        cx.notify();
-    }
-
-    /// Create a new pack from the name field, seeded with the built-in
-    /// icons, and switch to it. Clears the field on success; an empty name
-    /// takes a default, and a collision gets a numbered suffix.
-    fn create_pack(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.pack_name.read(cx).value().trim().to_string();
-        match crate::startup::icon_packs::create(&name) {
-            Ok(created) => {
-                self.pack_name
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.set_icon_pack(Some(created), cx);
-            }
-            Err(e) => log::warn!("icon pack: creating {name:?}: {e}"),
-        }
-    }
-
-    /// Delete a pack. If it was the active one, fall back to the built-in
-    /// set so the resolver never points at a folder that's gone.
-    fn delete_pack(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.active_icon_pack.as_deref() == Some(name) {
-            self.set_icon_pack(None, cx);
-        }
-        crate::startup::icon_packs::delete(name);
-        self.icon_packs = crate::startup::icon_packs::all();
-        cx.notify();
-    }
-
-    /// Reveal a pack's folder in the OS file manager, so its SVGs can be
-    /// swapped out with a text or vector editor.
-    fn reveal_pack(&mut self, name: &str, cx: &mut Context<Self>) {
-        if let Some(dir) = crate::startup::icon_packs::resolve_dir(name) {
-            cx.reveal_path(&dir);
-        }
     }
 
     /// Everything that shapes the samples on their way to the device, in the
@@ -4379,21 +4191,23 @@ impl SettingsWindow {
     /// Copy the running pass into the section, the scan badge's cadence.
     /// Stops itself once the pass clears the global.
     fn poll_measuring(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(RG_POLL).await;
-            let live = this.update(cx, |this, cx| {
-                let was = this.rg_job.is_some();
-                this.rg_job = replaygain_job::progress(cx);
-                // The pass that just ended wrote what it measured per file;
-                // pick it up so the next estimate prices off it.
-                if was && this.rg_job.is_none() {
-                    this.rg_pace = Settings::load().session.replaygain_pace;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RG_POLL).await;
+                let live = this.update(cx, |this, cx| {
+                    let was = this.rg_job.is_some();
+                    this.rg_job = replaygain_job::progress(cx);
+                    // The pass that just ended wrote what it measured per file;
+                    // pick it up so the next estimate prices off it.
+                    if was && this.rg_job.is_none() {
+                        this.rg_pace = Settings::load().session.replaygain_pace;
+                    }
+                    cx.notify();
+                    this.rg_job.is_some()
+                });
+                if !matches!(live, Ok(true)) {
+                    break;
                 }
-                cx.notify();
-                this.rg_job.is_some()
-            });
-            if !matches!(live, Ok(true)) {
-                break;
             }
         })
         .detach();
@@ -5063,6 +4877,59 @@ impl SettingsWindow {
                     })
                 },
             ))
+            // Only ever on an AppImage: every other channel registers itself
+            // with the desktop, and a switch over an entry the package
+            // manager owns would be a lie.
+            .when(rox_core::install::appimage().is_some(), |page| {
+                page.section(Section::new(
+                    q,
+                    icons::APP_WINDOW,
+                    rox_i18n::t!("settings-application-section-desktop"),
+                    None,
+                    |rows| {
+                        rows.keyed(
+                            "settings-application-menu-entry",
+                            &[
+                                "appimage",
+                                "menu",
+                                "launcher",
+                                "desktop",
+                                "integration",
+                                "open with",
+                            ],
+                            panel::toggle(
+                                matches!(
+                                    crate::startup::desktop_integration::status(),
+                                    crate::startup::desktop_integration::Status::Integrated { .. }
+                                ),
+                                Self::set_menu_entry,
+                                cx,
+                            ),
+                        )
+                    },
+                ))
+            })
+    }
+
+    /// The AppImage's menu entry, written or removed on the spot; the row
+    /// reads the entry back on the next render. Turning it off counts as
+    /// declining, so the welcome window stops offering it.
+    fn set_menu_entry(&mut self, on: bool, cx: &mut Context<Self>) {
+        use crate::startup::desktop_integration;
+
+        let outcome = if on {
+            desktop_integration::install()
+        } else {
+            desktop_integration::remove()
+        };
+        if let Err(reason) = outcome {
+            log::warn!("desktop entry: {reason}");
+        }
+
+        if !on {
+            Settings::update(|s| s.session.appimage_menu_declined = true);
+        }
+        cx.notify();
     }
 
     /// The Playback page: how the queue arranges and extends itself, what a
@@ -5371,6 +5238,7 @@ impl SettingsWindow {
                 rox_i18n::t!("settings-integrations-section-conversion"),
                 None,
                 |rows| {
+                    let flatpak = rox_core::install::kind() == rox_core::install::Kind::Flatpak;
                     rows.keyed(
                         "settings-integrations-ffmpeg-binary",
                         &["ffmpeg", "convert", "encoder", "binary", "test"],
@@ -5418,16 +5286,50 @@ impl SettingsWindow {
                     .when(
                         !convert::available() && self.ffmpeg_test.is_none(),
                         |rows| {
+                            // Inside a Flatpak "install ffmpeg" is the wrong
+                            // advice: the host's binary can't run in the
+                            // sandbox. That note points at the data folder
+                            // instead, which convert::binary() checks.
+                            let note = if flatpak {
+                                rox_i18n::t!("settings-integrations-ffmpeg-missing-note-flatpak")
+                            } else {
+                                rox_i18n::t!("settings-integrations-ffmpeg-missing-note")
+                            };
                             rows.custom(&["ffmpeg", "convert", "missing"], || {
                                 panel::banner(
                                     panel::Tone::Warn,
                                     rox_i18n::t!("settings-integrations-ffmpeg-missing-title"),
-                                    vec![rox_i18n::t!("settings-integrations-ffmpeg-missing-note")],
+                                    vec![note],
                                 )
                                 .into_any_element()
                             })
                         },
                     )
+                    // The folder a static build goes into, opened from here
+                    // so nobody has to find ~/.var/app by hand. Only in a
+                    // Flatpak: everywhere else PATH is the answer, and the
+                    // folder is a detail. gpui's Linux reveal goes through
+                    // the OpenURI portal, so it works from inside the sandbox.
+                    .when(flatpak, |rows| {
+                        rows.custom(
+                            &["ffmpeg", "convert", "flatpak", "data", "folder", "reveal"],
+                            || {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .child(small_button(
+                                        rox_i18n::t!("settings-integrations-ffmpeg-reveal"),
+                                        icons::FOLDER,
+                                        false,
+                                        move |_, _, cx| {
+                                            cx.reveal_path(&settings::data_dir());
+                                        },
+                                    ))
+                                    .into_any_element()
+                            },
+                        )
+                    })
                 },
             ))
     }
@@ -6344,6 +6246,14 @@ impl SettingsWindow {
         }
         for (root, stats) in &self.root_stats {
             table = table.child(self.folder_row(root, *stats, scanning, cx));
+
+            // A folder the sandbox reaches through the document portal:
+            // every read goes through the portal and the watcher sees
+            // nothing. The callout under the row carries the override that
+            // grants the real folder. Only ever true inside a Flatpak.
+            if rox_core::install::is_portal_path(root) {
+                table = table.child(portal_banner(root));
+            }
         }
         // An add slot at the foot of the list, where the eye lands after
         // reading it. Same browse the header's Add Folder opens.
@@ -6430,8 +6340,17 @@ impl SettingsWindow {
                 }),
             ));
         // The lead-in describes the table, so both use the same terms
-        // and a search never turns up one without the other.
-        let folders = ["scan", "rescan", "music", "add", "remove"];
+        // and a search never turns up one without the other. The portal
+        // callouts live inside the table, so it answers to their terms too,
+        // but only while one is showing.
+        let mut folders = vec!["scan", "rescan", "music", "add", "remove"];
+        if self
+            .root_stats
+            .iter()
+            .any(|(root, _)| rox_core::install::is_portal_path(root))
+        {
+            folders.extend(["flatpak", "portal", "permission", "override", "folder"]);
+        }
         PageBody::new()
             .section(Section::new(
                 q,
@@ -7368,15 +7287,17 @@ impl SettingsWindow {
     /// loop rather than a branch in [`Self::poll_analyzing`], since the two
     /// downloads are independent and either can run without the other.
     fn poll_dictionary(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(RG_POLL).await;
-            let live = this.update(cx, |this, cx| {
-                this.dictionary_job = crate::romanize_job::dictionary::progress(cx);
-                cx.notify();
-                this.dictionary_job.is_some()
-            });
-            if !matches!(live, Ok(true)) {
-                break;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RG_POLL).await;
+                let live = this.update(cx, |this, cx| {
+                    this.dictionary_job = crate::romanize_job::dictionary::progress(cx);
+                    cx.notify();
+                    this.dictionary_job.is_some()
+                });
+                if !matches!(live, Ok(true)) {
+                    break;
+                }
             }
         })
         .detach();
@@ -8160,36 +8081,38 @@ impl SettingsWindow {
     /// download runs), and one loop means one place that decides when the
     /// section has stopped moving.
     fn poll_analyzing(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(RG_POLL).await;
-            let live = this.update(cx, |this, cx| {
-                let was_analyzing = this.acoustic_job.is_some();
-                this.acoustic_job = embeddings::progress(cx);
-                let was_downloading = this.model_job.is_some();
-                this.model_job = embeddings::models::progress(cx);
-                // Only the pass moves the count, so it's re-read on the tick
-                // the pass ends rather than on every tick: this loop also runs
-                // for the whole length of a model download, and the count is a
-                // walk of the tracks table on the UI thread.
-                if was_analyzing && this.acoustic_job.is_none() {
-                    this.acoustic_coverage = this
-                        .library
-                        .read(cx)
-                        .acoustic_coverage(this.acoustic_source.id());
-                    // The pass that just ended wrote what it measured per
-                    // track; pick it up so the next estimate prices off it.
-                    this.acoustic_pace = Settings::load().session.acoustic_pace.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RG_POLL).await;
+                let live = this.update(cx, |this, cx| {
+                    let was_analyzing = this.acoustic_job.is_some();
+                    this.acoustic_job = embeddings::progress(cx);
+                    let was_downloading = this.model_job.is_some();
+                    this.model_job = embeddings::models::progress(cx);
+                    // Only the pass moves the count, so it's re-read on the tick
+                    // the pass ends rather than on every tick: this loop also runs
+                    // for the whole length of a model download, and the count is a
+                    // walk of the tracks table on the UI thread.
+                    if was_analyzing && this.acoustic_job.is_none() {
+                        this.acoustic_coverage = this
+                            .library
+                            .read(cx)
+                            .acoustic_coverage(this.acoustic_source.id());
+                        // The pass that just ended wrote what it measured per
+                        // track; pick it up so the next estimate prices off it.
+                        this.acoustic_pace = Settings::load().session.acoustic_pace.clone();
+                    }
+                    // A finished download changed what's on disk, so the sizes
+                    // and the install marks have to be re-walked once.
+                    if was_downloading && this.model_job.is_none() {
+                        this.model_sizes = Self::measure_models();
+                    }
+                    cx.notify();
+                    this.acoustic_job.is_some() || this.model_job.is_some()
+                });
+                if !matches!(live, Ok(true)) {
+                    break;
                 }
-                // A finished download changed what's on disk, so the sizes
-                // and the install marks have to be re-walked once.
-                if was_downloading && this.model_job.is_none() {
-                    this.model_sizes = Self::measure_models();
-                }
-                cx.notify();
-                this.acoustic_job.is_some() || this.model_job.is_some()
-            });
-            if !matches!(live, Ok(true)) {
-                break;
             }
         })
         .detach();
@@ -8460,22 +8383,24 @@ impl SettingsWindow {
     /// twin. Stops itself once the pass clears the global, and re-reads the
     /// split on the way out so the line ends on the final count.
     fn poll_timing(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(RG_POLL).await;
-            let live = this.update(cx, |this, cx| {
-                let was = this.tempo_job.is_some();
-                this.tempo_job = tempo_job::progress(cx);
-                if was && this.tempo_job.is_none() {
-                    this.bpm_coverage = this.library.read(cx).bpm_breakdown();
-                    // The pass that just ended wrote what it measured per
-                    // track; pick it up so the next estimate prices off it.
-                    this.tempo_pace = Settings::load().session.tempo_pace;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RG_POLL).await;
+                let live = this.update(cx, |this, cx| {
+                    let was = this.tempo_job.is_some();
+                    this.tempo_job = tempo_job::progress(cx);
+                    if was && this.tempo_job.is_none() {
+                        this.bpm_coverage = this.library.read(cx).bpm_breakdown();
+                        // The pass that just ended wrote what it measured per
+                        // track; pick it up so the next estimate prices off it.
+                        this.tempo_pace = Settings::load().session.tempo_pace;
+                    }
+                    cx.notify();
+                    this.tempo_job.is_some()
+                });
+                if !matches!(live, Ok(true)) {
+                    break;
                 }
-                cx.notify();
-                this.tempo_job.is_some()
-            });
-            if !matches!(live, Ok(true)) {
-                break;
             }
         })
         .detach();
@@ -8760,24 +8685,245 @@ fn readout(value: String) -> Div {
     div().text_color(palette::text_muted()).child(value)
 }
 
-/// The MCP page's copy-ready client config: the rox-mcp binary beside this
-/// executable, in the mcpServers shape every stdio client reads. A portable
-/// run points the proxy at its own data folder, since the socket is keyed
-/// to it; the stock run needs no arguments at all.
+/// The Library page's callout under a folder the sandbox reaches through
+/// the document portal: what that costs, and the `flatpak override` that
+/// grants the real folder. The portal never tells a sandboxed app where the
+/// folder really lives (`Documents.info` is host-only), so the command
+/// carries a placeholder parent for the user to fill in and the hint says
+/// so, rather than the command pretending to be complete.
+fn portal_banner(root: &Path) -> Div {
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let command = format!(
+        "flatpak override --user --filesystem=\"/path/to/{name}\" {}",
+        rox_core::install::APP_ID_RDNS
+    );
+    let copy = command.clone();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(tokens::SPACE_XS)
+        .py(tokens::SPACE_XS)
+        .child(panel::banner_flow(
+            panel::Tone::Warn,
+            rox_i18n::t!("settings-library-portal-title"),
+            vec![
+                rox_i18n::t!("settings-library-portal-note"),
+                rox_i18n::t!("settings-library-portal-hint"),
+            ],
+        ))
+        // The command on its own line with the copy button beside it, the
+        // socket path's shape: overrides run long, and a line that
+        // truncates is a command that's wrong.
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(tokens::SPACE_SM)
+                .child(div().flex_1().min_w_0().child(readout(command)))
+                .child(small_button(
+                    rox_i18n::t!("settings-common-copy"),
+                    icons::COPY,
+                    false,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                    },
+                )),
+        )
+}
+
+/// The MCP page's copy-ready client config, in the mcpServers shape every
+/// stdio client reads. Which command it names depends on how rox was
+/// installed:
+///
+/// - Bare: the rox-mcp binary beside this executable.
+/// - Flatpak: `flatpak run --command=rox-mcp com.zealsprince.rox`. The
+///   binary lives in /app/bin, which the host can't reach, and the runtime
+///   dir the socket sits in is only shared among processes of that app id,
+///   so the proxy has to start inside the sandbox.
+/// - AppImage: the .AppImage itself with `--mcp`, which AppRun turns into
+///   rox-mcp. The mount the executable runs from gets a new random path
+///   every launch, so a path into it would be stale by the next start.
+///
+/// A portable run points the proxy at its own data folder, since the
+/// socket is keyed to it; the stock run needs no arguments at all. A
+/// Flatpak never runs portable (/app/bin fails the write probe), so its
+/// args stay fixed.
 fn mcp_config_snippet() -> String {
-    let binary = format!("rox-mcp{}", std::env::consts::EXE_SUFFIX);
-    let command = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(&binary)))
-        .map(|path| path.display().to_string())
-        .unwrap_or(binary);
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rox"));
+    let portable = settings::portable().then(settings::data_dir);
+    mcp_config_for(
+        rox_core::install::kind(),
+        &exe,
+        rox_core::install::appimage(),
+        portable.as_deref(),
+    )
+}
+
+/// The snippet over its inputs, so the three shapes can be tested without
+/// an environment to fake. `portable_data` is the data dir when this is a
+/// portable run.
+fn mcp_config_for(
+    kind: rox_core::install::Kind,
+    exe: &Path,
+    appimage: Option<&Path>,
+    portable_data: Option<&Path>,
+) -> String {
+    use rox_core::install::{APP_ID_RDNS, Kind};
+
+    let mut args: Vec<String> = Vec::new();
+    let command = match (kind, appimage) {
+        (Kind::Flatpak, _) => {
+            args.extend(["run".into(), "--command=rox-mcp".into(), APP_ID_RDNS.into()]);
+            "flatpak".to_string()
+        }
+
+        (Kind::AppImage, Some(image)) => {
+            args.push("--mcp".into());
+            image.display().to_string()
+        }
+
+        // Bare, or an AppImage that lost its own path: the binary beside
+        // this executable, the name alone if even that can't be read.
+        _ => {
+            let binary = format!("rox-mcp{}", std::env::consts::EXE_SUFFIX);
+            exe.parent()
+                .map(|dir| dir.join(&binary).display().to_string())
+                .unwrap_or(binary)
+        }
+    };
+
+    // The portable pair rides along on every channel that can run
+    // portable, after whatever the command needs first.
+    if kind != Kind::Flatpak
+        && let Some(data) = portable_data
+    {
+        args.extend(["--data-dir".into(), data.display().to_string()]);
+    }
+
     let mut server = serde_json::json!({ "command": command });
-    if settings::portable() {
-        server["args"] =
-            serde_json::json!(["--data-dir", settings::data_dir().display().to_string(),]);
+    if !args.is_empty() {
+        server["args"] = serde_json::json!(args);
     }
     let config = serde_json::json!({ "mcpServers": { "rox": server } });
     serde_json::to_string_pretty(&config).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::mcp_config_for;
+    use rox_core::install::Kind;
+    use std::path::Path;
+
+    fn parsed(snippet: &str) -> serde_json::Value {
+        serde_json::from_str(snippet).unwrap()
+    }
+
+    fn beside(dir: &str) -> String {
+        format!("{dir}/rox-mcp{}", std::env::consts::EXE_SUFFIX)
+    }
+
+    #[test]
+    fn bare_names_the_binary_beside_the_executable() {
+        let snippet = mcp_config_for(Kind::Bare, Path::new("/opt/rox/rox"), None, None);
+        assert_eq!(
+            parsed(&snippet),
+            serde_json::json!({ "mcpServers": { "rox": { "command": beside("/opt/rox") } } })
+        );
+    }
+
+    #[test]
+    fn bare_portable_adds_the_data_dir() {
+        let snippet = mcp_config_for(
+            Kind::Bare,
+            Path::new("/media/usb/rox/rox"),
+            None,
+            Some(Path::new("/media/usb/rox/rox-data")),
+        );
+        assert_eq!(
+            parsed(&snippet),
+            serde_json::json!({ "mcpServers": { "rox": {
+                "command": beside("/media/usb/rox"),
+                "args": ["--data-dir", "/media/usb/rox/rox-data"],
+            } } })
+        );
+    }
+
+    /// The Flatpak shape is fixed: a portable data dir can't happen there
+    /// and is ignored if handed in.
+    #[test]
+    fn flatpak_runs_the_proxy_inside_the_sandbox() {
+        let snippet = mcp_config_for(
+            Kind::Flatpak,
+            Path::new("/app/bin/rox"),
+            None,
+            Some(Path::new("/app/bin/rox-data")),
+        );
+        assert_eq!(
+            parsed(&snippet),
+            serde_json::json!({ "mcpServers": { "rox": {
+                "command": "flatpak",
+                "args": ["run", "--command=rox-mcp", "com.zealsprince.rox"],
+            } } })
+        );
+    }
+
+    #[test]
+    fn appimage_goes_through_apprun() {
+        let snippet = mcp_config_for(
+            Kind::AppImage,
+            Path::new("/tmp/.mount_rox1234/usr/bin/rox"),
+            Some(Path::new("/home/me/Apps/rox.AppImage")),
+            None,
+        );
+        assert_eq!(
+            parsed(&snippet),
+            serde_json::json!({ "mcpServers": { "rox": {
+                "command": "/home/me/Apps/rox.AppImage",
+                "args": ["--mcp"],
+            } } })
+        );
+    }
+
+    /// AppRun eats `--mcp` first, so the portable pair follows it.
+    #[test]
+    fn appimage_portable_keeps_mcp_first() {
+        let snippet = mcp_config_for(
+            Kind::AppImage,
+            Path::new("/tmp/.mount_rox1234/usr/bin/rox"),
+            Some(Path::new("/home/me/Apps/rox.AppImage")),
+            Some(Path::new("/home/me/Apps/rox-data")),
+        );
+        assert_eq!(
+            parsed(&snippet),
+            serde_json::json!({ "mcpServers": { "rox": {
+                "command": "/home/me/Apps/rox.AppImage",
+                "args": ["--mcp", "--data-dir", "/home/me/Apps/rox-data"],
+            } } })
+        );
+    }
+
+    /// An AppImage kind without its path is the bare shape, which at
+    /// least names something rather than an empty command.
+    #[test]
+    fn appimage_without_its_path_falls_back_to_bare() {
+        let snippet = mcp_config_for(
+            Kind::AppImage,
+            Path::new("/tmp/.mount_rox1234/usr/bin/rox"),
+            None,
+            None,
+        );
+        assert_eq!(
+            parsed(&snippet),
+            serde_json::json!({ "mcpServers": { "rox": {
+                "command": beside("/tmp/.mount_rox1234/usr/bin"),
+            } } })
+        );
+    }
 }
 
 /// The hover note behind the Experimental badge and its issue button. Same
@@ -9192,7 +9338,7 @@ impl Render for SettingsWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{Page, PAGES};
+    use super::{PAGES, Page};
     use rox_design::assets::icons;
 
     /// The key each page uses in the sidebar. Exhaustive: a new variant

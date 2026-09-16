@@ -633,9 +633,11 @@ mod tests {
     #[test]
     fn an_unknown_name_matches_nothing() {
         assert!(library().resolve("Aphex Twin", "Xtal").is_empty());
-        assert!(library()
-            .resolve("Boards of Canada", "Dayvan Cowboy")
-            .is_empty());
+        assert!(
+            library()
+                .resolve("Boards of Canada", "Dayvan Cowboy")
+                .is_empty()
+        );
     }
 
     #[test]
