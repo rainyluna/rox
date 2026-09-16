@@ -168,6 +168,10 @@ jobs:
             -e "s|/rox/archive/refs/tags/v[^/]*\.tar\.gz|/rox/archive/refs/tags/v$VERSION.tar.gz|" \
             -e "\|/rox/archive/refs/tags/|{n;s|sha256: .*|sha256: $TARBALL_SHA256|;}" \
             "scripts/flatpak/$MANIFEST" > "$flathub/$MANIFEST"
+          # The script fetches tags through the checkout, which git refuses
+          # to touch from the container's root user until the workspace is
+          # marked safe: the same mixed ownership the AUR job covers.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           scripts/metainfo-releases.sh crates/rox/assets/app/rox.metainfo.xml
           cp crates/rox/assets/app/rox.metainfo.xml "$flathub/rox.metainfo.xml"
 
