@@ -190,12 +190,15 @@ jobs:
       # passes: flatpak-builder rewrites the metainfo's screenshot urls to
       # dl.flathub.org and the action commits the downloaded media into the
       # repo's screenshots/x86_64 branch. The repo lint below fails on both
-      # counts without it.
+      # counts without it. Compose runs in flatpak-builder's cleanup stage,
+      # whose cache checksum covers the manifest but not command-line options,
+      # so a cache built without the mirror flag skips compose forever. The
+      # "mirror" segment in the key keeps such caches apart.
       - uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40
         with:
           manifest-path: ${{ runner.temp }}/flathub/com.zealsprince.rox.yml
           bundle: rox-v${{ inputs.version }}-flatpak-x86_64.flatpak
-          cache-key: flatpak-${{ steps.source.outputs.lock }}
+          cache-key: flatpak-mirror-${{ steps.source.outputs.lock }}
           mirror-screenshots-url: https://dl.flathub.org/media
           upload-artifact: false
 
