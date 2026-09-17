@@ -65,14 +65,17 @@ jobs:
       # A dispatch names a version, not a commit: the tag says which. The
       # peeled ref (^{}) is the commit behind an annotated tag; a lightweight
       # tag has no peeled line and is the commit itself. Either way it's the
-      # last line.
+      # last line. The url rather than "origin": in the container git won't
+      # read the checkout's config until the workspace is marked safe, and
+      # a remote lookup doesn't need the checkout at all.
       - name: Resolve the commit
         id: commit
         env:
           COMMIT: ${{ inputs.commit }}
         run: |
           if [ -z "$COMMIT" ]; then
-            COMMIT=$(git ls-remote --tags origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -n1 | cut -f1)
+            COMMIT=$(git ls-remote --tags https://github.com/zealsprince/rox.git \
+              "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -n1 | cut -f1)
           fi
           if [ -z "$COMMIT" ]; then
             echo "::error::no tag v$VERSION on origin and no commit given"
