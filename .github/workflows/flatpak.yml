@@ -186,12 +186,17 @@ jobs:
       # master as of 2025-04-24. The action leaves the OSTree repo in repo/
       # and the bundle in the workspace; the cache is flatpak-builder's state
       # dir, keyed on the tarball's lock so a release with the same crates
-      # reuses the compiled ones.
+      # reuses the compiled ones. The mirror url is what Flathub's own build
+      # passes: flatpak-builder rewrites the metainfo's screenshot urls to
+      # dl.flathub.org and the action commits the downloaded media into the
+      # repo's screenshots/x86_64 branch. The repo lint below fails on both
+      # counts without it.
       - uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40
         with:
           manifest-path: ${{ runner.temp }}/flathub/com.zealsprince.rox.yml
           bundle: rox-v${{ inputs.version }}-flatpak-x86_64.flatpak
           cache-key: flatpak-${{ steps.source.outputs.lock }}
+          mirror-screenshots-url: https://dl.flathub.org/media
           upload-artifact: false
 
       - name: Lint repo
