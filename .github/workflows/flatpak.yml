@@ -183,22 +183,27 @@ jobs:
           flatpak-builder-lint manifest "$RUNNER_TEMP/flathub/$MANIFEST"
           flatpak-builder-lint appstream "$RUNNER_TEMP/flathub/rox.metainfo.xml"
 
-      # master as of 2025-04-24. The action leaves the OSTree repo in repo/
-      # and the bundle in the workspace; the cache is flatpak-builder's state
-      # dir, keyed on the tarball's lock so a release with the same crates
-      # reuses the compiled ones. The mirror url is what Flathub's own build
-      # passes: flatpak-builder rewrites the metainfo's screenshot urls to
+      # v6.8, master as of 2026-08-25. The upstream flatpak/ action, not the
+      # flathub-infra fork: that fork closed in 2025-04 and never learned
+      # --compose-url-policy=full, which flatpak-builder 1.4.6 needs or the
+      # catalogue comes out with relative media paths the repo lint rejects.
+      # Upstream adds the flag itself whenever the mirror url is set. The
+      # action leaves the OSTree repo in repo/ and the bundle in the
+      # workspace; the cache is flatpak-builder's state dir, keyed on the
+      # tarball's lock so a release with the same crates reuses the compiled
+      # ones. The mirror url is what Flathub's own build passes:
+      # flatpak-builder rewrites the metainfo's screenshot urls to
       # dl.flathub.org and the action commits the downloaded media into the
-      # repo's screenshots/x86_64 branch. The repo lint below fails on both
-      # counts without it. Compose runs in flatpak-builder's cleanup stage,
-      # whose cache checksum covers the manifest but not command-line options,
-      # so a cache built without the mirror flag skips compose forever. The
-      # "mirror" segment in the key keeps such caches apart.
-      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40
+      # repo's screenshots/x86_64 branch. Compose runs in flatpak-builder's
+      # cleanup stage, whose cache checksum covers the manifest but not
+      # command-line options, so a cache built under other compose flags
+      # skips compose forever. The "full-urls" segment names the flags this
+      # cache was built with; change it when they change.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3
         with:
           manifest-path: ${{ runner.temp }}/flathub/com.zealsprince.rox.yml
           bundle: rox-v${{ inputs.version }}-flatpak-x86_64.flatpak
-          cache-key: flatpak-mirror-${{ steps.source.outputs.lock }}
+          cache-key: flatpak-full-urls-${{ steps.source.outputs.lock }}
           mirror-screenshots-url: https://dl.flathub.org/media
           upload-artifact: false
 
