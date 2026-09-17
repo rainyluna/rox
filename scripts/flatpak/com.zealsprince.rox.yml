@@ -12,10 +12,10 @@
 # Two files beside this one are generated, never committed (see .gitignore):
 # cargo-sources.json, the crate list flatpak-cargo-generator derives from
 # Cargo.lock, and rox.metainfo.xml, the tree's metainfo with its release
-# history filled in by scripts/metainfo-releases.sh. The workflow
-# (.github/workflows/flatpak.yml) produces both, then rewrites the release
-# tarball url and sha256 below for the version it's building. As committed
-# the tarball points at the newest published tag, so the file builds as is.
+# history filled in by scripts/metainfo-releases.sh. scripts/flatpak/prepare.sh
+# writes both for one version, plus a copy of this file with the rox source
+# below pinned to that version's tag and commit. As committed the source
+# points at the newest published tag, so the file builds as is.
 
 app-id: com.zealsprince.rox
 runtime: org.freedesktop.Platform
@@ -158,11 +158,14 @@ modules:
       # carries the marker where the release history goes.
       - install -Dm644 rox.metainfo.xml /app/share/metainfo/rox.metainfo.xml
     sources:
-      # The workflow rewrites these two lines for the version it builds and
-      # relies on the sha256 sitting directly under the url.
-      - type: archive
-        url: https://github.com/zealsprince/rox/archive/refs/tags/v1.27.0.tar.gz
-        sha256: 92bb101c2fb5ac490d14dc34d48b8dea50378928922eda18f42a1b5259d37c5b
+      # The release as its tag and the commit the tag points at; Flathub
+      # wants both. scripts/flatpak/prepare.sh rewrites the two lines for the
+      # version it prepares, and drops the tag from the copy it builds,
+      # since on a release run the tag comes after the bundle.
+      - type: git
+        url: https://github.com/zealsprince/rox.git
+        tag: v1.27.0
+        commit: 62bdd0ba6cabaea392a2fc58934deb0a8062608e
       # Every registry crate in Cargo.lock. gpui and gpui-component aren't in
       # it: the lock carries them as path deps with no source, which is why
       # the two tarballs below are fetched here.

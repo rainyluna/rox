@@ -178,10 +178,11 @@ jobs:
       # The metainfo in the tree carries a marker where its release history
       # goes; the script swaps in one entry per stable tag so the tarball,
       # the deb and the AppImage all ship the filled file. The checkout has
-      # no tags, so the script fetches them itself.
+      # no tags, so the script fetches them itself, and this version's tag
+      # doesn't exist until the release job cuts it, so it goes in by name.
       - name: Fill metainfo releases
         if: runner.os == 'Linux'
-        run: scripts/metainfo-releases.sh crates/rox/assets/app/rox.metainfo.xml
+        run: scripts/metainfo-releases.sh crates/rox/assets/app/rox.metainfo.xml "$VERSION"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -316,8 +317,31 @@ jobs:
             rox_*.deb
           if-no-files-found: error
 
+  # The Flatpak leg sits before the release, unlike the AUR and Flathub
+  # jobs below: a published release here is immutable, so the bundle has to
+  # be in the set the release is created from. It builds the same vetted
+  # commit the matrix does; the tag doesn't exist yet, so the manifest it
+  # builds pins the commit alone.
+  flatpak:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+      commit: ${{ github.event.workflow_run.head_sha || github.sha }}
+
   release:
-    needs: [check, build]
+    needs: [check, build, flatpak]
+    # always() so a Flatpak failure never holds the release: the other
+    # channels ship without the bundle, and once the leg is fixed a dispatch
+    # of flatpak.yml rebuilds it as a run artifact. The matrix stays
+    # required, and the version gate still applies.
+    if: >-
+      always() &&
+      needs.check.outputs.release == 'true' &&
+      needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -406,16 +430,14 @@ jobs:
       candidate: ${{ needs.check.outputs.prerelease == 'true' }}
     secrets: inherit
 
-  # Chained here for the reason the AUR job gives above. Candidates build,
-  # lint, and attach their bundle to the prerelease, so a manifest break
-  # surfaces on the candidate; only a stable run pushes to the Flathub repo,
-  # which tracks stable. contents: write, unlike the AUR job, because the
-  # bundle upload goes through github.token.
-  flatpak:
+  # Chained here for the reason the AUR job gives above. The bundle itself
+  # was built before the release by the flatpak job; this pushes the
+  # manifest to the Flathub repo, which tracks stable, so a candidate only
+  # prepares the tree.
+  flathub:
     needs: [check, release]
-    permissions:
-      contents: write
-    uses: ./.github/workflows/flatpak.yml
+    permissions: {}
+    uses: ./.github/workflows/flathub.yml
     with:
       version: ${{ needs.check.outputs.version }}
       candidate: ${{ needs.check.outputs.prerelease == 'true' }}

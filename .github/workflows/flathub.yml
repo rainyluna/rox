@@ -1,0 +1,123 @@
+# Pushes a release's manifest to flathub/com.zealsprince.rox so Flathub
+# rebuilds from it, once that repo exists. The tree it pushes is written by
+# scripts/flatpak/prepare.sh, the script the Flatpak build leg ran against
+# the same commit, so nothing is handed between the two jobs: the manifest
+# with the rox source pinned to the release tag and commit, flathub.json, the
+# generated crate list, and the release-filled metainfo.
+#
+# A release candidate never reaches Flathub, which tracks stable. Without
+# FLATHUB_TOKEN the run warns and keeps the tree as a run artifact instead,
+# which is the set of files the first submission to Flathub needs by hand.
+#
+# Runs as a job of the Release workflow after the release job (see the note
+# there on why a `release: published` trigger can't work). The manual
+# dispatch re-pushes a version when a run failed after the release itself
+# shipped, and always takes the push path: `candidate` is a workflow_call
+# input only.
+#
+# Needs one secret, FLATHUB_TOKEN: a token with write access to
+# flathub/com.zealsprince.rox, which exists once Flathub has accepted the app.
+name: Flathub
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version, without the leading v
+        required: true
+        type: string
+      candidate:
+        description: Prepare the tree without touching the Flathub repo
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      FLATHUB_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, without the leading v
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      MANIFEST: com.zealsprince.rox.yml
+    steps:
+      # `if:` can't read secrets on a step, so gate through a step output.
+      # One answer: the tree is prepared on every run, the question is
+      # whether it may reach Flathub.
+      - name: Decide whether this run pushes to Flathub
+        id: gate
+        env:
+          FLATHUB_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          if [ "$CANDIDATE" = "true" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          elif [ -n "$FLATHUB_TOKEN" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::FLATHUB_TOKEN not set, skipping the Flathub update"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+
+      # The release exists by now, so the tag says which commit. The peeled
+      # ref (^{}) is the commit behind an annotated tag; a lightweight tag
+      # has no peeled line and is the commit itself. Either way it's the
+      # last line. The generator's two dependencies go in a venv: the
+      # runner's system python refuses pip installs.
+      - name: Prepare the Flathub tree
+        run: |
+          commit=$(git ls-remote --tags origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -n1 | cut -f1)
+          if [ -z "$commit" ]; then
+            echo "::error::no tag v$VERSION on origin"
+            exit 1
+          fi
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet aiohttp tomlkit
+          PATH="$RUNNER_TEMP/venv/bin:$PATH" \
+            scripts/flatpak/prepare.sh "$VERSION" "$commit" "$RUNNER_TEMP/flathub"
+
+      - name: Keep the tree for a submission by hand
+        if: steps.gate.outputs.push != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: flathub-tree
+          path: |
+            ${{ runner.temp }}/flathub/com.zealsprince.rox.yml
+            ${{ runner.temp }}/flathub/flathub.json
+            ${{ runner.temp }}/flathub/cargo-sources.json
+            ${{ runner.temp }}/flathub/rox.metainfo.xml
+          if-no-files-found: error
+
+      # Flathub builds each app from its own repo, so the release lands there
+      # as one commit of the manifest and its side files. Explicit adds, and
+      # a no-op diff is skipped so dispatch re-runs stay idempotent.
+      - name: Push to Flathub
+        if: steps.gate.outputs.push == 'true'
+        env:
+          FLATHUB_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
+        run: |
+          git config --global user.name zealsprince
+          git config --global user.email andrew@zealsprince.com
+          git clone "https://x-access-token:$FLATHUB_TOKEN@github.com/flathub/com.zealsprince.rox" \
+            "$RUNNER_TEMP/flathub-repo"
+          cd "$RUNNER_TEMP/flathub"
+          cp "$MANIFEST" flathub.json cargo-sources.json rox.metainfo.xml "$RUNNER_TEMP/flathub-repo/"
+          cd "$RUNNER_TEMP/flathub-repo"
+          git add "$MANIFEST" flathub.json cargo-sources.json rox.metainfo.xml
+          if git diff --cached --quiet; then
+            echo "Flathub is already at v$VERSION"
+          else
+            git commit -m "Update to v$VERSION"
+            git push origin HEAD:master
+          fi

@@ -6,17 +6,21 @@
 # script splices the list over the marker in place.
 #
 # Run by the Linux package steps in .github/workflows/release.yml before
-# the tarball, deb, and AppImage are assembled, and by the Flatpak job
-# before the file is copied into the Flathub tree. Both run on a checkout
-# with no tags, so the tags are fetched here first.
+# the tarball, deb, and AppImage are assembled, and by
+# scripts/flatpak/prepare.sh for the Flathub tree. All of them run on a
+# checkout with no tags, so the tags are fetched here first. They also run
+# before the release job has tagged the version being packaged, which is
+# why it comes in as an argument: a stable version with no tag yet goes in
+# at the top, dated today. A candidate never gets an entry either way.
 #
 # Idempotent: a file whose marker is already gone is left alone and the
 # script exits 0, so running it twice on the same tree is safe.
 #
-# Usage: scripts/metainfo-releases.sh <path/to/rox.metainfo.xml>
+# Usage: scripts/metainfo-releases.sh <path/to/rox.metainfo.xml> [version]
 set -euo pipefail
 
-file=${1:?usage: $0 <metainfo.xml>}
+file=${1:?usage: $0 <metainfo.xml> [version]}
+version=${2:-}
 marker='<!-- rox:releases -->'
 
 if [ ! -f "$file" ]; then
@@ -39,6 +43,16 @@ releases=$(
         --format='%(refname:short) %(creatordate:short)' 'refs/tags/v[0-9]*' \
         | awk '$1 !~ /-/'
 )
+
+# The version being packaged, when its tag isn't there yet.
+case "$version" in
+    '' | *-*) ;;
+    *)
+        if ! git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null; then
+            releases=$(printf 'v%s %s\n%s' "$version" "$(date -u +%F)" "$releases")
+        fi
+        ;;
+esac
 
 # One element per tag, indented to sit where the marker sat. The indent is
 # read off the marker line itself so the output matches whatever the file
