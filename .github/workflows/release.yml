@@ -22,6 +22,11 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force release build even if tag exists'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -55,7 +60,9 @@ jobs:
             *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
             *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+          if [ "${{ inputs.force }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "release=true" >> "$GITHUB_OUTPUT"
@@ -324,7 +331,7 @@ jobs:
   # builds pins the commit alone.
   flatpak:
     needs: check
-    if: needs.check.outputs.release == 'true'
+    if: needs.check.outputs.release == 'true' && github.repository == 'zealsprince/rox'
     permissions:
       contents: read
     uses: ./.github/workflows/flatpak.yml
@@ -333,7 +340,7 @@ jobs:
       commit: ${{ github.event.workflow_run.head_sha || github.sha }}
 
   release:
-    needs: [check, build, flatpak]
+    needs: [check, build]
     # always() so a Flatpak failure never holds the release: the other
     # channels ship without the bundle, and once the leg is fixed a dispatch
     # of flatpak.yml rebuilds it as a run artifact. The matrix stays
@@ -387,7 +394,8 @@ jobs:
             --target "$TARGET_SHA" \
             --title "v$VERSION" \
             --generate-notes "${flags[@]}" \
-            artifacts/*
+            --clobber \
+            artifacts/* || gh release upload "v$VERSION" --clobber artifacts/*
 
       # rox.music bakes the version and asset URLs into its download page at
       # build time, so it only learns about a release when something tells it to
@@ -399,6 +407,7 @@ jobs:
       # failing a good release over. The site keeps serving the previous version
       # until its next build, and the step goes yellow to say so.
       - name: Rebuild rox.music
+        if: github.repository == 'zealsprince/rox'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.ROX_WEBSITE_TOKEN }}
@@ -418,6 +427,7 @@ jobs:
   # run at all.
   aur:
     needs: [check, release]
+    if: github.repository == 'zealsprince/rox'
     # Candidates never reach the AUR: rox-player is the stable package, and
     # a pkgver can't hold the hyphen anyway. They still run the job, which
     # test-builds the packaging against the tag it just cut, so a break in
@@ -436,6 +446,7 @@ jobs:
   # prepares the tree.
   flathub:
     needs: [check, release]
+    if: github.repository == 'zealsprince/rox'
     permissions: {}
     uses: ./.github/workflows/flathub.yml
     with:
