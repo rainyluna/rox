@@ -1991,18 +1991,15 @@ lastfm-import-added = { $count ->
    *[other] , { $count } adicionadas aos favoritos
 }
 lastfm-import-plays-read = { $count ->
-    [0] { $count } faixas com reproduções lidas
     [one] { $count } faixa com reproduções lida
    *[other] { $count } faixas com reproduções lidas
 }
 lastfm-import-plays-stopped = { $count ->
-    [0] Parou depois de { $count } faixas
     [one] Parou depois de { $count } faixa
    *[other] Parou depois de { $count } faixas
 }
 lastfm-import-plays-matched = , { $count } com correspondência
 lastfm-import-plays-updated = { $count ->
-    [0] , { $count } reproduções adicionadas
     [one] , { $count } reprodução adicionada
    *[other] , { $count } reproduções adicionadas
 }

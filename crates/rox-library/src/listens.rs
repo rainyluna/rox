@@ -180,16 +180,31 @@ pub fn append(conn: &Connection, listen: &Listen) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Maximum imported play count allowed per track to prevent runaway insert loops
+/// from corrupted or malicious API responses.
+pub const MAX_IMPORTED_PLAYS: u32 = 50_000;
+
+/// Default historical offset for tracks without existing local listens (90 days).
+/// Places synthetic history far enough in the past so it does not flood
+/// recently-played views or skew recency-tiering continuation (ADR 17).
+pub const UNPLAYED_ANCHOR_OFFSET_SECS: i64 = 90 * 86_400;
+
 /// Backfill play history for multiple tracks up to their target play counts.
 /// For each `(track_id, target_plays)`, if the track currently has fewer listens
 /// than `target_plays`, inserts the missing listens anchored before the earliest
-/// existing listen (or before `now` if never played).
+/// existing listen (or well in the past if never played).
+/// `on_progress` is called with `(processed_tracks, total_tracks)` and returns
+/// `false` if the operation was cancelled/stopped.
 /// Returns the number of listens inserted.
-pub fn backfill_plays_batch(
+pub fn backfill_plays_batch<F>(
     conn: &mut Connection,
     targets: &[(i64, u32)],
     now: i64,
-) -> rusqlite::Result<usize> {
+    mut on_progress: F,
+) -> rusqlite::Result<usize>
+where
+    F: FnMut(usize, usize) -> bool,
+{
     if targets.is_empty() {
         return Ok(0);
     }
@@ -207,10 +222,15 @@ pub fn backfill_plays_batch(
     )?;
 
     let mut total_added = 0usize;
-    for &(track_id, target_plays) in targets {
+    let total = targets.len();
+    for (idx, &(track_id, target_plays)) in targets.iter().enumerate() {
+        if !on_progress(idx, total) {
+            break;
+        }
         if target_plays == 0 {
             continue;
         }
+        let target_plays = target_plays.min(MAX_IMPORTED_PLAYS);
         let (current_count, min_played): (u32, Option<i64>) = count_stmt
             .query_row([track_id], |row| {
                 Ok((row.get::<_, i64>(0)? as u32, row.get::<_, Option<i64>>(1)?))
@@ -232,7 +252,7 @@ pub fn backfill_plays_batch(
             continue;
         };
 
-        let anchor = min_played.unwrap_or(now);
+        let anchor = min_played.unwrap_or_else(|| now.saturating_sub(UNPLAYED_ANCHOR_OFFSET_SECS));
         for i in 0..needed {
             let played_at = anchor.saturating_sub((i as i64 + 1) * 3600);
             insert_stmt.execute(rusqlite::params![
@@ -241,6 +261,7 @@ pub fn backfill_plays_batch(
         }
         total_added += needed;
     }
+    on_progress(total, total);
 
     drop(count_stmt);
     drop(track_stmt);
@@ -1306,7 +1327,9 @@ mod tests {
         let now = 1_700_000_000i64;
 
         // Backfill 1000 plays for track 1 and 42 plays for track 2.
-        let added = backfill_plays_batch(&mut conn, &[(track1, 1000), (track2, 42)], now).unwrap();
+        let added =
+            backfill_plays_batch(&mut conn, &[(track1, 1000), (track2, 42)], now, |_, _| true)
+                .unwrap();
         assert_eq!(added, 1042);
 
         let count_map = counts(&conn).unwrap();
@@ -1315,11 +1338,13 @@ mod tests {
 
         // Re-running with same targets does nothing (idempotent).
         let added_again =
-            backfill_plays_batch(&mut conn, &[(track1, 1000), (track2, 42)], now).unwrap();
+            backfill_plays_batch(&mut conn, &[(track1, 1000), (track2, 42)], now, |_, _| true)
+                .unwrap();
         assert_eq!(added_again, 0);
 
         // Updating with a higher count adds only the difference.
-        let added_diff = backfill_plays_batch(&mut conn, &[(track1, 1005)], now).unwrap();
+        let added_diff =
+            backfill_plays_batch(&mut conn, &[(track1, 1005)], now, |_, _| true).unwrap();
         assert_eq!(added_diff, 5);
         let count_map_after = counts(&conn).unwrap();
         assert_eq!(count_map_after.get(&track1).copied(), Some(1005));
@@ -1340,7 +1365,8 @@ mod tests {
         listen(&conn, "/m/1.mp3", 1_700_000_000);
 
         // Backfill up to 10 plays at anchor 1_700_050_000.
-        let added = backfill_plays_batch(&mut conn, &[(track_id, 10)], 1_700_050_000).unwrap();
+        let added =
+            backfill_plays_batch(&mut conn, &[(track_id, 10)], 1_700_050_000, |_, _| true).unwrap();
         assert_eq!(added, 9);
 
         // Play count is 10.
@@ -1350,5 +1376,98 @@ mod tests {
         // Last played is still the real listen timestamp 1_700_000_000.
         let lp_map = last_played(&conn).unwrap();
         assert_eq!(lp_map.get(&track_id).copied(), Some(1_700_000_000));
+    }
+
+    #[test]
+    fn backfill_plays_unplayed_tracks_anchored_in_past() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[track(
+                "/m/unplayed.mp3",
+                "Unplayed",
+                "Artist",
+                "Album",
+                "pop",
+            )],
+        )
+        .unwrap();
+        let track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE path = ?1",
+                ["/m/unplayed.mp3"],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let now = 1_700_000_000i64;
+        let added = backfill_plays_batch(&mut conn, &[(track_id, 5)], now, |_, _| true).unwrap();
+        assert_eq!(added, 5);
+
+        // Synthetic listens should be anchored 90 days before `now`, not within the last few hours.
+        let lp_map = last_played(&conn).unwrap();
+        let last = lp_map.get(&track_id).copied().unwrap();
+        assert!(last <= now - UNPLAYED_ANCHOR_OFFSET_SECS);
+    }
+
+    #[test]
+    fn backfill_plays_sanity_cap() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[track("/m/capped.mp3", "Capped", "Artist", "Album", "pop")],
+        )
+        .unwrap();
+        let track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE path = ?1",
+                ["/m/capped.mp3"],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let now = 1_700_000_000i64;
+        // Request 1_000_000 plays, should cap to MAX_IMPORTED_PLAYS (50_000).
+        let added =
+            backfill_plays_batch(&mut conn, &[(track_id, 1_000_000)], now, |_, _| true).unwrap();
+        assert_eq!(added, MAX_IMPORTED_PLAYS as usize);
+    }
+
+    #[test]
+    fn backfill_plays_cancellation() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[
+                track("/m/1.mp3", "One", "A", "Alb", "pop"),
+                track("/m/2.mp3", "Two", "A", "Alb", "pop"),
+            ],
+        )
+        .unwrap();
+        let track1: i64 = conn
+            .query_row("SELECT id FROM tracks WHERE path = ?1", ["/m/1.mp3"], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let track2: i64 = conn
+            .query_row("SELECT id FROM tracks WHERE path = ?1", ["/m/2.mp3"], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        let now = 1_700_000_000i64;
+        // Stop after first track (idx 1 returns false).
+        let added = backfill_plays_batch(&mut conn, &[(track1, 5), (track2, 5)], now, |idx, _| {
+            idx < 1
+        })
+        .unwrap();
+        assert_eq!(added, 5);
+
+        let count_map = counts(&conn).unwrap();
+        assert_eq!(count_map.get(&track1).copied(), Some(5));
+        assert_eq!(count_map.get(&track2).copied(), None);
     }
 }

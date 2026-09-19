@@ -1936,16 +1936,17 @@ impl Library {
     /// Reload all play counts from the database into the shared in-memory projection
     /// and notify observers. Used after an external play count import (e.g. Last.fm).
     pub fn reload_plays(&mut self, cx: &mut Context<Self>) {
-        if let (Some(projection), Some(conn)) = (&self.projection, &self.conn) {
-            if let Ok(counts) = rox_library::listens::counts(conn) {
-                for (id, &row) in &self.row_by_id {
-                    let count = counts.get(id).copied().unwrap_or(0);
-                    projection.plays[row as usize].store(count, Ordering::Relaxed);
-                }
-                cx.emit(LibraryEvent::Played);
-                cx.emit(LibraryEvent::Updated);
-            }
+        let (Some(projection), Some(conn)) = (&self.projection, &self.conn) else {
+            return;
+        };
+        let Ok(counts) = rox_library::listens::counts(conn) else {
+            return;
+        };
+        for (id, &row) in &self.row_by_id {
+            let count = counts.get(id).copied().unwrap_or(0);
+            projection.plays[row as usize].store(count, Ordering::Relaxed);
         }
+        cx.emit(LibraryEvent::Played);
     }
 
     /// The total play count for each of `ids`, off the in-memory projection,

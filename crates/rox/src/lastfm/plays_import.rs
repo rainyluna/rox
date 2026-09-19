@@ -252,21 +252,20 @@ fn run(
     progress.say(rox_i18n::t!("lastfm-import-matching"));
     let mut conn = store::open(db_path).map_err(|e| e.to_string())?;
     let index = Index::build(store::name_index(&conn).map_err(|e| e.to_string())?);
+    let current_counts = rox_library::listens::counts(&conn).unwrap_or_default();
     let mut targets: Vec<(i64, u32)> = Vec::new();
     let mut matched = 0usize;
     let mut unmatched = 0usize;
 
     for item in &tracks {
         let found = index.resolve(&item.artist, &item.title);
-        if found.is_empty() {
+        let Some(chosen_id) = pick_target_track(&found, &current_counts) else {
             unmatched += 1;
             log::debug!("lastfm: no match for {} - {}", item.artist, item.title);
             continue;
-        }
+        };
         matched += 1;
-        for id in found {
-            targets.push((id, item.playcount));
-        }
+        targets.push((chosen_id, item.playcount));
     }
     progress.unmatched.store(unmatched, Ordering::Relaxed);
 
@@ -274,7 +273,19 @@ fn run(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let updated = rox_library::listens::backfill_plays_batch(&mut conn, &targets, now)
+    progress.done.store(0, Ordering::Relaxed);
+    progress.total.store(targets.len(), Ordering::Relaxed);
+    let updated =
+        rox_library::listens::backfill_plays_batch(&mut conn, &targets, now, |done, total| {
+            if !progress.keep_going() {
+                return false;
+            }
+            if done % 50 == 0 || done == total {
+                progress.done.store(done, Ordering::Relaxed);
+                progress.total.store(total, Ordering::Relaxed);
+            }
+            true
+        })
         .map_err(|e| e.to_string())?;
 
     Ok(Summary {
@@ -284,6 +295,31 @@ fn run(
         unmatched,
         stopped: progress.stopping(),
     })
+}
+
+/// When multiple local tracks match the Last.fm title/artist (e.g. remastered
+/// duplicate, compilation album), select the track that already has local plays
+/// recorded, or fall back to the first row if none have plays or on ties.
+fn pick_target_track(
+    found: &[i64],
+    current_counts: &std::collections::HashMap<i64, u32>,
+) -> Option<i64> {
+    if found.is_empty() {
+        return None;
+    }
+    if found.len() == 1 {
+        return Some(found[0]);
+    }
+    let mut best_id = found[0];
+    let mut max_plays = current_counts.get(&best_id).copied().unwrap_or(0);
+    for &id in &found[1..] {
+        let plays = current_counts.get(&id).copied().unwrap_or(0);
+        if plays > max_plays {
+            best_id = id;
+            max_plays = plays;
+        }
+    }
+    Some(best_id)
 }
 
 fn fetch_page(key: &str, user: &str, page: usize) -> Result<(Vec<TopTrack>, Pages), String> {
@@ -440,5 +476,20 @@ mod tests {
         assert_eq!(tracks[0].title, "Alone");
         assert_eq!(tracks[0].playcount, 1000);
         assert_eq!(pages.total, 1);
+    }
+
+    #[test]
+    fn picks_track_with_existing_local_plays_over_duplicates() {
+        let mut counts = std::collections::HashMap::new();
+        counts.insert(2, 10);
+        // Track 2 has 10 plays, track 1 and 3 have 0. Track 2 should be selected.
+        assert_eq!(pick_target_track(&[1, 2, 3], &counts), Some(2));
+
+        // If tied or none have plays, picks the first track in the slice.
+        let empty = std::collections::HashMap::new();
+        assert_eq!(pick_target_track(&[1, 2, 3], &empty), Some(1));
+
+        // Empty list returns None.
+        assert_eq!(pick_target_track(&[], &counts), None);
     }
 }
