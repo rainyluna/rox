@@ -397,7 +397,6 @@ jobs:
             --target "$TARGET_SHA" \
             --title "v$VERSION" \
             --generate-notes "${flags[@]}" \
-            --clobber \
             artifacts/* || gh release upload "v$VERSION" --clobber artifacts/*
 
       # rox.music bakes the version and asset URLs into its download page at
