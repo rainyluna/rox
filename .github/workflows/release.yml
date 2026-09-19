@@ -125,6 +125,9 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Trust git directory
+        run: git config --global --add safe.directory '*'
+
       # gpui's build script compiles Metal shaders with `xcrun metal`. Xcode 26
       # ships that toolchain as a separate download, so fetch it if missing.
       - name: Ensure Metal toolchain
@@ -141,6 +144,7 @@ jobs:
           # left for the post step to save. Letting it run anyway writes a
           # useless entry under the key and every later run restores that.
           save-if: ${{ runner.os != 'macOS' }}
+          cache-on-failure: true
 
       # vendor/ is gitignored; [patch.crates-io] points at it, so rebuild it
       # from crates.io + patches/ before the build. The projectM source goes

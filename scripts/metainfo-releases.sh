@@ -33,7 +33,8 @@ if ! awk -v marker="$marker" 'index($0, marker) { found = 1 } END { exit !found 
     exit 0
 fi
 
-git fetch --tags --quiet origin
+git config --global --add safe.directory '*' 2>/dev/null || true
+git fetch --tags --quiet origin || true
 
 # Stable tags only. Candidates carry a hyphen (v1.25.0-rc.1) and never get
 # a release entry, the same filter release.yml uses to pick the previous
