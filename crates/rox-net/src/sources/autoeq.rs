@@ -237,10 +237,10 @@ pub fn parse_profile(name: &str, text: &str) -> Result<AutoEqProfile, String> {
             let data = line.split(':').nth(1).unwrap_or("");
             for pair in data.split(';') {
                 let parts: Vec<&str> = pair.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let (Ok(hz), Ok(db)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>()) {
-                        graphic_points.push((hz, db));
-                    }
+                if parts.len() >= 2
+                    && let (Ok(hz), Ok(db)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>())
+                {
+                    graphic_points.push((hz, db));
                 }
             }
             continue;
@@ -288,10 +288,10 @@ pub fn parse_profile(name: &str, text: &str) -> Result<AutoEqProfile, String> {
             .split(&[',', ' ', '\t'][..])
             .filter(|s| !s.is_empty())
             .collect();
-        if parts.len() >= 2 {
-            if let (Ok(hz), Ok(db)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>()) {
-                graphic_points.push((hz, db));
-            }
+        if parts.len() >= 2
+            && let (Ok(hz), Ok(db)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>())
+        {
+            graphic_points.push((hz, db));
         }
     }
 

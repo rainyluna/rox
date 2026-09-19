@@ -125,14 +125,12 @@ impl AutoEqWindow {
     fn init_index(&mut self, cx: &mut Context<Self>) {
         let cache_path = Self::cache_path();
 
-        if cache_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&cache_path) {
-                let parsed = autoeq::parse_index(&content);
-                if !parsed.is_empty() {
-                    self.entries = Arc::new(parsed);
-                    self.on_search_change(cx);
-                    return;
-                }
+        if let Ok(content) = std::fs::read_to_string(&cache_path) {
+            let parsed = autoeq::parse_index(&content);
+            if !parsed.is_empty() {
+                self.entries = Arc::new(parsed);
+                self.on_search_change(cx);
+                return;
             }
         }
 
