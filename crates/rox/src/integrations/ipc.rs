@@ -718,12 +718,18 @@ fn status(state: &AppState, cx: &App) -> Value {
     let player = state.player.read(cx);
     let now = player.now_playing();
     let track = now.as_ref().map(|now| {
-        let tags = state.library.read(cx).meta_for_key(&now.key);
+        // Through the player, so a relay of a station reports the song it
+        // just announced rather than the station row's own title.
+        let tags = player.live_over(state.library.read(cx).meta_for_key(&now.key));
         track_json(&now.key, tags.as_ref())
     });
     json!({
         "playing": player.is_playing(),
         "active": player.is_active(),
+        // Beside the other deck booleans: a stream has no end, so a caller
+        // reading `duration_secs` as null needs to know whether that's a
+        // length still resolving or a length that will never arrive.
+        "live": now.as_ref().is_some_and(|n| n.live),
         "position_secs": now.as_ref().map(|n| n.position_secs),
         "duration_secs": now.as_ref().and_then(|n| n.duration_secs),
         "volume": player.volume(),
@@ -747,13 +753,18 @@ fn ab_json(ab: AbState) -> Value {
 
 /// The playing track's full tags, or null while nothing plays.
 fn now_playing(state: &AppState, cx: &App) -> Value {
-    let Some(now) = state.player.read(cx).now_playing() else {
+    let player = state.player.read(cx);
+    let Some(now) = player.now_playing() else {
         return Value::Null;
     };
-    let tags = state.library.read(cx).meta_for_key(&now.key);
+    let tags = player.live_over(state.library.read(cx).meta_for_key(&now.key));
     let mut track = track_json(&now.key, tags.as_ref());
+    // The playback-scoped keys this method grafts onto the track object,
+    // which `track_json` itself never carries: those describe a row, and
+    // the queue listing shares them.
     track["position_secs"] = json!(now.position_secs);
     track["duration_secs"] = json!(now.duration_secs);
+    track["live"] = json!(now.live);
     track
 }
 

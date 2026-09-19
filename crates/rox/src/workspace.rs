@@ -84,6 +84,7 @@ use rox_panels::shader::ShaderPanel;
 use rox_panels::spacer::SpacerPanel;
 use rox_panels::spectrogram::SpectrogramPanel;
 use rox_panels::spectrum::SpectrumPanel;
+use rox_panels::stations::StationsPanel;
 use rox_panels::stats_widget::StatsWidgetPanel;
 use rox_panels::status::StatusPanel;
 use rox_panels::theme_toggle::ThemeTogglePanel;
@@ -91,7 +92,9 @@ use rox_panels::transport::{SeekStripPanel, TrackInfoPanel, TransportPanel, Volu
 use rox_panels::vu::VuPanel;
 use rox_panels::waveform::WaveformPanel;
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
+use rox_services::capture::Capture;
 use rox_services::catalog::Library;
+use rox_services::cues::Cues;
 use rox_services::discord_presence::DiscordPresence;
 use rox_services::history::{History, HistoryEvent};
 use rox_services::lastfm::Scrobbler;
@@ -99,6 +102,7 @@ use rox_services::librefm::LibreFm;
 use rox_services::listenbrainz::ListenBrainz;
 use rox_services::player::{AbState, Player};
 use rox_services::portraits::Portraits;
+use rox_services::radio::Radio;
 use rox_services::selection::{Selection, SelectionEvent};
 use rox_services::thumbs::Thumbs;
 use rox_viz::signal::{Route, SignalHub};
@@ -319,6 +323,28 @@ impl Global for PostShaderConfirmWindow {}
 /// reach it. Called by the dialog on open and release.
 pub(crate) fn note_confirm_window(handle: Option<AnyWindowHandle>, cx: &mut App) {
     cx.default_global::<PostShaderConfirmWindow>().0 = handle;
+}
+
+/// Where the capture service lives. Nothing reads it: no panel asks it
+/// anything and nothing draws it, it only has to be held somewhere for its
+/// player observer to keep firing. App-global rather than a field on
+/// [`AppState`] because the byte tee it feeds off is one process-wide
+/// switch in the transport, so a second copy would be two services
+/// buffering the same stream.
+struct CaptureService(#[allow(dead_code)] Entity<Capture>);
+
+impl Global for CaptureService {}
+
+/// Build the capture service over `player`, once per process. A second
+/// workspace window brings its own player, and the first one holds the
+/// tee, so this leaves the existing service alone.
+fn start_capture(player: &Entity<Player>, library: &Entity<Library>, cx: &mut App) {
+    if cx.has_global::<CaptureService>() {
+        return;
+    }
+
+    let capture = cx.new(|cx| Capture::new(player, library, cx));
+    cx.set_global(CaptureService(capture));
 }
 
 /// The message for a screen shader that arrived inside a look and hasn't
@@ -1203,6 +1229,9 @@ actions!(
         AddNamedBookmark,
         PrevBookmark,
         NextBookmark,
+        Cue,
+        CuePrev,
+        CueNext,
         PlayRandom,
         ToggleMute,
         ToggleShuffle,
@@ -1439,9 +1468,16 @@ pub fn init(cx: &mut App) {
         });
     });
     // One chord for the whole A-B cycle: mark, mark, clear. The player
-    // holds where the cycle is, so the chord doesn't need to know.
+    // holds where the cycle is, so the chord doesn't need to know. A
+    // station has no position to mark, so the cycle doesn't start there;
+    // AbClear stays open, since dropping a section is never the thing
+    // that needs a position.
     cx.on_action(|_: &AbRepeat, cx| {
         with_front_workspace(cx, |ws, _, cx| {
+            if !rox_panel_api::position_bound::allowed(&ws.state, cx) {
+                return;
+            }
+
             ws.state.player.update(cx, |player, cx| player.ab_mark(cx));
         });
     });
@@ -1449,11 +1485,19 @@ pub fn init(cx: &mut App) {
     // asks for a name first, with the position taken at the press.
     cx.on_action(|_: &AddBookmark, cx| {
         with_front_workspace(cx, |ws, _, cx| {
+            if !rox_panel_api::position_bound::allowed(&ws.state, cx) {
+                return;
+            }
+
             crate::bookmark_dialog::drop_here(ws.state.clone(), false, cx);
         });
     });
     cx.on_action(|_: &AddNamedBookmark, cx| {
         with_front_workspace(cx, |ws, _, cx| {
+            if !rox_panel_api::position_bound::allowed(&ws.state, cx) {
+                return;
+            }
+
             crate::bookmark_dialog::drop_here(ws.state.clone(), true, cx);
         });
     });
@@ -1466,6 +1510,34 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &NextBookmark, cx| {
         with_front_workspace(cx, |ws, _, cx| {
             rox_panel_api::bookmark_ui::step(&ws.state, true, cx);
+        });
+    });
+    // The same three commands over this listen's cues. A cue takes no
+    // name and no prompt, because the whole point of one is that dropping
+    // it costs a single press and forgetting about it costs nothing.
+    cx.on_action(|_: &Cue, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            if !rox_panel_api::position_bound::allowed(&ws.state, cx) {
+                return;
+            }
+            let Some(now) = ws.state.player.read(cx).now_playing() else {
+                return;
+            };
+
+            let position_ms = (now.position_secs.max(0.0) * 1000.0).round() as u32;
+            ws.state.cues.update(cx, |cues, cx| {
+                cues.add(&now.key, position_ms, cx);
+            });
+        });
+    });
+    cx.on_action(|_: &CuePrev, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            rox_panel_api::cue_ui::step(&ws.state, false, cx);
+        });
+    });
+    cx.on_action(|_: &CueNext, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            rox_panel_api::cue_ui::step(&ws.state, true, cx);
         });
     });
     // The plain draw, the transport panel's dice button without its per-panel
@@ -1847,6 +1919,8 @@ fn register_panels(state: &AppState, workspace: WeakEntity<Workspace>, cx: &mut 
     configured!("output", OutputPanel);
     configured_windowed!("history", HistoryPanel);
     configured!("bookmarks", BookmarksPanel);
+    // The stations panel builds its add-row inputs, so it takes a window.
+    configured_windowed!("stations", StationsPanel);
     configured_windowed!("queue", QueuePanel);
     configured!("queue widget", QueueWidgetPanel);
     configured!("custom controls", ControlsPanel);
@@ -3111,6 +3185,10 @@ pub struct Workspace {
     /// the title is the plain app name. Compared each player tick so the
     /// tag lookup and the platform title call only run on a track change.
     titled_track: Option<TrackKey>,
+    /// The station-title revision the window title was built at. A stream
+    /// changes song without the key moving, so the key compare alone would
+    /// leave the station's name in the title bar all evening.
+    titled_live_rev: Option<u64>,
     _layout_changed: Subscription,
     /// The player pump notifies every tick while a session runs; the
     /// title refresh hangs off it and bails on the path compare.
@@ -3288,22 +3366,40 @@ impl Workspace {
             crate::embeddings::follow(&library, cx);
             crate::replaygain_job::follow(&library, cx);
             crate::tempo_job::follow(&library, cx);
-            let scrobbler = cx.new(|cx| Scrobbler::new(&player, &library, cx));
+            // What a station is playing, built here rather than inside any
+            // one consumer: the scrobbler files listens off its turnovers
+            // and the backdrop looks up the song's cover off the same ones.
+            // It comes after the thumbnail service because it also writes
+            // into it: a station's logo is filed the first time it plays.
+            let thumbs = cx.new(|cx| Thumbs::new(&library, cx));
+            let radio = cx.new(|cx| Radio::new(&player, &library, &thumbs, cx));
+            // Saving songs off a station, if the setting says so. Hangs off
+            // the app rather than this window, because the tee it drains is
+            // one switch in the transport.
+            start_capture(&player, &library, cx);
+            let scrobbler = cx.new(|cx| Scrobbler::new(&player, &library, &radio, cx));
             let discord = cx.new(|cx| DiscordPresence::new(&player, &library, cx));
             let listenbrainz = cx.new(|cx| ListenBrainz::new(&scrobbler, cx));
             let librefm = cx.new(|cx| LibreFm::new(&scrobbler, cx));
             AppState {
-                thumbs: cx.new(|cx| Thumbs::new(&library, cx)),
+                now_art: cx.new(|cx| NowPlayingArt::new(player.clone(), &radio, &thumbs, cx)),
+                thumbs,
                 portraits: cx.new(|_| Portraits::default()),
                 history: cx.new(|cx| History::new(&scrobbler, cx)),
+                radio,
                 scrobbler,
                 listenbrainz,
                 librefm,
                 discord,
                 library,
-                now_art: cx.new(|cx| NowPlayingArt::new(player.clone(), cx)),
                 player,
                 selection: cx.new(|cx| Selection::new(cx)),
+                // This run's cue points. Built here with the rest so a
+                // reopen from the tray carries the marks over: the hold
+                // hands the whole state back, and a listener who marked a
+                // long mix before closing to the tray still has the marks
+                // when the window comes up again.
+                cues: cx.new(|_| Cues::default()),
                 query: cx.new(|_| SharedQuery::default()),
                 tab_hosts: cx.new(|_| TabHosts::default()),
                 signals: Arc::new(rox_viz::signal::SignalHub::new(
@@ -3342,21 +3438,26 @@ impl Workspace {
         // An adopted player is already where the user left it, often
         // playing; the launch restore would yank it back to the saved spot.
         if settings.restore_last_track && is_primary && !adopted {
-            // Prefer the whole queue: resolve each id back to a path, keeping
+            // Prefer the whole queue: resolve each id back to its key, keeping
             // the explicit flags parallel and realigning the cursor past any
             // entry whose file has left the library. An older file with only
             // last_track falls through to the single-track restore.
+            //
+            // Through `keys_for` rather than the paths alone, because the
+            // source is half of what a key is now: a station's path is a
+            // stream URL, and rebuilt as a local one it comes back as a file
+            // that was never there.
             let queue = settings.session.last_queue.as_ref().and_then(|q| {
                 let library = state.library.read(cx);
                 let mut keys = Vec::with_capacity(q.entries.len());
                 let mut explicit = Vec::with_capacity(q.entries.len());
                 let mut cursor = 0;
                 for (i, entry) in q.entries.iter().enumerate() {
-                    let path = library
-                        .paths_for(&[entry.id])
+                    let key = library
+                        .keys_for(&[entry.id])
                         .ok()
-                        .and_then(|mut paths| paths.pop());
-                    if let Some(path) = path {
+                        .and_then(|mut rows| rows.pop());
+                    if let Some(key) = key {
                         if i <= q.cursor {
                             cursor = keys.len();
                         }
@@ -3365,8 +3466,8 @@ impl Workspace {
                         // that would say which subsong it is may not be
                         // loaded this early in a launch.
                         keys.push(TrackKey {
-                            path,
                             sub: entry.sub,
+                            ..key
                         });
                         explicit.push(entry.explicit);
                     }
@@ -3378,16 +3479,20 @@ impl Workspace {
                     player.restore_queue(keys, explicit, cursor, position_secs, cx)
                 });
             } else if let Some(last) = settings.session.last_track {
-                let path = state
+                // The same source-aware lookup the queue above takes, for the
+                // same reason: this path is what an older settings file
+                // restores through, and a station saved in one is still a
+                // station.
+                let key = state
                     .library
                     .read(cx)
-                    .paths_for(&[last.id])
+                    .keys_for(&[last.id])
                     .ok()
-                    .and_then(|mut paths| paths.pop());
-                if let Some(path) = path {
+                    .and_then(|mut rows| rows.pop());
+                if let Some(key) = key {
                     let key = TrackKey {
-                        path,
                         sub: last.sub,
+                        ..key
                     };
                     state
                         .player
@@ -3648,6 +3753,7 @@ impl Workspace {
             queue_modal: None,
             backdrop: WindowBackdrop::default(),
             titled_track: None,
+            titled_live_rev: None,
             _layout_changed,
             _player_changed,
             _library_changed,
@@ -4823,32 +4929,71 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The window title for a playing track, split out of the refresh so the
+    /// string can be checked without a window behind it.
+    ///
+    /// A file reads "artist - title": the artist leads because it's the part a
+    /// listener scans a taskbar for. A station inverts it to "song - station",
+    /// because the row that plays for hours is the station and the part that
+    /// moves is the song, so the moving part goes where the eye already is.
+    /// Nothing is invented: a station that hasn't announced a song yet is just
+    /// its own name, and an untagged file falls back to its file name the same
+    /// way the track info readout does.
+    fn window_title(
+        key: &TrackKey,
+        live: bool,
+        meta: Option<&rox_library::store::TrackMeta>,
+    ) -> String {
+        let name = meta
+            .map(|m| m.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| {
+                key.path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| key.path.display().to_string())
+            });
+
+        // The overlay writes the station's own name into the album, which is
+        // the closest thing a stream has to one.
+        let second = match live {
+            true => meta.map(|m| m.album.clone()),
+            false => meta.map(|m| m.artist.clone()),
+        }
+        .filter(|s| !s.is_empty());
+
+        match second {
+            Some(station) if live => format!("{name} - {station} - rox"),
+            Some(artist) => format!("{artist} - {name} - rox"),
+            None => format!("{name} - rox"),
+        }
+    }
+
     /// Keep the window title on the playing track: "artist - title - rox"
     /// while something plays, the plain app name otherwise. Untagged files
-    /// fall back to their file name, same as the track info readout.
+    /// fall back to their file name, same as the track info readout. A
+    /// station reads "song - station - rox", the song first because the
+    /// station is the part that stays put while the title bar changes.
     fn refresh_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let key = self.state.player.read(cx).now_playing().map(|now| now.key);
-        if key == self.titled_track {
+        let player = self.state.player.read(cx);
+        let now = player.now_playing();
+        let key = now.as_ref().map(|now| now.key.clone());
+        let live_rev = player.title_rev();
+        if key == self.titled_track && live_rev == self.titled_live_rev {
             return;
         }
-        let title = match &key {
-            Some(key) => {
-                let meta = self.state.library.read(cx).meta_for_key(key);
-                let track = meta.as_ref().map(|m| m.title.clone()).unwrap_or_else(|| {
-                    key.path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| key.path.display().to_string())
-                });
-                match meta.map(|m| m.artist).filter(|a| !a.is_empty()) {
-                    Some(artist) => format!("{artist} - {track} - rox"),
-                    None => format!("{track} - rox"),
-                }
+
+        let title = match &now {
+            Some(now) => {
+                let meta = player.now_meta(self.state.library.read(cx));
+                Self::window_title(&now.key, now.live, meta.as_ref())
             }
             None => "rox".into(),
         };
+
         rox_panel_api::windows::set_window_title(window, &title);
         self.titled_track = key;
+        self.titled_live_rev = live_rev;
     }
 
     /// Route OS-handed files into the shared player. The launch path
@@ -6395,6 +6540,80 @@ impl Render for Workspace {
 mod tests {
     use super::denoise_f32;
     use serde_json::json;
+
+    use rox_library::cue::TrackKey;
+    use rox_library::store::TrackMeta;
+    use std::path::PathBuf;
+
+    /// A row with just the three tags the title reads; the rest is what an
+    /// untagged file resolves to anyway.
+    fn tags(title: &str, artist: &str, album: &str) -> TrackMeta {
+        TrackMeta {
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            track_no: 0,
+            album_artist: String::new(),
+            year: 0,
+            genre: String::new(),
+            duration_ms: 0,
+            codec: String::new(),
+            bitrate_kbps: 0,
+            sample_rate_hz: 0,
+            bit_depth: 0,
+            rating: 0,
+        }
+    }
+
+    /// The title bar: artist first for a file, song first for a station,
+    /// and the file name when there is nothing tagged to say.
+    #[test]
+    fn window_titles_put_the_moving_part_first() {
+        let file = TrackKey::from(PathBuf::from("/m/So What.flac"));
+        assert_eq!(
+            super::Workspace::window_title(
+                &file,
+                false,
+                Some(&tags("So What", "Miles Davis", "Kind of Blue"))
+            ),
+            "Miles Davis - So What - rox"
+        );
+
+        // No artist to lead with, so the title stands alone.
+        assert_eq!(
+            super::Workspace::window_title(&file, false, Some(&tags("So What", "", ""))),
+            "So What - rox"
+        );
+
+        // Nothing tagged at all: the file names itself.
+        assert_eq!(
+            super::Workspace::window_title(&file, false, None),
+            "So What - rox"
+        );
+
+        // A station, the overlay already applied: the song leads and the
+        // station holds the second slot the artist has on a file.
+        let station = TrackKey {
+            source: rox_library::cue::source_id("radio"),
+            path: PathBuf::from("https://stream.example/live"),
+            sub: 0,
+        };
+        assert_eq!(
+            super::Workspace::window_title(
+                &station,
+                true,
+                Some(&tags("So What", "Miles Davis", "Jazz FM"))
+            ),
+            "So What - Jazz FM - rox"
+        );
+
+        // Nothing announced yet, so the row's own title (the station name)
+        // is the whole of it. Nothing is invented to fill the second slot.
+        assert_eq!(
+            super::Workspace::window_title(&station, true, Some(&tags("Jazz FM", "", ""))),
+            "Jazz FM - rox"
+        );
+    }
 
     /// Every id [`super::keymap_command`] hands back has to be one the
     /// keymap registry actually knows, or the row silently loses its

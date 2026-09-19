@@ -6,7 +6,10 @@
 //! module holds what they share.
 
 mod playback;
-mod seek;
+// The seek strip owns the live-stream mark's look, which the waveform
+// panel's own corner mark matches, so this one module is visible crate
+// wide rather than only through its panel type.
+pub(crate) mod seek;
 mod track_info;
 mod volume;
 

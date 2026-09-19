@@ -25,6 +25,7 @@ use gpui::{
 };
 use gpui_component::Root;
 use gpui_component::scroll::Scrollbar;
+use gpui_component::tooltip::Tooltip;
 
 use rox_core::QUEUE_CAP;
 use rox_core::fmt::{fmt_ago, fmt_date};
@@ -39,7 +40,7 @@ use rox_panel_api::charts;
 use rox_panel_api::panel::{self, AppState};
 use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 use rox_services::backdrop::WindowBackdrop;
-use rox_services::catalog::LibraryEvent;
+use rox_services::catalog::{LibraryEvent, LocalCopy};
 use rox_services::history::HistoryEvent;
 use rox_services::thumbs::Thumb;
 
@@ -267,6 +268,12 @@ struct StatsData {
     albums: Vec<NamePlays>,
     genres: Vec<NamePlays>,
     recents: Vec<TrackPlays>,
+    /// The library's own file of each live recent's song, by index into
+    /// `recents`; None for a listen off a file and for a song the library
+    /// has no copy of. A radio listen's row is the station and what it
+    /// names is the song, the history panel's rule, so this is where the
+    /// row's cover comes from and what its play button queues.
+    recent_files: Vec<Option<LocalCopy>>,
 }
 
 struct StatsWindow {
@@ -377,6 +384,19 @@ impl StatsWindow {
             // The last bar ends at the edge rather than starting on it.
             StatsRange::Span { since, until } => (since, ((until - since) / 24).max(60), until - 1),
         };
+        let recents = library.recent_listens(since, until, RECENT_ROWS);
+        // What the live rows named, looked up against the library in one
+        // pass, the history panel's move. A listen off a file asks
+        // nothing: its own path is already the file.
+        let names: Vec<(&str, &str)> = recents
+            .iter()
+            .map(|row| match row.live {
+                true => (row.artist.as_str(), row.title.as_str()),
+                false => ("", ""),
+            })
+            .collect();
+        let recent_files = library.local_copies(&names);
+
         self.data = StatsData {
             week: library.listens_since(now - 7 * DAY),
             month: library.listens_since(now - 30 * DAY),
@@ -389,7 +409,8 @@ impl StatsWindow {
             artists: library.listen_rollup(Rollup::Artist, since, until, TOP_NAMES),
             albums: library.listen_rollup(Rollup::Album, since, until, TOP_NAMES),
             genres: library.listen_rollup(Rollup::Genre, since, until, TOP_GENRES),
-            recents: library.recent_listens(since, until, RECENT_ROWS),
+            recents,
+            recent_files,
             tracks: library.projection().map_or(0, |p| p.live_len()),
             heap_bytes: library.projection().map_or(0, |p| p.heap_bytes()),
         };
@@ -490,6 +511,28 @@ impl StatsWindow {
         let Some(rows) = self.data.recents.get(ix..) else {
             return;
         };
+        // A radio listen's row is the station, and what it names is the
+        // song. Queueing the station would put whatever is on air now
+        // under a click on a song from last Tuesday, so the library's own
+        // copy wins where it has one, the history panel's rule.
+        let local = self
+            .data
+            .recent_files
+            .get(ix)
+            .and_then(|local| local.as_ref());
+        if let Some(local) = local {
+            let Ok(keys) = self.state.library.read(cx).keys_for(&[local.track_id]) else {
+                return;
+            };
+            if keys.is_empty() {
+                return;
+            }
+            self.state
+                .player
+                .update(cx, |player, cx| player.play(keys, cx));
+            return;
+        }
+
         let ids: Vec<i64> = rows
             .iter()
             .take(QUEUE_CAP)
@@ -853,7 +896,9 @@ impl StatsWindow {
     }
 
     /// The newest listens in range: the cover, the title over artist and
-    /// album, how long ago on the right.
+    /// album, how long ago on the right. A listen off the air is marked as
+    /// one and draws the cover of the file its song is in, the history
+    /// panel's row in a smaller frame.
     fn recents_section(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -870,9 +915,25 @@ impl StatsWindow {
                 (true, false) => row.album.clone(),
                 (true, true) => String::new(),
             };
-            let art = self.cover(&row.path, cx);
+            // A live row's picture ranks the way the transport's does: the
+            // song's own cover first, which for a capture off the air is
+            // the picture saved beside it, and the station's behind it.
+            // The row's own path is what the favicon is keyed on.
+            let local = self.data.recent_files.get(ix).and_then(|l| l.as_ref());
+            let art = local
+                .and_then(|local| self.cover(&local.path.to_string_lossy(), cx))
+                .or_else(|| self.cover(&row.path, cx));
+            // What a click on this row plays, which the row itself can't
+            // say: the file of the song, or the station it came off.
+            let plays = match local.is_some() {
+                true => rox_i18n::t_static("history-live-plays-file"),
+                false => rox_i18n::t_static("history-live-plays-station"),
+            };
             body = body.child(
                 div()
+                    // Identified so the live rows can carry a tooltip; the
+                    // play button inside keys on its own name.
+                    .id(("recent-row", ix))
                     .group(ROW_GROUP)
                     .flex()
                     .flex_row()
@@ -881,6 +942,9 @@ impl StatsWindow {
                     .p(tokens::SPACE_XS)
                     .rounded(tokens::RADIUS)
                     .hover(|d| d.bg(palette::alpha(palette::bg_control(), 0x80)))
+                    .when(row.live, |d| {
+                        d.tooltip(move |window, cx| Tooltip::new(plays).build(window, cx))
+                    })
                     .child(art_frame(art, ArtShape::Square, &row.title, px(ROW_ART)))
                     .child(
                         div()
@@ -891,8 +955,30 @@ impl StatsWindow {
                             .overflow_hidden()
                             .child(
                                 div()
-                                    .truncate()
-                                    .child(SharedString::from(row.title.clone())),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(tokens::SPACE_XS)
+                                    .overflow_hidden()
+                                    // The mark that says this listen came
+                                    // off the air, the history panel's.
+                                    // Without it the row is
+                                    // indistinguishable from the file of
+                                    // the same song.
+                                    .when(row.live, |d| {
+                                        d.child(
+                                            svg()
+                                                .path(icons::RADIO)
+                                                .size(px(12.))
+                                                .flex_none()
+                                                .text_color(palette::text_muted()),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .child(SharedString::from(row.title.clone())),
+                                    ),
                             )
                             .when(!sub.is_empty(), |d| {
                                 d.child(

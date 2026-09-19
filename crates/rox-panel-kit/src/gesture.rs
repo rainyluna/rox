@@ -38,6 +38,15 @@ impl ScrubState {
         *self.bounds.lock().unwrap() = Some(bounds);
     }
 
+    /// The strip's painted width, None before its first layout. What a
+    /// strip that cuts its data to the bars it draws reads to know how
+    /// many that is.
+    pub fn width(&self) -> Option<f32> {
+        let bounds = (*self.bounds.lock().unwrap())?;
+
+        Some(f32::from(bounds.size.width)).filter(|w| *w > 0.0)
+    }
+
     /// A drag started (mouse down on the strip).
     pub fn begin(&self) {
         self.dragging.store(true, Ordering::Relaxed);

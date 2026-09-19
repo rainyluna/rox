@@ -271,7 +271,7 @@ fn query_key(query: &TrackQuery) -> String {
 /// What a lookup matches on: the track's tags, or a hand-edited query
 /// standing in for them. The duration narrows the confidence score when
 /// known; None still queries.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TrackQuery {
     pub artist: String,
     pub title: String,

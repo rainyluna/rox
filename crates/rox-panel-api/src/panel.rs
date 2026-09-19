@@ -31,6 +31,7 @@ use rox_design::palette::PanelTheme;
 use rox_design::{palette, tokens};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::Library;
+use rox_services::cues::Cues;
 use rox_services::discord_presence::DiscordPresence;
 use rox_services::history::History;
 use rox_services::lastfm::Scrobbler;
@@ -38,6 +39,7 @@ use rox_services::librefm::LibreFm;
 use rox_services::listenbrainz::ListenBrainz;
 use rox_services::player::{AbState, FadeView, Player, fmt_time};
 use rox_services::portraits::Portraits;
+use rox_services::radio::Radio;
 use rox_services::selection::Selection;
 use rox_services::thumbs::Thumbs;
 
@@ -72,6 +74,10 @@ pub struct AppState {
     pub library: Entity<Library>,
     pub player: Entity<Player>,
     pub selection: Entity<Selection>,
+    /// This run's cue points, per track and never written down. One per
+    /// workspace so a strip, a duplicate of it, and the key commands all
+    /// mark the same song.
+    pub cues: Entity<Cues>,
     /// The app-wide search query the global-following panels share.
     pub query: Entity<SharedQuery>,
     pub tab_hosts: Entity<TabHosts>,
@@ -84,6 +90,11 @@ pub struct AppState {
     /// The artist portrait cache, shared by every view that draws faces:
     /// the artist wall and the stats page.
     pub portraits: Entity<Portraits>,
+    /// What the playing station says is on air. One per player: the
+    /// scrobbler files a listen off its turnovers and the backdrop goes
+    /// looking for the song's cover, and a second copy would mean both
+    /// signals fired twice per song.
+    pub radio: Entity<Radio>,
     /// The Last.fm scrobbler over this workspace's player; also where the
     /// live scrobble config is stored, for the panels' threshold markers.
     pub scrobbler: Entity<Scrobbler>,
@@ -571,12 +582,34 @@ impl CopyText {
     /// A track's copy fields from its key and the tags the library holds
     /// for it; a file the library doesn't know still copies its path.
     pub fn from_key(key: &rox_library::cue::TrackKey, library: &Library) -> Self {
-        let meta = library.meta_for_key(key);
+        CopyText::from_tags(key, library.meta_for_key(key).as_ref())
+    }
+
+    /// The playing track's copy fields: [`from_key`](Self::from_key) with
+    /// a station's current song laid over the row. A copy taken off a
+    /// transport surface should put the song on the clipboard rather than
+    /// the name of the station that has been on all evening. None while
+    /// nothing plays.
+    pub fn playing(state: &AppState, cx: &App) -> Option<Self> {
+        let player = state.player.read(cx);
+        let key = player.now_playing()?.key;
+        let meta = player.now_meta(state.library.read(cx));
+
+        Some(CopyText::from_tags(&key, meta.as_ref()))
+    }
+
+    /// The fields off a key and tags already in hand, which is the whole
+    /// of both constructors above once each has decided where its tags
+    /// come from.
+    fn from_tags(
+        key: &rox_library::cue::TrackKey,
+        meta: Option<&rox_library::store::TrackMeta>,
+    ) -> Self {
         CopyText {
             path: key.path.clone(),
-            title: meta.as_ref().map(|m| m.title.clone()).unwrap_or_default(),
-            artist: meta.as_ref().map(|m| m.artist.clone()).unwrap_or_default(),
-            album: meta.as_ref().map(|m| m.album.clone()).unwrap_or_default(),
+            title: meta.map(|m| m.title.clone()).unwrap_or_default(),
+            artist: meta.map(|m| m.artist.clone()).unwrap_or_default(),
+            album: meta.map(|m| m.album.clone()).unwrap_or_default(),
         }
     }
 }

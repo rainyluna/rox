@@ -7359,6 +7359,7 @@ dependencies = [
  "serde",
  "serde_json",
  "symphonia",
+ "ureq",
  "windows 0.61.3",
 ]
 
@@ -7380,6 +7381,7 @@ name = "rox-services"
 version = "1.27.0"
 dependencies = [
  "async-channel 2.5.0",
+ "chrono",
  "discord-rich-presence",
  "gpui",
  "image",

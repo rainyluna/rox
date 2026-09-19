@@ -9,6 +9,7 @@ pub mod fmt;
 pub mod install;
 pub mod logging;
 pub mod pace;
+pub mod pattern;
 pub mod settings;
 
 /// The Wayland/X11 app id, set on every window we open. Windows share it so

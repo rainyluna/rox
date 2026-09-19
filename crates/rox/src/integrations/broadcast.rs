@@ -35,16 +35,25 @@ pub fn start(state: &AppState, cx: &mut App) {
     let state = state.clone();
     let player = state.player.clone();
     let mut current: Option<TrackKey> = None;
+    // The station-title revision beside the key, because a relay of a
+    // station is the one case where what's on air changes without the
+    // queue moving. Listeners of the rebroadcast want the song, so the key
+    // compare alone would announce the station's name once and then say
+    // nothing for as long as it played.
+    let mut current_live: Option<u64> = None;
     cx.observe(&player, move |_, cx| {
-        let now = state.player.read(cx).now_playing().map(|now| now.key);
-        if now == current {
+        let player = state.player.read(cx);
+        let now = player.now_playing().map(|now| now.key);
+        let live = player.title_rev();
+        if now == current && live == current_live {
             return;
         }
         current = now.clone();
+        current_live = live;
         let Some(key) = now else { return };
         // The same title-or-filename fallback the media widget shows, so
         // the mount never announces an empty line.
-        let tags = state.library.read(cx).meta_for_key(&key);
+        let tags = player.live_over(state.library.read(cx).meta_for_key(&key));
         let title = tags
             .as_ref()
             .map(|t| t.title.clone())

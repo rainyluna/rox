@@ -253,6 +253,10 @@ pub struct MediaSession {
     /// The track the widget's tags currently reflect, so the library resolve
     /// behind them only runs on a track change, not every notify.
     track: Option<TrackKey>,
+    /// The station-title revision those tags were built at. A stream turns
+    /// over song without the key moving, so the track compare on its own
+    /// would leave the station's name on the OS card all evening.
+    live_rev: Option<u64>,
     /// The player pump notifies every tick while a session runs; the publish
     /// runs on it and its own gating drops the ones that would write nothing.
     _player: Subscription,
@@ -288,6 +292,7 @@ impl MediaSession {
                 }),
                 state,
                 track: None,
+                live_rev: None,
             };
             // Seed the widget with whatever is already loaded: a reopen or a
             // hand-off arrives mid-track, and the first notify may be a while
@@ -327,15 +332,22 @@ impl MediaSession {
     fn publish(&mut self, cx: &mut Context<Self>) {
         let now = self.state.player.read(cx).now_playing();
         let playing = self.state.player.read(cx).is_playing();
+        let live_rev = self.state.player.read(cx).title_rev();
         // Keyed on the whole track, not the file: two cue tracks of one
         // image are the same path, and the widget would keep showing the
         // first one's title and cover for the rest of the disc.
         let key = now.as_ref().map(|now| now.key.clone());
-        if key != self.track {
+        if key != self.track || live_rev != self.live_rev {
+            let moved = key != self.track;
             self.track = key.clone();
+            self.live_rev = live_rev;
             let meta = now.as_ref().map(|now| self.now_playing_meta(now, cx));
             self.keys.set_track(meta);
-            self.publish_cover(key.clone(), cx);
+            // A station announcing its next song is the same row with the
+            // same art; only a real track change owes the cover a re-read.
+            if moved {
+                self.publish_cover(key.clone(), cx);
+            }
         }
         let position = now
             .as_ref()
@@ -377,14 +389,19 @@ impl MediaSession {
     /// An unknown file falls back to its filename for the title, empty for
     /// the rest, so the widget never shows a blank card.
     fn now_playing_meta(&self, now: &NowPlaying, cx: &App) -> NowPlayingMeta {
-        let tags = self.state.library.read(cx).meta_for_key(&now.key);
+        // Through the player, so a station's card shows the song it just
+        // announced rather than the station row's own title.
+        let player = self.state.player.read(cx);
+        let tags = player.live_over(self.state.library.read(cx).meta_for_key(&now.key));
         let title = tags
             .as_ref()
             .map(|m| m.title.clone())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| {
+                // No file name to borrow for a remote track, so the card
+                // shows an empty title rather than a source's own id.
                 now.path()
-                    .file_stem()
+                    .and_then(|path| path.file_stem())
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default()
             });

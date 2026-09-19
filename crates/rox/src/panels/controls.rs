@@ -36,6 +36,7 @@ use rox_design::{palette, tokens};
 use rox_panel_api::buttons::{self, StateSpec};
 use rox_panel_api::panel::{self, AppState, PanelChrome, PanelSettings};
 use rox_panel_api::panel_settings;
+use rox_panel_api::position_bound;
 use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, section};
 use rox_panel_kit::{
     Align, PickRow, Tip, icon_picker, justify, picker, search_picker, setting_block, setting_row,
@@ -293,6 +294,31 @@ fn state_spec(id: &str) -> Option<&'static StateSpec> {
     buttons::STATES.iter().find(|spec| spec.id == id)
 }
 
+/// The commands that only mean anything against a position in a track:
+/// dropping either kind of mark, stepping between them, and the A-B
+/// section. A live stream has no such position, so a button firing one of
+/// these is the button that locks while a station plays.
+///
+/// Held as ids rather than read off `keymap::COMMANDS`, because nothing on
+/// a command says this about it and inventing a field there would put a
+/// panel's concern in the keymap. The test below keeps the list honest
+/// against the command table.
+const POSITION_BOUND: &[&str] = &[
+    "ab_repeat",
+    "bookmark",
+    "bookmark_named",
+    "cue",
+    "cue_next",
+    "cue_prev",
+    "next_bookmark",
+    "prev_bookmark",
+];
+
+/// Whether a button's command needs a position in a track to act on.
+fn needs_position(action: &str) -> bool {
+    POSITION_BOUND.contains(&action)
+}
+
 /// A command's name for the picker and the tooltip fallback, or the raw id
 /// when a saved layout names a command that has since been retired.
 fn command_label(id: &str) -> SharedString {
@@ -476,27 +502,50 @@ fn press(
 /// handler, and [`keymap::dispatch`] needs one to dispatch at. Interaction
 /// state comes from `.id()` and not `.track_focus()`, which is what lets a
 /// press here land without pulling the cursor out of a search box.
+///
+/// `locked` is a position-bound button with nothing to bind to. It keeps
+/// its place and its glyph and stops answering, and its tooltip swaps for
+/// the reason, because that's the only surface a strip of glyphs has to
+/// say one on. Dropping the button instead would move every other button
+/// sideways each time a station started.
 fn button_element(
     id: SharedString,
     look: &ButtonLook,
+    locked: bool,
     on_click: impl Fn(&mut ControlsPanel, &mut Window, &mut Context<ControlsPanel>) + 'static,
     cx: &mut Context<ControlsPanel>,
 ) -> Stateful<Div> {
-    let color = look.color;
+    let color = if locked {
+        palette::text_muted()
+    } else {
+        look.color
+    };
     let icon = look.icon;
 
     let body = div()
         .p(tokens::ICON_PAD)
         .rounded(tokens::RADIUS)
-        .hover(|d| d.bg(palette::bg_control()))
-        .cursor_pointer()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
-        )
+        .map(|d| {
+            if locked {
+                return d;
+            }
+
+            d.hover(|d| d.bg(palette::bg_control()))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+                )
+        })
         .child(svg().path(icon).size(px(GLYPH)).text_color(color));
 
-    Tip::keyed(id, look.tip.clone()).apply(body)
+    let tip = if locked {
+        position_bound::reason()
+    } else {
+        look.tip.clone()
+    };
+
+    Tip::keyed(id, tip).apply(body)
 }
 
 pub struct ControlsPanel {
@@ -558,6 +607,10 @@ impl ControlsPanel {
         // Layout page's tray is configured and deliberately not drawn.
         let placed = placed(&self.config.items, &self.config.buttons);
         let cases = self.live_cases(&placed, cx);
+        // One read for the frame: whether anything position-bound can act
+        // at all right now. False through a live stream, and the whole
+        // reason a button on this strip ever goes inert.
+        let unbound = !position_bound::allowed(&self.state, cx);
 
         let strip = div()
             .size_full()
@@ -575,6 +628,7 @@ impl ControlsPanel {
             return strip.child(button_element(
                 "custom-button-empty".into(),
                 &blank,
+                false,
                 press(String::new()),
                 cx,
             ));
@@ -586,7 +640,9 @@ impl ControlsPanel {
                 Placed::Button(def) => {
                     let resolved = look(def, cases[index]);
                     let id = SharedString::from(format!("custom-button-{}", def.id));
-                    button_element(id, &resolved, press(def.action.clone()), cx).into_any_element()
+                    let locked = unbound && needs_position(&def.action);
+                    button_element(id, &resolved, locked, press(def.action.clone()), cx)
+                        .into_any_element()
                 }
 
                 Placed::Furniture(Furniture::Spacer) => div().flex_1().into_any_element(),
@@ -989,7 +1045,16 @@ impl ControlsPanel {
                     .flex_col()
                     .items_center()
                     .gap(px(2.))
-                    .child(button_element(id, &resolved, press(def.action.clone()), cx))
+                    // The preview draws the case table, not the session, so
+                    // it never locks: someone editing a bookmark button
+                    // while a station plays is still editing its icons.
+                    .child(button_element(
+                        id,
+                        &resolved,
+                        false,
+                        press(def.action.clone()),
+                        cx,
+                    ))
                     .child(
                         div()
                             .text_xs()
@@ -1533,6 +1598,49 @@ mod tests {
                 "{} prefills the panel-scoped command {}",
                 spec.id,
                 spec.action
+            );
+        }
+    }
+
+    /// The lock covers the marks, the steps between them and the A-B
+    /// section, and nothing else. Clearing A-B and the transport around it
+    /// work fine over a stream and have no business greying out.
+    #[test]
+    fn only_the_position_bound_commands_lock() {
+        for action in [
+            "bookmark",
+            "bookmark_named",
+            "prev_bookmark",
+            "next_bookmark",
+            "cue",
+            "cue_prev",
+            "cue_next",
+            "ab_repeat",
+        ] {
+            assert!(needs_position(action), "{action} should lock");
+        }
+
+        for action in [
+            "ab_clear",
+            "toggle_playback",
+            "next_track",
+            "cycle_loop",
+            "",
+        ] {
+            assert!(!needs_position(action), "{action} should not lock");
+        }
+    }
+
+    /// The other half of the same seam as `every_state_action_is_a_global_command`:
+    /// a typo here, or a command renamed out from under this list, would
+    /// leave a button that keeps working over a stream and stores a
+    /// position that means nothing.
+    #[test]
+    fn every_position_bound_id_is_a_command() {
+        for action in POSITION_BOUND {
+            assert!(
+                keymap::COMMANDS.iter().any(|c| c.id == *action),
+                "{action} is not a command"
             );
         }
     }

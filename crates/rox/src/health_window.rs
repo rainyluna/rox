@@ -2185,6 +2185,8 @@ mod tests {
     /// at its neutral default, which is what an untagged file scans as.
     fn track(path: &str, album: &str, disc_no: u16, track_no: u16) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             path: path.into(),
             sub: 0,
             cue: None,

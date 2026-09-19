@@ -10,148 +10,110 @@
 //! editor previews every track through [`Pattern::apply`] before
 //! anything is written, so a bad pattern costs nothing.
 //!
-//! The same pattern runs the other way through [`Pattern::render`]: tag
-//! values in, a relative path out, which file renaming and conversion
-//! output naming are both built on. Rendering is stricter than
-//! matching because it produces names rather than reads them, so %skip%
-//! is an error and every capture is sanitized into something a
-//! filesystem will actually take.
+//! Reading a path is all this module does. The same pattern runs the
+//! other way through [`rox_core::pattern`], values in and a relative path
+//! out, which file renaming and conversion output naming are both built
+//! on, and which the stream capture down in the services shares. The
+//! parse is one parse; only the direction differs.
 
 use std::path::{Path, PathBuf};
 
-use rox_core::settings::safe_file_stem;
+use rox_core::pattern::{PatternField, Token};
 use rox_library::writer::Field;
 
-/// One piece of a pattern component: text that must appear verbatim, a
-/// field capture, or a swallowed segment.
-enum Token {
-    Literal(String),
-    Capture(Field),
-    Skip,
-}
+pub use rox_core::pattern::PLACEHOLDERS;
 
-/// A parsed pattern: one token list per path component, deepest last.
-pub struct Pattern {
-    components: Vec<Vec<Token>>,
-}
+/// The tag fields as a pattern vocabulary: which placeholder names this
+/// crate answers to, and what each one renders as. The engine down in
+/// [`rox_core::pattern`] never learns what a tag is, so this is where
+/// that gets said.
+///
+/// A wrapper rather than the bare field because the trait and the field
+/// are each defined in a crate that isn't this one, and Rust won't take
+/// an impl from a third. It stays inside this module: everything outside
+/// hands over and takes back plain [`Field`] values.
+#[derive(Clone, PartialEq)]
+struct TagField(Field);
 
-/// The placeholder names a pattern may use, the help line's source of
-/// truth. One spelling each; the aliases [`field_for`] also takes are not
-/// listed here.
-pub const PLACEHOLDERS: &[&str] = &[
-    "%artist%",
-    "%albumartist%",
-    "%album%",
-    "%title%",
-    "%track%",
-    "%disc%",
-    "%year%",
-    "%genre%",
-    "%comment%",
-    "%skip%",
-];
-
-/// The field behind a placeholder name, or None for the skip marker.
-/// Unknown names are a parse error, not a literal: a typoed %tittle%
-/// silently matching as text would be far harder to spot in the preview.
-fn field_for(name: &str) -> Result<Option<Field>, String> {
-    Ok(Some(match name {
-        "artist" => Field::Artist,
-        "albumartist" | "album artist" => Field::AlbumArtist,
-        "album" => Field::Album,
-        "title" => Field::Title,
-        "track" | "tracknumber" => Field::TrackNo,
-        "disc" | "discnumber" => Field::DiscNo,
-        "year" | "date" => Field::Year,
-        "genre" => Field::Genre,
-        "comment" => Field::Comment,
-        "skip" | "dummy" | "ignore" => return Ok(None),
-        other => {
-            return Err(
-                rox_i18n::t!("tags-guess-unknown-placeholder", name = other.to_owned()).to_string(),
-            );
-        }
-    }))
-}
-
-/// Parse `pattern` into components, or say what is wrong with it: an
-/// unknown placeholder, an unclosed %, or nothing to capture at all.
-pub fn parse(pattern: &str) -> Result<Pattern, String> {
-    let mut components = Vec::new();
-    for part in pattern.split('/') {
-        let mut tokens: Vec<Token> = Vec::new();
-        let mut rest = part;
-        while let Some(start) = rest.find('%') {
-            if !rest[..start].is_empty() {
-                tokens.push(Token::Literal(rest[..start].to_owned()));
+impl PatternField for TagField {
+    /// Unknown names are a parse error, not a literal: a typoed
+    /// `%tittle%` silently matching as text would be far harder to spot
+    /// in the preview.
+    fn from_placeholder(name: &str) -> Result<Option<Self>, String> {
+        Ok(Some(TagField(match name {
+            "artist" => Field::Artist,
+            "albumartist" | "album artist" => Field::AlbumArtist,
+            "album" => Field::Album,
+            "title" => Field::Title,
+            "track" | "tracknumber" => Field::TrackNo,
+            "disc" | "discnumber" => Field::DiscNo,
+            "year" | "date" => Field::Year,
+            "genre" => Field::Genre,
+            "comment" => Field::Comment,
+            "skip" | "dummy" | "ignore" => return Ok(None),
+            other => {
+                return Err(rox_i18n::t!(
+                    "tags-guess-unknown-placeholder",
+                    name = other.to_owned()
+                )
+                .to_string());
             }
-            let after = &rest[start + 1..];
-            let Some(end) = after.find('%') else {
-                return Err(rox_i18n::t!("tags-guess-unclosed").to_string());
-            };
-            match field_for(&after[..end])? {
-                Some(field) => tokens.push(Token::Capture(field)),
-                None => tokens.push(Token::Skip),
-            }
-            rest = &after[end + 1..];
-        }
-        if !rest.is_empty() {
-            tokens.push(Token::Literal(rest.to_owned()));
-        }
-        components.push(tokens);
+        })))
     }
-    let captures = components
-        .iter()
-        .flatten()
-        .any(|t| matches!(t, Token::Capture(_)));
-    if !captures {
-        return Err(rox_i18n::t!("tags-guess-no-placeholders").to_string());
-    }
-    Ok(Pattern { components })
-}
 
-/// What a field renders as when the track has nothing for it. A rendered
-/// segment can never be empty, otherwise a missing album would collapse
-/// a folder level and drop the file somewhere it doesn't belong. These
-/// double as [`safe_file_stem`]'s fallback, so a value of pure
-/// punctuation ends up here too.
-fn fallback_for(field: &Field) -> &'static str {
-    match field {
-        Field::Artist | Field::AlbumArtist => "Unknown Artist",
-        Field::Album => "Unknown Album",
-        Field::Title => "Untitled",
-        Field::TrackNo | Field::DiscNo => "00",
-        Field::Year => "Unknown Year",
-        Field::Genre => "Unknown Genre",
-        // %comment% lands here: a track with no comment renders like the
-        // rest of them. No other field has a placeholder, so nothing else
-        // reaches this from a parsed pattern. Kept total rather than
-        // panicking.
-        _ => "Unknown",
+    /// What a field renders as when the track has nothing for it. No tag
+    /// field is allowed to vanish: a missing album would collapse a
+    /// folder level and drop the file somewhere it doesn't belong. These
+    /// double as the sanitizer's fallback, so a value of pure punctuation
+    /// ends up here too.
+    fn fallback(&self) -> &'static str {
+        match self.0 {
+            Field::Artist | Field::AlbumArtist => "Unknown Artist",
+            Field::Album => "Unknown Album",
+            Field::Title => "Untitled",
+            Field::TrackNo | Field::DiscNo => "00",
+            Field::Year => "Unknown Year",
+            Field::Genre => "Unknown Genre",
+            // %comment% lands here: a track with no comment renders like
+            // the rest of them. No other field has a placeholder, so
+            // nothing else reaches this from a parsed pattern. Kept total
+            // rather than panicking.
+            _ => "Unknown",
+        }
+    }
+
+    fn value(&self, raw: &str) -> String {
+        match self.0 {
+            Field::TrackNo | Field::DiscNo => padded(raw),
+            _ => raw.trim().to_owned(),
+        }
     }
 }
 
 /// A track or disc number as two digits, so 3 sorts before 12 in every
-/// file browser. ID3's "3/12" total form keeps only the number.
-/// Anything that isn't a plain number (a "A1" vinyl side) is left alone.
+/// file browser. ID3's "3/12" total form keeps only the number. Anything
+/// that isn't a plain number (a "A1" vinyl side) is left alone.
 fn padded(value: &str) -> String {
     let head = value.split('/').next().unwrap_or(value).trim();
+
     match head.parse::<u32>() {
         Ok(n) => format!("{n:02}"),
         Err(_) => value.trim().to_owned(),
     }
 }
 
-/// Clean up an assembled segment's edges: the literal text around a
-/// capture can leave a trailing space or dot that Windows silently eats
-/// and that hides the file everywhere else.
-fn trim_segment(segment: &str) -> &str {
-    segment.trim().trim_matches('.').trim()
+/// A parsed pattern over the tag fields, matching and rendering both.
+pub struct Pattern(rox_core::pattern::Pattern<TagField>);
+
+/// Parse `text` into a pattern, or say what is wrong with it: an unknown
+/// placeholder, an unclosed %, or nothing to capture at all.
+pub fn parse(text: &str) -> Result<Pattern, String> {
+    rox_core::pattern::parse(text).map(Pattern)
 }
 
 /// Match `tokens` against `text` from the front, non-greedy, collecting
 /// captures into `out`. On failure `out` is left as it was.
-fn match_tokens(tokens: &[Token], text: &str, out: &mut Vec<(Field, String)>) -> bool {
+fn match_tokens(tokens: &[Token<TagField>], text: &str, out: &mut Vec<(Field, String)>) -> bool {
     let Some(token) = tokens.first() else {
         return text.is_empty();
     };
@@ -178,7 +140,7 @@ fn match_tokens(tokens: &[Token], text: &str, out: &mut Vec<(Field, String)>) ->
                 }
                 let mark = out.len();
                 if let Token::Capture(field) = token {
-                    out.push((field.clone(), trimmed.to_owned()));
+                    out.push((field.0.clone(), trimmed.to_owned()));
                 }
                 if match_tokens(&tokens[1..], rest, out) {
                     return true;
@@ -194,7 +156,20 @@ impl Pattern {
     /// Whether the pattern has a folder part at all: `%track% - %title%`
     /// is a file name alone, `%album%/%title%` names a folder above it.
     pub fn has_folders(&self) -> bool {
-        self.components.len() > 1
+        self.0.has_folders()
+    }
+
+    /// Run the pattern forwards: tag values in, a relative path out. The
+    /// rendering itself is [`rox_core::pattern::Pattern::render`]; the
+    /// pass here only puts the caller's fields into the wrapper the
+    /// engine is parameterized over.
+    pub fn render(&self, values: &[(Field, String)]) -> Result<PathBuf, String> {
+        let values: Vec<(TagField, String)> = values
+            .iter()
+            .map(|(field, value)| (TagField(field.clone()), value.clone()))
+            .collect();
+
+        self.0.render(&values)
     }
 
     /// Run the pattern over `path`: the last component against the file
@@ -203,9 +178,10 @@ impl Pattern {
     /// when both name the artist. None when any component fails to
     /// match, including a pattern deeper than the path itself.
     pub fn apply(&self, path: &Path) -> Option<Vec<(Field, String)>> {
-        let mut names: Vec<String> = Vec::with_capacity(self.components.len());
+        let components = self.0.components();
+        let mut names: Vec<String> = Vec::with_capacity(components.len());
         let mut at = path;
-        for i in 0..self.components.len() {
+        for i in 0..components.len() {
             let name = if i == 0 {
                 at.file_stem()?.to_str()?.to_owned()
             } else {
@@ -216,7 +192,7 @@ impl Pattern {
         }
         names.reverse();
         let mut captures = Vec::new();
-        for (tokens, name) in self.components.iter().zip(&names) {
+        for (tokens, name) in components.iter().zip(&names) {
             if !match_tokens(tokens, name, &mut captures) {
                 return None;
             }
@@ -231,48 +207,6 @@ impl Pattern {
         }
         deduped.reverse();
         Some(deduped)
-    }
-
-    /// Run the pattern forwards: `values` in, a relative path out, one
-    /// component per "/" in the pattern and the deepest one the file
-    /// name. Literals emit verbatim, captures emit the tag value through
-    /// [`safe_file_stem`] so a slash in an artist name can't open a
-    /// folder, and a missing or empty value emits the field's fallback
-    /// instead of nothing. %skip% is an error here: it exists to swallow
-    /// text while matching, and there's nothing to swallow while
-    /// emitting. The extension belongs to the source file, so the caller
-    /// appends it; the path that comes back has none.
-    pub fn render(&self, values: &[(Field, String)]) -> Result<PathBuf, String> {
-        let mut path = PathBuf::new();
-        for tokens in &self.components {
-            let mut segment = String::new();
-            for token in tokens {
-                match token {
-                    Token::Literal(lit) => segment.push_str(lit),
-                    Token::Skip => {
-                        return Err(rox_i18n::t!("tags-guess-skip-renders-nothing").to_string());
-                    }
-                    Token::Capture(field) => {
-                        let raw = values
-                            .iter()
-                            .find(|(f, _)| f == field)
-                            .map(|(_, v)| v.as_str())
-                            .unwrap_or_default();
-                        let value = match field {
-                            Field::TrackNo | Field::DiscNo => padded(raw),
-                            _ => raw.trim().to_owned(),
-                        };
-                        segment.push_str(&safe_file_stem(&value, fallback_for(field)));
-                    }
-                }
-            }
-            let trimmed = trim_segment(&segment);
-            if trimmed.is_empty() {
-                return Err(rox_i18n::t!("tags-guess-empty-segment").to_string());
-            }
-            path.push(trimmed);
-        }
-        Ok(path)
     }
 }
 
@@ -374,35 +308,11 @@ mod tests {
             .iter()
             .map(|(f, v)| (f.clone(), (*v).to_owned()))
             .collect();
+
         parse(pattern)
             .unwrap()
             .render(&values)
             .map(|p| p.to_string_lossy().into_owned())
-    }
-
-    #[test]
-    fn render_round_trips_through_apply() {
-        let pattern = "%albumartist%/%album%/%track% - %title%";
-        let values = [
-            (Field::AlbumArtist, "Boards of Canada".to_owned()),
-            (Field::Album, "Geogaddi".to_owned()),
-            (Field::TrackNo, "4".to_owned()),
-            (Field::Title, "Julie and Candy".to_owned()),
-        ];
-        let rendered = parse(pattern).unwrap().render(&values).unwrap();
-        assert_eq!(
-            rendered,
-            PathBuf::from("Boards of Canada/Geogaddi/04 - Julie and Candy")
-        );
-        let full = PathBuf::from("/music")
-            .join(&rendered)
-            .with_extension("flac");
-        let mut back = parse(pattern).unwrap().apply(&full).unwrap();
-        back.sort_by_key(|(f, _)| format!("{f:?}"));
-        let mut want: Vec<(Field, String)> = values.to_vec();
-        want[2].1 = "04".to_owned();
-        want.sort_by_key(|(f, _)| format!("{f:?}"));
-        assert_eq!(back, want);
     }
 
     #[test]
@@ -440,27 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn captures_cannot_escape_their_segment() {
-        assert_eq!(
-            render(
-                "%artist%/%title%",
-                &[(Field::Artist, "AC/DC"), (Field::Title, "Who Made Who?"),]
-            )
-            .unwrap(),
-            "AC DC/Who Made Who"
-        );
-        assert_eq!(
-            render(
-                "%artist% - %title%",
-                &[(Field::Artist, "../etc"), (Field::Title, "x:y|z"),]
-            )
-            .unwrap(),
-            "etc - x y z"
-        );
-    }
-
-    #[test]
-    fn empty_values_fall_back_instead_of_vanishing() {
+    fn no_tag_field_vanishes_from_a_name() {
         assert_eq!(
             render(
                 "%albumartist%/%album%/%track% %title%",
@@ -469,50 +359,30 @@ mod tests {
             .unwrap(),
             "Unknown Artist/Unknown Album/00 Song"
         );
-        // A value that sanitizes down to nothing takes the same road.
+    }
+
+    #[test]
+    fn render_round_trips_through_apply() {
+        let pattern = "%albumartist%/%album%/%track% - %title%";
+        let values = [
+            (Field::AlbumArtist, "Boards of Canada".to_owned()),
+            (Field::Album, "Geogaddi".to_owned()),
+            (Field::TrackNo, "4".to_owned()),
+            (Field::Title, "Julie and Candy".to_owned()),
+        ];
+        let rendered = parse(pattern).unwrap().render(&values).unwrap();
         assert_eq!(
-            render(
-                "%artist% - %title%",
-                &[(Field::Artist, "///"), (Field::Title, "Song")]
-            )
-            .unwrap(),
-            "Unknown Artist - Song"
+            rendered,
+            PathBuf::from("Boards of Canada/Geogaddi/04 - Julie and Candy")
         );
-    }
-
-    #[test]
-    fn segments_never_end_in_space_or_dot() {
-        assert_eq!(
-            render(
-                "%artist% - /%title%.",
-                &[(Field::Artist, "Name"), (Field::Title, "Song")]
-            )
-            .unwrap(),
-            "Name -/Song"
-        );
-    }
-
-    #[test]
-    fn render_rejects_skip_and_empty_segments() {
-        assert!(
-            parse("%skip% - %title%")
-                .unwrap()
-                .render(&[(Field::Title, "Song".into())])
-                .is_err()
-        );
-        assert!(
-            parse("%artist%//%title%")
-                .unwrap()
-                .render(&[(Field::Artist, "A".into()), (Field::Title, "B".into())])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn parse_rejects_bad_patterns() {
-        assert!(parse("%tittle%").is_err());
-        assert!(parse("%artist").is_err());
-        assert!(parse("plain text").is_err());
-        assert!(parse("%skip%").is_err());
+        let full = PathBuf::from("/music")
+            .join(&rendered)
+            .with_extension("flac");
+        let mut back = parse(pattern).unwrap().apply(&full).unwrap();
+        back.sort_by_key(|(f, _)| format!("{f:?}"));
+        let mut want: Vec<(Field, String)> = values.to_vec();
+        want[2].1 = "04".to_owned();
+        want.sort_by_key(|(f, _)| format!("{f:?}"));
+        assert_eq!(back, want);
     }
 }

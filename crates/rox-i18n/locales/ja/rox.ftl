@@ -194,6 +194,7 @@ settings-language-system = (システムの言語)
 settings-language-search = 言語を検索
 picker-no-matches = 一致なし
 settings-search-no-matches = "{ $text }" に一致するものがありません
+settings-search-scope = 開いているページのみ検索
 
 ## Embed dialog
 bookmark-new-title = 新しいブックマーク
@@ -225,6 +226,10 @@ bookmark-menu-remove = 削除
 bookmark-menu-remove-many = { $count } 件のブックマークを削除
 bookmarks-title = ブックマーク
 bookmarks-empty = ブックマークはまだありません。再生中に M を押すと追加、Shift+M で名前を付けて追加できます。
+cue-menu-insert = ここにマーカーを挿入
+cue-menu-bookmark = ここにブックマークを追加
+cue-menu-remove = マーカーを削除
+position-bound-streaming = ストリーミング中は使用できません
 bake-window-title = rox - 保存済みメタデータの埋め込み
 bake-title = 保存済みメタデータの埋め込み
 bake-intro = 保存済みのメタデータをファイル自体に書き込み、他のプレイヤーからも読めるようにします。再計算はしません。
@@ -604,6 +609,35 @@ library-circular-portraits = 円形の写真
 library-genre-face = ジャンルの表示
     .description = ジャンルでグループ化したとき、タイルに何を出すか。カバー、ジャンルの色をかけたカバー、または図形を敷いたカラーカード
 
+## Stations panel
+
+stations-title = ラジオ局
+stations-play = 再生
+stations-remove = 削除
+stations-find = ラジオ局を探す...
+stations-manage = ラジオ局を管理...
+stations-import = ラジオ局をインポート...
+stations-import-empty = このファイルにストリーム URL はありません
+stations-not-a-stream = ラジオ局は http か https で再生します。それはストリーム URL ではありません
+stations-empty-title = ラジオ局はまだありません
+stations-empty = ディレクトリで探すか、設定で自分のリストを整えてください。
+stations-on-air = 放送中
+stations-clocks = この曲と、この局を聴いている時間
+stations-homepage = サイトを開く
+
+## Station directory
+
+directory-window-title = ラジオ局ディレクトリ
+directory-placeholder = radio-browser.info でラジオ局を探す
+directory-search = ディレクトリを検索
+directory-add = 追加
+directory-add-play = 追加して再生
+directory-added = 追加済み
+directory-searching = radio-browser.info を検索中...
+directory-none = radio-browser.info に「{ $text }」に一致する局はありません
+directory-failed = radio-browser.info が応答しませんでした: { $reason }
+directory-bitrate = { $kbps } kbps
+
 ## Album grid panel
 panel-title-album-grid = アルバムグリッド
 grid-menu-scroll = スクロール
@@ -658,6 +692,7 @@ settings-page-ml-models = ML モデル
 settings-page-playback = 再生
 settings-page-providers = プロバイダー
 settings-page-shader = シェーダー
+settings-page-sources = ソース
 settings-page-storage = ストレージ
 settings-page-workspace = ワークスペース
 
@@ -915,6 +950,27 @@ settings-integrations-section-lastfm = Last.fm
 settings-integrations-section-librefm = Libre.fm
 settings-integrations-section-listenbrainz = ListenBrainz
 settings-integrations-section-scrobbling = スクロブル
+settings-integrations-section-subsonic = Subsonic
+settings-integrations-subsonic-connect = 接続
+settings-integrations-subsonic-credentials = ログイン
+    .description = サーバー上のアカウント。パスワードは accounts.json に保存され、settings.json には入りません
+settings-integrations-subsonic-enable = Subsonic サーバーを使う
+    .description = Subsonic または OpenSubsonic サーバーのライブラリーを読み込んで再生します
+settings-integrations-subsonic-password-placeholder = パスワード
+settings-integrations-subsonic-server = サーバー
+    .description = http:// または https:// を含むサーバーのアドレス。末尾の /rest は要りません
+settings-integrations-subsonic-status-failed = サーバーに接続できませんでした: { $error }
+settings-integrations-subsonic-status-ok = { $server } に接続しました
+settings-integrations-subsonic-sync-count = { $n ->
+   *[other] { $n } 曲、最終同期 { $date }
+}
+settings-integrations-subsonic-sync-failed = 同期に失敗しました: { $error }
+settings-integrations-subsonic-sync-never = まだ同期していません
+settings-integrations-subsonic-sync-now = 今すぐ同期
+    .description = サーバーの内容を問い合わせてライブラリーを合わせます。サーバーがもう持っていない曲は取り除かれます
+settings-integrations-subsonic-syncing = アルバム { $done } / { $total } を同期中
+settings-integrations-subsonic-url-placeholder = https://music.example.com
+settings-integrations-subsonic-user-placeholder = ユーザー名
 
 ## Settings: keymap
 settings-keymap-clash = { $chord } は { $other } にも割り当てられています。どちらか一方しか発火しません
@@ -1020,6 +1076,23 @@ settings-playback-continuation-weighted = 重み付き
 settings-playback-keep-playing = 再生を続ける
     .description = キューが尽きたときに何を鳴らすか。選ばれたものは隠れた状態ではなく普通のコンテキストとしてタイムラインに足されるので、見えるし外せる。上の順序が「似た曲」なら、ここで何を選んでも再生中の曲に似た曲を探し続ける
     .keywords = 継続 補充 自動再生 キュー autoplay queue
+settings-playback-live-buffer = ライブバッファ
+    .description = 局をどこまで巻き戻せるか。一時停止中も接続は保たれてバッファに溜まり続けるので、再生すればライブではなく止めたところから続く。12時間は実質的に無限で、一度に流しっぱなしにする分がこれを超えることはない
+settings-playback-live-buffer-memory = 128 kbps で約 { $low }、320 kbps で約 { $high }。
+settings-playback-live-buffer-playing = 再生中の局: 約 { $size }。
+settings-playback-capture-album = 保存曲のアルバム
+    .description = 保存した曲のアルバムタグに入れる内容です。空欄ならアルバムを書きません。放送から取った曲にはリリースがなく、アルバム欄に局名が入るとアルバム表示が乱れるためです。%station% で局名を入れられます。Radio や Singles のような語を入れれば専用の棚に並びます。局名とストリーム URL は常にコメントに入ります。
+settings-playback-capture-album-placeholder = 空欄のまま
+settings-playback-capture-choose = フォルダーを選択...
+settings-playback-capture-enable = ストリーミングソースの曲を保存
+    .description = ストリームが最初から最後まで再生した曲を、再エンコードせずストリーム自身の形式のまま保存フォルダーに書き出し、局の情報をタグに付けます。曲のカバーアートは、見つかれば同じ名前で隣に保存します。曲の区切りは局が送るタイトルによるもので、音声の切り替わりより数秒早かったり遅かったりするため、保存した曲に前の曲の終わりが入ることがあります。ライブバッファーより長い曲は保存されないので、ポッドキャストやミックスはそのまま流れます。
+settings-playback-capture-folder = 保存フォルダー
+settings-playback-capture-pattern = 保存名のパターン
+    .description = 保存フォルダー内で曲にどんな名前を付けるか。/ を入れるとフォルダーになるので、既定では一晩分のラジオが局ごとに整理され、平らに積み上がりません。拡張子はストリームに従います。
+settings-playback-capture-pattern-date = %date% は曲を保存した日で、2026-09-18 の形式です。
+settings-playback-capture-pattern-preview = プレビュー: { $name }
+settings-playback-capture-pattern-station = %station% は局の名前で、%album% も同じものを指します。
+settings-playback-section-capture = 保存
 settings-playback-play-order = 再生順
     .description = シャッフルがオンのあいだ、既にキューにある曲をどう並べるか。オンオフは再生バーのシャッフルボタンで、これはオンのときの中身
 settings-playback-rating-scale = レーティングの段階
@@ -1029,6 +1102,7 @@ settings-playback-rating-scale-stars = 星
 settings-playback-restore-last-session = 前回のセッションを復元
     .description = 終了時のままの再生キューで起動し、再生していた曲のその位置で一時停止する。ライブラリのフォルダーの外にあるキューの曲は復元できず、順序から外れる
 settings-playback-section-queue = キュー
+settings-playback-section-radio = ラジオ
 settings-playback-section-ratings = レーティング
 settings-playback-section-stepping = ステップ
 settings-playback-step = ステップ幅
@@ -1096,6 +1170,18 @@ settings-shader-signals-block = シグナル
     .description = シェーダーの 16 個のスロットがそれぞれどの共有シグナルを読むか
 settings-shader-slots-block = スロット
     .description = シェーダーに届く時点での各スロット。ルートの無いスロットは手で決めるつまみ
+
+## Settings: sources
+
+settings-sources-folders-note = rox がスキャンするフォルダーは、それを読むスキャンとタグの設定と並んで「ライブラリ」ページにあります。
+settings-sources-folders-open = ライブラリのページ
+settings-sources-section-folders = ローカルフォルダー
+settings-sources-section-stations = ラジオ局
+settings-sources-stations-find = ラジオ局を探す...
+settings-sources-stations-import = ラジオ局をインポート...
+settings-sources-stations-name-placeholder = 名前 (任意)
+settings-sources-stations-none = ラジオ局はまだありません
+settings-sources-stations-url-placeholder = ストリーム URL
 
 ## Settings: storage
 settings-storage-artist-images = アーティストの画像
@@ -1775,6 +1861,12 @@ keymap-prev-bookmark = 前のブックマーク
     .description = 再生位置の手前のブックマークへ戻る
 keymap-next-bookmark = 次のブックマーク
     .description = 次のブックマークへ進む
+keymap-cue = マーカーを追加
+    .description = 再生位置にセッションマーカーを置く。マーカーは rox を閉じるまで残ります
+keymap-cue-prev = 前のマーカー
+    .description = 再生ヘッドの手前のマーカーへ戻る
+keymap-cue-next = 次のマーカー
+    .description = 次のマーカーへ進む
 keymap-stop-playback = 停止
     .description = 再生を止めて曲を解放する
 keymap-toggle-playback = 再生 / 一時停止
@@ -1897,6 +1989,7 @@ panel-catalog-group-visualizers = ビジュアライザー
 panel-catalog-group-widgets = ウィジェット
 panel-catalog-history = 履歴
 panel-catalog-bookmarks = ブックマーク
+panel-catalog-stations = ラジオ局
 panel-catalog-menu = メニュー
 panel-catalog-metadata = メタデータ
 panel-catalog-mini-toggle = ミニ切り替え
@@ -2570,6 +2663,17 @@ waveform-bookmarks = ブックマーク
     .description = 再生中のトラックのブックマークを下端に山形で表示。クリックで移動、右クリックで編集
 waveform-split-channels = チャンネルを分ける
     .description = 1 チャンネルにつき 1 段、左が上で右が下。モノラルの曲は 1 段のまま
+waveform-live-mode = ライブの描画
+    .description = ラジオ放送が流れている間に帯が描くもの。何も描かない、放送の音そのもの、または帯が自分で描く図形
+waveform-live-trace = 波形
+waveform-live-motion = 動き
+waveform-live-window = ライブの表示幅
+    .description = 流れる波形が収めるラジオ放送の秒数。幅を広げるほどスクロールは遅くなる
+waveform-live-expression = 動きの式
+    .description = x は帯の左端から右端まで 0 から 1、t はパネルの時計の秒数。sin cos tan abs sqrt exp ln floor min max clamp mix と + - * / ^ pi、かっこが使えます
+waveform-live-expression-error = { $reason } のため、帯は既定の図形を描いています
+waveform-section-live = ライブ
+waveform-streaming = ストリーミング
 waveform-unavailable = この曲の波形は利用できません
 
 ## VU panel
@@ -2814,6 +2918,11 @@ metadata-field-codec = コーデック
 metadata-field-comment = コメント
 metadata-field-copies = 重複
 metadata-field-cover = カバー
+metadata-field-source = ソース
+metadata-source-radio = ラジオ
+metadata-source-subsonic = Subsonic
+metadata-field-station = 局
+metadata-field-homepage = サイト
 metadata-field-disc = ディスク
 metadata-field-file = ファイル
 metadata-field-first-played = 最初に再生
@@ -2868,6 +2977,8 @@ metadata-stripes-description = 表の一行おきに色を付ける
 
 ## History panel
 history-column-last-played = 最終再生
+history-live-plays-file = ライブラリにあるこの曲を再生する
+history-live-plays-station = 局を再生する。この曲はライブラリにない
 history-descending = 降順
     .description = 並べ替えを逆にする
 history-empty-never = すべての曲が再生済みです
@@ -2965,6 +3076,7 @@ playlists-empty = プレイリストがまだありません。曲を追加す�
 playlists-export-tooltip = プレイリストをエクスポート
 playlists-headings = 各プレイリストの曲をアルバムの固まりで区切る。拡張ではカバーと統計も付く
 playlists-import-tooltip = プレイリストをインポート
+playlists-import = プレイリストをインポート...
 playlists-imported-fallback = インポート
 playlists-new = 新しいプレイリスト...
 playlists-new-smart = 新しいスマートプレイリスト...
@@ -3197,6 +3309,8 @@ track-info-opening = 開いています...
 track-info-output-fallback = 排他出力がデバイスに拒否されたため、共有ミキサー経由で再生しています。デバイスの応答: { $reason }
 track-info-output-resample-exclusive = このファイルは { $source } kHz ですが、カードは { $device } kHz を受けたので、出力の途中で全サンプルが変換されています。デバイスがファイル自身のレートで動きませんでした。
 track-info-output-resample-mixer = このファイルは { $source } kHz ですが、ミキサーは { $device } kHz で動いているので、出力の途中で全サンプルが変換されています。排他モードならファイル自身のレートをカードに渡せます。
+track-info-output-resample-exclusive-stream = このストリームは { $source } kHz ですが、カードは { $device } kHz を受けたので、出力の途中で全サンプルが変換されています。デバイスがストリーム自身のレートで動きませんでした。
+track-info-output-resample-mixer-stream = このストリームは { $source } kHz ですが、ミキサーは { $device } kHz で動いているので、出力の途中で全サンプルが変換されています。排他モードならストリーム自身のレートをカードに渡せます。
 track-info-overflow-loop = 回す
 track-info-overflow-scroll = 流す
 track-info-overflow-truncate = 切る
@@ -3226,6 +3340,16 @@ seek-scrobble-marker = スクロブルの印
 seek-bookmarks = ブックマーク
     .description = 再生中のトラックのブックマークを線の下に山形で表示。クリックで移動、右クリックで編集
 seek-show-timings = 時間を表示
+seek-dash-length = 破線の長さ
+    .description = 先頭の破線一本の長さ。同じ幅の間隔が後ろに入る
+seek-lead-in = バッファの先頭
+    .description = 局のバッファのまだ埋まっていない部分、テープの左側の描き方
+seek-lead-in-dashed = 破線
+seek-lead-in-faint = 淡色
+seek-lead-in-hidden = 非表示
+seek-lead-in-sweep = 先頭のスイープ
+    .description = まだ埋まっていない部分をグラデーションが流れていく、ローディングバーと同じ動き
+seek-section-live = ライブ
 seek-thickness = 太さ
     .description = トラックの線の高さ
 
@@ -3306,6 +3430,11 @@ theme-toggle-to-light = ライトテーマに切り替え
 transport-favourite-add = お気に入りに追加
 transport-favourite-nothing = お気に入りにするものがありません
 transport-favourite-remove = お気に入りから削除
+transport-live = ライブ
+transport-live-opening = 局に接続中
+transport-live-reconnecting = ストリームが切れました。再接続中
+transport-live-dropped = ストリームが失われました
+transport-live-jump = ライブに追いつく
 transport-pieces = 構成要素
     .description = 行に沿ってドラッグして並べ替え、行をまたいでドラッグして移動。チップの x と + で表示と非表示を切り替える
 

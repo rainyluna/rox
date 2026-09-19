@@ -13,9 +13,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    Action, App, AppContext, Context, Div, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, KeyDownEvent, ParentElement, SharedString, Styled, Subscription,
-    Window, div,
+    Action, AnyElement, App, AppContext, Context, Div, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement, KeyDownEvent, ParentElement, SharedString, Styled,
+    Subscription, Window, div,
 };
 use gpui_component::input::{
     CompletionProvider, Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp,
@@ -194,10 +194,25 @@ impl SearchBox {
     /// through the entity so the key handler can get at the state:
     /// `search.update(cx, |search, cx| search.element(cx))`.
     pub fn element(&self, cx: &mut Context<Self>) -> Div {
+        self.element_with_suffix(None, cx)
+    }
+
+    /// [`Self::element`] with a control of the host's riding inside the
+    /// box, at the tail past the clear glyph. For a host whose box carries
+    /// a mode the query runs under rather than a second query: the
+    /// settings window's page-scope button. Inside rather than beside
+    /// because a box in a 160px sidebar has no width to give a neighbour.
+    ///
+    /// The control arrives already built, since the host's listeners need
+    /// the host's own context and this method only has the box's.
+    pub fn element_with_suffix(&self, suffix: Option<AnyElement>, cx: &mut Context<Self>) -> Div {
         // A clear glyph at the tail once there's text: clicking it empties the
         // box, which fires Change like a keystroke, so followers and the shared
         // query reset the same way an escape-to-clear does.
         let mut input = Input::new(&self.input).w_full().cleanable(true);
+        if let Some(suffix) = suffix {
+            input = input.suffix(suffix);
+        }
         if self.xsmall {
             input = input.xsmall();
         } else if self.small {

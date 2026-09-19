@@ -769,6 +769,10 @@ fn cue_rows(
                 album_sort: inherit(&album, &image_tags.album, &image_tags.album_sort),
                 path: path.clone(),
                 sub: track.number,
+                // A scanned row is a file on disk, so neither remote column
+                // has anything to say.
+                remote_url: String::new(),
+                remote_live: false,
                 title,
                 album_artist,
                 artist,
@@ -1028,6 +1032,8 @@ fn fallback_row(path: &Path) -> TrackRow {
         path: String::new(),
         sub: 0,
         cue: None,
+        remote_url: String::new(),
+        remote_live: false,
         title: filename_title(path),
         artist: String::new(),
         album_artist: String::new(),
@@ -1162,7 +1168,7 @@ mod tests {
         store::init_schema(&conn).unwrap();
 
         let title = |conn: &Connection| {
-            store::meta_for_path(conn, path.to_str().unwrap())
+            store::meta_for_path(conn, crate::cue::LOCAL, path.to_str().unwrap())
                 .unwrap()
                 .unwrap()
                 .title
@@ -1539,14 +1545,22 @@ mod tests {
         assert_eq!(s.removed, 1);
         assert_eq!(store::count(&conn).unwrap(), 2);
         assert!(
-            store::id_for_path(&conn, dir.join("a/2.mp3").to_str().unwrap())
-                .unwrap()
-                .is_none()
+            store::id_for_path(
+                &conn,
+                crate::cue::LOCAL,
+                dir.join("a/2.mp3").to_str().unwrap()
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(
-            store::id_for_path(&conn, dir.join("a/1.mp3").to_str().unwrap())
-                .unwrap()
-                .is_some()
+            store::id_for_path(
+                &conn,
+                crate::cue::LOCAL,
+                dir.join("a/1.mp3").to_str().unwrap()
+            )
+            .unwrap()
+            .is_some()
         );
 
         // The whole root gone (unplugged drive, dropped mount): the walk
@@ -1597,9 +1611,13 @@ mod tests {
         let s = scan(&mut conn, &dir, |_, _, _| true).unwrap();
         assert_eq!(s.removed, 1);
         assert!(
-            store::id_for_path(&conn, dir.join("a.mp3").to_str().unwrap())
-                .unwrap()
-                .is_some(),
+            store::id_for_path(
+                &conn,
+                crate::cue::LOCAL,
+                dir.join("a.mp3").to_str().unwrap()
+            )
+            .unwrap()
+            .is_some(),
             "the file next to the folder is untouched"
         );
     }
@@ -1804,14 +1822,18 @@ FILE "disc.wav" WAVE
         // The spans landed beside the rows, the last one open-ended.
         let path = image.to_str().unwrap();
         assert_eq!(
-            store::queue_meta_for_key(&conn, path, 2).unwrap().span,
+            store::queue_meta_for_key(&conn, crate::cue::LOCAL, path, 2)
+                .unwrap()
+                .span,
             Some(crate::cue::Span {
                 start_ms: 3_000,
                 end_ms: Some(6_000)
             })
         );
         assert_eq!(
-            store::queue_meta_for_key(&conn, path, 3).unwrap().span,
+            store::queue_meta_for_key(&conn, crate::cue::LOCAL, path, 3)
+                .unwrap()
+                .span,
             Some(crate::cue::Span {
                 start_ms: 6_000,
                 end_ms: None

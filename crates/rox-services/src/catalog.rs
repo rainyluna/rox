@@ -15,6 +15,7 @@ use rox_library::bookmarks::{self, Bookmark, BookmarkRow};
 use rox_library::cue::TrackKey;
 use rox_library::embeddings;
 use rox_library::listens;
+use rox_library::locator::Locator;
 use rox_library::playlists;
 use rox_library::projection::{self, Builder, Patch, Projection, RowView};
 use rox_library::rusqlite::{self, Connection};
@@ -22,6 +23,8 @@ use rox_library::scanner::{self, ScanSummary};
 use rox_library::store;
 use rox_library::watch::{LibraryWatcher, WatchBatch};
 use rox_library::writer;
+
+use crate::sources_registry;
 
 /// The catalog changed: a scan finished or the projection reloaded. Panels
 /// subscribe and refresh their views.
@@ -97,6 +100,16 @@ pub struct SortNames {
     pub album: String,
 }
 
+/// The local file behind a song named by a row that has none, what
+/// [`Library::local_copies`] answers with: which track it is and where it
+/// sits, so the caller can draw its cover and play it without asking
+/// twice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalCopy {
+    pub track_id: i64,
+    pub path: PathBuf,
+}
+
 /// Read one M3U line back to a library track id, the other half of what
 /// [`Library::playlist_export_rows`] writes. None for an entry the library
 /// never scanned: there is no file behind it to play.
@@ -118,12 +131,24 @@ fn resolve_m3u_entry(conn: &Connection, base_dir: &Path, entry: &str) -> Option<
     let exists = |name: &str| {
         resolve(name)
             .to_str()
-            .and_then(|full| store::id_for_path(conn, full).ok().flatten())
+            .and_then(|full| {
+                store::id_for_path(conn, rox_library::cue::LOCAL, full)
+                    .ok()
+                    .flatten()
+            })
             .is_some()
     };
     let key = TrackKey::from_fragment(entry, exists);
-    let full = resolve(key.path.to_str()?);
-    store::queue_meta_for_key(conn, full.to_str()?, key.sub)
+
+    // A local entry resolves against the sheet's own folder. Anything else
+    // carries its source's reference, which no directory joins onto.
+    let path = if key.is_local() {
+        resolve(key.path.to_str()?).to_string_lossy().into_owned()
+    } else {
+        key.path.to_str()?.to_string()
+    };
+
+    store::queue_meta_for_key(conn, &key.source, &path, key.sub)
         .ok()?
         .id
 }
@@ -1154,6 +1179,46 @@ impl Library {
             .unwrap_or_default()
     }
 
+    /// The library's own copy of each song named, answered in the order
+    /// asked. For the surfaces holding a song's two names with no file
+    /// behind them, which is every radio listen: the row that played is
+    /// the station, and what it names is the song, so the file of that
+    /// song is what its cover should come off and what a click should
+    /// play. A capture off the air is exactly this file.
+    ///
+    /// None for a song the library has no local copy of, and for a name
+    /// pair that isn't a song (the empty pair a caller passes for the rows
+    /// it isn't asking about). One projection walk for the whole list and
+    /// one path lookup per hit, so a view's worth of listens costs about
+    /// what a single lookup used to.
+    pub fn local_copies(&self, names: &[(&str, &str)]) -> Vec<Option<LocalCopy>> {
+        let Some(projection) = self.projection() else {
+            return vec![None; names.len()];
+        };
+
+        let rows = projection.find_locals(names);
+        let ids: Vec<i64> = rows
+            .iter()
+            .flatten()
+            .map(|&row| projection.db_id[row as usize])
+            .collect();
+        let paths = self
+            .conn
+            .as_ref()
+            .and_then(|conn| store::paths_by_id(conn, &ids).ok())
+            .unwrap_or_default();
+
+        rows.into_iter()
+            .map(|row| {
+                let track_id = projection.db_id[row? as usize];
+                Some(LocalCopy {
+                    track_id,
+                    path: paths.get(&track_id)?.into(),
+                })
+            })
+            .collect()
+    }
+
     /// Resolve database ids to the subsong keys that name them, in the order
     /// given. The sibling of [`paths_for`](Self::paths_for) for anything that
     /// goes on to play what it resolved: a cue track's key includes its own
@@ -1168,17 +1233,61 @@ impl Library {
         for &id in ids {
             // One query per id rather than one for the batch: a dropped id
             // would slide the paths out from under the subs otherwise.
-            let path = store::paths_for(conn, &[id])
-                .map_err(|e| e.to_string())?
-                .pop();
-            if let Some(path) = path {
+            let row = store::key_for_id(conn, id).map_err(|e| e.to_string())?;
+            if let Some(row) = row {
                 keys.push(TrackKey {
-                    path: PathBuf::from(path),
+                    source: row.source,
+                    path: row.path,
+                    // Off the projection rather than the row just read, the
+                    // way this has always taken it.
                     sub: self.sub_for_id(id),
                 });
             }
         }
         Ok(keys)
+    }
+
+    /// Where each of `ids` plays from, in the order given: a file for a
+    /// local track, a URL with the source's own headers on it for a remote
+    /// one. What the player hands the engine, in place of the bare paths it
+    /// used to send.
+    ///
+    /// The store answers with the url and the live flag and no headers,
+    /// since those are per-session credentials it doesn't hold. They're
+    /// filled in here off the registry the app installs at startup, so the
+    /// engine never has to ask a source anything.
+    pub fn locators_for(&self, ids: &[i64]) -> Result<Vec<Locator>, String> {
+        let Some(conn) = &self.conn else {
+            return Ok(Vec::new());
+        };
+
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            // One id at a time for [`keys_for`](Self::keys_for)'s reason: a
+            // dropped id would slide the headers onto the wrong locator.
+            let Some(mut locator) = store::locators_for(conn, &[id])
+                .map_err(|e| e.to_string())?
+                .pop()
+            else {
+                continue;
+            };
+
+            // Only a remote row costs the second lookup, so a local library
+            // reads exactly what it always did.
+            if let Locator::Remote(remote) = &mut locator {
+                let source = store::key_for_id(conn, id)
+                    .ok()
+                    .flatten()
+                    .map(|key| key.source)
+                    .unwrap_or_else(rox_library::cue::local);
+
+                remote.headers = sources_registry::headers_for(&source);
+            }
+
+            out.push(locator);
+        }
+
+        Ok(out)
     }
 
     /// Which subsong of its file a track id is, off the projection's dense
@@ -1228,7 +1337,7 @@ impl Library {
     /// marking its row. None when the key is not in the library.
     pub fn id_for_key(&self, key: &TrackKey) -> Option<i64> {
         let conn = self.conn.as_ref()?;
-        store::queue_meta_for_key(conn, key.path.to_str()?, key.sub)
+        store::queue_meta_for_key(conn, &key.source, key.path.to_str()?, key.sub)
             .ok()?
             .id
     }
@@ -1236,8 +1345,8 @@ impl Library {
     /// Resolve a key to its track id and tags together, for callers (the
     /// queue) that need both and would otherwise ask twice.
     ///
-    /// Keyed on (path, sub) rather than the path alone, which is the whole
-    /// point: a path-only lookup returns whichever row of a cue image
+    /// Keyed on (source, path, sub) rather than the path alone, which is
+    /// the whole point: a path-only lookup returns whichever row of a cue image
     /// sorts first, so every track of a rip would draw track one's title. The
     /// id comes from the sub-aware store lookup, and the tags come off the
     /// projection row that id points at, which costs no second query. A plain
@@ -1246,7 +1355,9 @@ impl Library {
     pub fn resolve_key(&self, key: &TrackKey) -> Option<(i64, store::TrackMeta)> {
         let conn = self.conn.as_ref()?;
         let path = key.path.to_str()?;
-        let id = store::queue_meta_for_key(conn, path, key.sub).ok()?.id;
+        let id = store::queue_meta_for_key(conn, &key.source, path, key.sub)
+            .ok()?
+            .id;
         if let Some(id) = id
             && let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id))
         {
@@ -1260,7 +1371,11 @@ impl Library {
         // No projection row to read: only a sub 0 key can be resolved from
         // the store, since its lookup can't tell one cue track from another.
         (key.sub == 0)
-            .then(|| store::meta_row_for_path(conn, path).ok().flatten())
+            .then(|| {
+                store::meta_row_for_path(conn, &key.source, path)
+                    .ok()
+                    .flatten()
+            })
             .flatten()
     }
 
@@ -1412,6 +1527,7 @@ impl Library {
                 let view = projection.resolve(row);
                 let path = store::paths_for(conn, &[track_id]).ok()?.pop()?;
                 let key = TrackKey {
+                    source: rox_library::cue::source_id(view.source),
                     path: PathBuf::from(path),
                     sub: view.sub,
                 };
@@ -1818,7 +1934,9 @@ impl Library {
     /// an edit to track five of a rip would be applied to track one's row.
     pub fn apply_edits(&mut self, edits: &[writer::Edit], subs: &[u16], cx: &mut Context<Self>) {
         for (i, edit) in edits.iter().enumerate() {
+            // A writer edit names a file, so what it edits is always local.
             let key = TrackKey {
+                source: rox_library::cue::local(),
                 path: edit.path.clone(),
                 sub: subs.get(i).copied().unwrap_or(0),
             };
@@ -2741,7 +2859,7 @@ mod tests {
         // A correlated rename moves the row and keeps its id, so the moved
         // file is not a fresh insert. The renamed-then-present path re-reads
         // clean since the file is on disk under its new name.
-        let one_id = store::id_for_path(&conn, one.to_str().unwrap())
+        let one_id = store::id_for_path(&conn, rox_library::cue::LOCAL, one.to_str().unwrap())
             .unwrap()
             .unwrap();
         let renamed = dir.join("Album/renamed.mp3");
@@ -2761,12 +2879,12 @@ mod tests {
         assert!(touched.removed.is_empty());
         assert_eq!(s.renamed, 1);
         assert_eq!(
-            store::id_for_path(&conn, renamed.to_str().unwrap()).unwrap(),
+            store::id_for_path(&conn, rox_library::cue::LOCAL, renamed.to_str().unwrap()).unwrap(),
             Some(one_id),
             "a correlated rename keeps the id"
         );
         assert!(
-            store::id_for_path(&conn, one.to_str().unwrap())
+            store::id_for_path(&conn, rox_library::cue::LOCAL, one.to_str().unwrap())
                 .unwrap()
                 .is_none()
         );
@@ -2786,7 +2904,7 @@ mod tests {
         assert_eq!(store::count(&conn).unwrap(), 1);
         assert_eq!(touched.removed.len(), 1);
         assert!(
-            store::id_for_path(&conn, renamed.to_str().unwrap())
+            store::id_for_path(&conn, rox_library::cue::LOCAL, renamed.to_str().unwrap())
                 .unwrap()
                 .is_some()
         );
@@ -2862,10 +2980,12 @@ mod tests {
 
         let keys = [
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 1,
             },
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 3,
             },
@@ -2892,7 +3012,7 @@ mod tests {
         let want: Vec<i64> = keys
             .iter()
             .map(|key| {
-                store::queue_meta_for_key(&conn, key.path.to_str().unwrap(), key.sub)
+                store::queue_meta_for_key(&conn, &key.source, key.path.to_str().unwrap(), key.sub)
                     .unwrap()
                     .id
                     .expect("every fixture key is in the library")
@@ -2907,7 +3027,9 @@ mod tests {
         // all, the way an exported playlist moved beside its music does.
         assert_eq!(
             resolve_m3u_entry(&conn, Path::new("/m/Album"), "disc.flac#2"),
-            store::queue_meta_for_key(&conn, image, 2).unwrap().id,
+            store::queue_meta_for_key(&conn, rox_library::cue::LOCAL, image, 2)
+                .unwrap()
+                .id,
         );
         // An entry the library never scanned has no file to play.
         assert_eq!(
@@ -2942,10 +3064,12 @@ mod tests {
 
         let keys = [
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 2,
             },
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 1,
             },
@@ -2975,7 +3099,7 @@ mod tests {
         let want: Vec<i64> = keys
             .iter()
             .map(|key| {
-                store::queue_meta_for_key(&conn, key.path.to_str().unwrap(), key.sub)
+                store::queue_meta_for_key(&conn, &key.source, key.path.to_str().unwrap(), key.sub)
                     .unwrap()
                     .id
                     .expect("every fixture key is in the library")
@@ -2988,6 +3112,8 @@ mod tests {
     /// A row for a plain file: the fields the fragment round trip reads.
     fn plain_row(path: &str) -> rox_library::TrackRow {
         rox_library::TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -3020,6 +3146,8 @@ mod tests {
     /// and span.
     fn cue_row(path: &str, sub: u16, start_ms: u32, end_ms: Option<u32>) -> rox_library::TrackRow {
         rox_library::TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             sub,
             track_no: sub,
             cue: Some(rox_library::CueSlice {

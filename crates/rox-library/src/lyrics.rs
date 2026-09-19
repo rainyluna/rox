@@ -13,6 +13,13 @@
 //! next automatic lookup, so a save of nothing leaves a marker in the store
 //! and the marker outranks every home on the way back in.
 //!
+//! Not every track is a file. A Subsonic song lives on a server and a
+//! radio station announces its songs in band, so neither has a sidecar to
+//! sit beside or a tag to write into. Both still get words: a [`Subject`]
+//! names what a sheet belongs to, and the one with no file behind it keeps
+//! its sheet in the app's store under whatever identity its source can
+//! promise is stable.
+//!
 //! The parser is deliberately forgiving. A line's leading `[mm:ss.xx]`
 //! groups become timestamps (several on one line repeat the text at each
 //! time), an `[offset:ms]` tag shifts them, and the other id tags
@@ -44,6 +51,79 @@ pub enum Source {
     Store(PathBuf),
 }
 
+/// What a sheet belongs to. A file on disk has three homes to check and an
+/// audio stream to write a tag into; anything else has only the app's own
+/// store, so the whole of [`load`], [`save`] and [`wipe`] narrows to that
+/// one home for it.
+///
+/// The remote arm carries an identity string rather than a key, because
+/// the two kinds of remote track identify themselves differently. A server
+/// song is the same song every time its id comes back, so the id is the
+/// identity. A radio station is one URL playing a different song every
+/// three minutes, so the identity is the song it announced and not the
+/// stream it came down.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Subject {
+    /// A file on disk, at the path it sits at.
+    File(PathBuf),
+    /// A track with no file behind it, under an identity its source
+    /// guarantees is stable. Build these through [`Subject::remote`] and
+    /// [`Subject::song`] so the two namespaces can never collide.
+    Remote(String),
+}
+
+impl Subject {
+    /// A track a server holds, under the fragment its key writes: the
+    /// source name and the id it gave the song.
+    pub fn remote(fragment: &str) -> Subject {
+        Subject::Remote(format!("track:{fragment}"))
+    }
+
+    /// A song known only by what a station said it was. Case and outer
+    /// space are dropped so the same song announced as "Artist - Title"
+    /// and "ARTIST -  Title" lands on one sheet, and None when either half
+    /// is missing: there is nothing to file words under yet.
+    pub fn song(artist: &str, title: &str) -> Option<Subject> {
+        let artist = artist.trim();
+        let title = title.trim();
+        if artist.is_empty() || title.is_empty() {
+            return None;
+        }
+        // Built by hand rather than formatted, so the separator stays a
+        // control character no announced title can carry.
+        let mut id = String::from("song:");
+        id.push_str(&artist.to_lowercase());
+        id.push('\u{1}');
+        id.push_str(&title.to_lowercase());
+
+        Some(Subject::Remote(id))
+    }
+
+    /// The file behind this, for the reads and writes that need one.
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            Subject::File(path) => Some(path),
+            Subject::Remote(_) => None,
+        }
+    }
+
+    /// The bytes the store hashes a sheet's name out of. A file hashes its
+    /// path exactly as it always did, so a store filled before any of this
+    /// existed still answers.
+    fn ident(&self) -> &[u8] {
+        match self {
+            Subject::File(path) => path.as_os_str().as_encoded_bytes(),
+            Subject::Remote(id) => id.as_bytes(),
+        }
+    }
+}
+
+impl From<PathBuf> for Subject {
+    fn from(path: PathBuf) -> Self {
+        Subject::File(path)
+    }
+}
+
 /// One lyric line: its start time in seconds when the source timed it,
 /// None when it did not, and the text.
 #[derive(Clone, Debug)]
@@ -71,26 +151,30 @@ pub struct Lyrics {
 ///
 /// A track marked as having none reads as none whatever the homes hold,
 /// so the mark is one answer and not three to keep in step.
-pub fn load(path: &Path, store_dir: Option<&Path>) -> Option<Lyrics> {
-    if marked_none(path, store_dir) {
+pub fn load(subject: &Subject, store_dir: Option<&Path>) -> Option<Lyrics> {
+    if marked_none(subject, store_dir) {
         return None;
     }
-    for side in sidecar_candidates(path) {
-        if let Ok(text) = fs::read_to_string(&side)
-            && !text.trim().is_empty()
-        {
-            return Some(build(text, Source::Sidecar(side)));
+    if let Some(path) = subject.file() {
+        for side in sidecar_candidates(path) {
+            if let Ok(text) = fs::read_to_string(&side)
+                && !text.trim().is_empty()
+            {
+                return Some(build(text, Source::Sidecar(side)));
+            }
         }
     }
     if let Some(dir) = store_dir {
-        let file = store_file(dir, path);
+        let file = store_file(dir, subject);
         if let Ok(text) = fs::read_to_string(&file)
             && !text.trim().is_empty()
         {
             return Some(build(text, Source::Store(file)));
         }
     }
-    Some(build(tag_lyrics(path)?, Source::Tag))
+    // The store is the whole of a remote track's world; there is no file
+    // under it to carry a tag.
+    Some(build(tag_lyrics(subject.file()?)?, Source::Tag))
 }
 
 /// The words the embedded tag holds, or None when the frame is missing
@@ -116,15 +200,19 @@ pub(crate) fn tag_lyrics(path: &Path) -> Option<String> {
 /// track whose sheet was a sidecar never rewrites the audio file. The mark
 /// is left to the caller: this removes, [`set_marked_none`] makes it stay
 /// removed.
-pub fn wipe(path: &Path, store_dir: Option<&Path>) -> Result<(), String> {
-    for side in sidecar_candidates(path) {
-        remove_if_present(&side).map_err(|e| format!("remove lyrics file: {e}"))?;
+pub fn wipe(subject: &Subject, store_dir: Option<&Path>) -> Result<(), String> {
+    if let Some(path) = subject.file() {
+        for side in sidecar_candidates(path) {
+            remove_if_present(&side).map_err(|e| format!("remove lyrics file: {e}"))?;
+        }
     }
     if let Some(dir) = store_dir {
-        remove_if_present(&store_file(dir, path))
+        remove_if_present(&store_file(dir, subject))
             .map_err(|e| format!("remove lyrics file: {e}"))?;
     }
-    if tag_lyrics(path).is_some() {
+    if let Some(path) = subject.file()
+        && tag_lyrics(path).is_some()
+    {
         writer::commit(
             path,
             &[Change {
@@ -154,13 +242,16 @@ fn remove_if_present(file: &Path) -> Result<(), std::io::Error> {
 /// track as having no lyrics under `store_dir`, and saving words again
 /// takes the mark back off.
 pub fn save(
-    path: &Path,
+    subject: &Subject,
     target: &Source,
     text: &str,
     store_dir: Option<&Path>,
 ) -> Result<(), String> {
     match target {
         Source::Tag => {
+            let path = subject
+                .file()
+                .ok_or_else(|| "no file to write lyrics into".to_string())?;
             let value = (!text.trim().is_empty()).then(|| text.to_string());
             writer::commit(
                 path,
@@ -176,22 +267,22 @@ pub fn save(
     // Only once the write succeeded, so a failed save leaves the mark where
     // it was rather than claiming a clear that never happened.
     match store_dir {
-        Some(dir) => set_marked_none(path, dir, text.trim().is_empty()),
+        Some(dir) => set_marked_none(subject, dir, text.trim().is_empty()),
         None => Ok(()),
     }
 }
 
 /// Whether the track is marked as having no lyrics, the state a cleared
 /// sheet leaves behind so nothing refills it.
-pub fn marked_none(path: &Path, store_dir: Option<&Path>) -> bool {
-    store_dir.is_some_and(|dir| none_marker(dir, path).exists())
+pub fn marked_none(subject: &Subject, store_dir: Option<&Path>) -> bool {
+    store_dir.is_some_and(|dir| none_marker(dir, subject).exists())
 }
 
 /// Set or lift the "no lyrics" mark. The mark is an empty file beside the
 /// store's sheets, so it costs a `stat` to read and persists across
 /// restarts without a column of its own.
-pub fn set_marked_none(path: &Path, store_dir: &Path, on: bool) -> Result<(), String> {
-    let file = none_marker(store_dir, path);
+pub fn set_marked_none(subject: &Subject, store_dir: &Path, on: bool) -> Result<(), String> {
+    let file = none_marker(store_dir, subject);
     if !on {
         return remove_if_present(&file).map_err(|e| format!("clear lyrics mark: {e}"));
     }
@@ -218,22 +309,22 @@ fn save_file(file: &Path, text: &str, make_dir: bool) -> Result<(), String> {
 /// The store file for a track: one flat folder, the name a stable hash
 /// of the whole track path, so no library folder shape gets mirrored
 /// and a track maps to the same file every time.
-pub fn store_file(dir: &Path, path: &Path) -> PathBuf {
-    store_entry(dir, path, "lrc")
+pub fn store_file(dir: &Path, subject: &Subject) -> PathBuf {
+    store_entry(dir, subject, "lrc")
 }
 
 /// The "no lyrics" mark for a track, the store sheet's name under another
 /// extension so both stay together and neither can be mistaken for the
 /// other.
-pub fn none_marker(dir: &Path, path: &Path) -> PathBuf {
-    store_entry(dir, path, "none")
+pub fn none_marker(dir: &Path, subject: &Subject) -> PathBuf {
+    store_entry(dir, subject, "none")
 }
 
-/// One store entry for a track under `ext`. FNV-1a over the whole track
-/// path, plenty of spread for library-sized sets.
-fn store_entry(dir: &Path, path: &Path, ext: &str) -> PathBuf {
+/// One store entry for a track under `ext`. FNV-1a over the subject's
+/// identity, plenty of spread for library-sized sets.
+fn store_entry(dir: &Path, subject: &Subject, ext: &str) -> PathBuf {
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in path.as_os_str().as_encoded_bytes() {
+    for byte in subject.ident() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -644,22 +735,22 @@ mod tests {
     fn clearing_a_store_sheet_marks_the_track_and_writing_lifts_it() {
         let dir = std::env::temp_dir().join(format!("rox-lyrics-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let track = Path::new("/music/instrumental.flac");
-        let target = Source::Store(store_file(&dir, track));
+        let track = Subject::File(PathBuf::from("/music/instrumental.flac"));
+        let target = Source::Store(store_file(&dir, &track));
 
-        save(track, &target, "[00:01.00]words", Some(&dir)).unwrap();
-        assert!(!marked_none(track, Some(&dir)));
-        assert!(load(track, Some(&dir)).is_some());
+        save(&track, &target, "[00:01.00]words", Some(&dir)).unwrap();
+        assert!(!marked_none(&track, Some(&dir)));
+        assert!(load(&track, Some(&dir)).is_some());
 
         // Clearing says the track has none, and it stays said.
-        save(track, &target, "", Some(&dir)).unwrap();
-        assert!(marked_none(track, Some(&dir)));
-        assert!(load(track, Some(&dir)).is_none());
+        save(&track, &target, "", Some(&dir)).unwrap();
+        assert!(marked_none(&track, Some(&dir)));
+        assert!(load(&track, Some(&dir)).is_none());
 
         // Words again take the mark back off.
-        save(track, &target, "words", Some(&dir)).unwrap();
-        assert!(!marked_none(track, Some(&dir)));
-        assert!(load(track, Some(&dir)).is_some());
+        save(&track, &target, "words", Some(&dir)).unwrap();
+        assert!(!marked_none(&track, Some(&dir)));
+        assert!(load(&track, Some(&dir)).is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -682,9 +773,10 @@ mod tests {
         )
         .unwrap();
         fs::write(track.with_extension("lrc"), "[00:01.00]sidecar words").unwrap();
+        let subject = Subject::File(track.clone());
         save(
-            &track,
-            &Source::Store(store_file(&store, &track)),
+            &subject,
+            &Source::Store(store_file(&store, &subject)),
             "stored",
             Some(&store),
         )
@@ -692,17 +784,17 @@ mod tests {
 
         // The sidecar is the one that loads, so it's all a clear of the
         // loaded source would have taken.
-        let loaded = load(&track, Some(&store)).unwrap();
+        let loaded = load(&subject, Some(&store)).unwrap();
         assert!(matches!(loaded.source, Source::Sidecar(_)));
 
-        wipe(&track, Some(&store)).unwrap();
+        wipe(&subject, Some(&store)).unwrap();
         assert!(!track.with_extension("lrc").exists());
-        assert!(!store_file(&store, &track).exists());
+        assert!(!store_file(&store, &subject).exists());
         assert!(tag_lyrics(&track).is_none());
-        assert!(load(&track, Some(&store)).is_none());
+        assert!(load(&subject, Some(&store)).is_none());
 
         // Nothing left to take, and the audio file is not rewritten for it.
-        wipe(&track, Some(&store)).unwrap();
+        wipe(&subject, Some(&store)).unwrap();
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -714,7 +806,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(&side, "[00:01.00]words").unwrap();
-        let track = dir.join("track.flac");
+        let track = Subject::File(dir.join("track.flac"));
 
         assert!(load(&track, Some(&dir)).is_some());
         set_marked_none(&track, &dir, true).unwrap();
@@ -728,12 +820,41 @@ mod tests {
     #[test]
     fn store_files_are_stable_and_distinct() {
         let dir = Path::new("/data/lyrics");
-        let a = store_file(dir, Path::new("/music/a.mp3"));
-        let b = store_file(dir, Path::new("/music/b.mp3"));
-        assert_eq!(a, store_file(dir, Path::new("/music/a.mp3")));
+        let file = |p: &str| Subject::File(PathBuf::from(p));
+        let a = store_file(dir, &file("/music/a.mp3"));
+        let b = store_file(dir, &file("/music/b.mp3"));
+        assert_eq!(a, store_file(dir, &file("/music/a.mp3")));
         assert_ne!(a, b);
         assert!(a.starts_with(dir));
         assert_eq!(a.extension().and_then(|e| e.to_str()), Some("lrc"));
+    }
+
+    /// The whole point of a song subject: the same song announced by two
+    /// stations, in whatever case and spacing each of them uses, lands on
+    /// one sheet. A missing half is no song at all, and a server track
+    /// files under its own id rather than either.
+    #[test]
+    fn a_stations_song_files_under_the_song() {
+        let dir = Path::new("/data/lyrics");
+        let one = Subject::song("Boards of Canada", "Roygbiv").unwrap();
+        assert_eq!(
+            Subject::song("  BOARDS OF CANADA ", "roygbiv  "),
+            Some(one.clone())
+        );
+        assert_ne!(
+            Subject::song("Boards of Canada", "Olson"),
+            Some(one.clone())
+        );
+        assert_eq!(Subject::song("", "Roygbiv"), None);
+        assert_eq!(Subject::song("Boards of Canada", " "), None);
+
+        // A song has no file to write a tag or a sidecar into, and its
+        // store entry is its own rather than any file's.
+        assert!(one.file().is_none());
+        assert_ne!(
+            store_file(dir, &one),
+            store_file(dir, &Subject::remote("subsonic-1|abc"))
+        );
     }
 
     #[test]

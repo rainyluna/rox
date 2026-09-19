@@ -33,18 +33,19 @@ use rox_panels::lyrics::StampLine;
 
 use crate::workspace::{
     AbClear, AbRepeat, AbortScan, AddBookmark, AddNamedBookmark, AnalyzeTempo, BuildAcoustic,
-    ClearQueue, ClosePanelAction, CloseWindow, CycleLoop, CycleReplayGainMode, CycleShuffleMode,
-    DecreaseFontSize, FillSortNames, FindDuplicates, FlattenEq, FocusSearch, ImportWorkspace,
-    IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextBookmark, NextTrack,
-    OpenAbout, OpenChat, OpenConsole, OpenDiscussions, OpenEqualizer, OpenGoTo, OpenHealth,
-    OpenPowerSearch, OpenPresetPicker, OpenQuickPlay, OpenSettings, OpenSignals, OpenStats,
-    OpenTasks, OpenWelcome, PlayRandom, PlaySimilar, PrevBookmark, PreviousTrack, Quit,
-    ReportIssue, RescanLibrary, ResetFontSize, RomanizeLibrary, SaveLayout, SaveWorkspace,
-    SleepOff, StepBackward, StepForward, StopPlayback, TagGenres, ToggleArtTheming,
-    ToggleContinuation, ToggleCrossfade, ToggleCrossfadeAlbums, ToggleDecorations,
-    ToggleDesignMode, ToggleEq, ToggleExclusiveOutput, ToggleFavourite, ToggleMenubar, ToggleMini,
-    ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleReadings, ToggleResizeLock, ToggleSeams,
-    ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
+    ClearQueue, ClosePanelAction, CloseWindow, Cue, CueNext, CuePrev, CycleLoop,
+    CycleReplayGainMode, CycleShuffleMode, DecreaseFontSize, FillSortNames, FindDuplicates,
+    FlattenEq, FocusSearch, ImportWorkspace, IncreaseFontSize, MeasureReplayGain, NewEmptyWindow,
+    NewWindow, NextBookmark, NextTrack, OpenAbout, OpenChat, OpenConsole, OpenDiscussions,
+    OpenEqualizer, OpenGoTo, OpenHealth, OpenPowerSearch, OpenPresetPicker, OpenQuickPlay,
+    OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome, PlayRandom, PlaySimilar,
+    PrevBookmark, PreviousTrack, Quit, ReportIssue, RescanLibrary, ResetFontSize, RomanizeLibrary,
+    SaveLayout, SaveWorkspace, SleepOff, StepBackward, StepForward, StopPlayback, TagGenres,
+    ToggleArtTheming, ToggleContinuation, ToggleCrossfade, ToggleCrossfadeAlbums,
+    ToggleDecorations, ToggleDesignMode, ToggleEq, ToggleExclusiveOutput, ToggleFavourite,
+    ToggleMenubar, ToggleMini, ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleReadings,
+    ToggleResizeLock, ToggleSeams, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown,
+    VolumeUp,
 };
 
 /// Bindings match key contexts along the focus path, so this scope holds
@@ -324,6 +325,7 @@ mod defaults {
     pub const AB_REPEAT: &[&str] = &["l", "cmd-shift-l"];
     pub const BOOKMARK: &[&str] = &["m"];
     pub const BOOKMARK_NAMED: &[&str] = &["shift-m"];
+    pub const CUE: &[&str] = &["n"];
     pub const PREV_BOOKMARK: &[&str] = &["ctrl-shift-left"];
     pub const NEXT_BOOKMARK: &[&str] = &["ctrl-shift-right"];
     pub const PLAY_RANDOM: &[&str] = &["cmd-r"];
@@ -358,6 +360,7 @@ mod defaults {
     pub const AB_REPEAT: &[&str] = &["l", "ctrl-shift-l"];
     pub const BOOKMARK: &[&str] = &["m"];
     pub const BOOKMARK_NAMED: &[&str] = &["shift-m"];
+    pub const CUE: &[&str] = &["n"];
     pub const PREV_BOOKMARK: &[&str] = &["ctrl-shift-left"];
     pub const NEXT_BOOKMARK: &[&str] = &["ctrl-shift-right"];
     pub const PLAY_RANDOM: &[&str] = &["ctrl-r"];
@@ -509,6 +512,40 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             defaults::NEXT_BOOKMARK,
             NextBookmark,
             rox_i18n::t_static("keymap-next-bookmark.description")
+        ),
+        // Bare n beside m: the throwaway mark next to the kept one, on the
+        // same playback scope so a search box keeps its n. There is no
+        // shifted twin, because a cue has nothing to name.
+        command!(
+            "cue",
+            rox_i18n::t_static("keymap-cue"),
+            Group::Playback,
+            PLAYBACK,
+            defaults::CUE,
+            Cue,
+            rox_i18n::t_static("keymap-cue.description")
+        ),
+        // Stepping cues ships unbound. The bookmark pair already holds the
+        // arrows with both modifiers, and there is no second pair that
+        // reads as obviously as those do; the keymap page is one click
+        // away for anyone who wants them.
+        command!(
+            "cue_prev",
+            rox_i18n::t_static("keymap-cue-prev"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            CuePrev,
+            rox_i18n::t_static("keymap-cue-prev.description")
+        ),
+        command!(
+            "cue_next",
+            rox_i18n::t_static("keymap-cue-next"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            CueNext,
+            rox_i18n::t_static("keymap-cue-next.description")
         ),
         command!(
             "next_track",

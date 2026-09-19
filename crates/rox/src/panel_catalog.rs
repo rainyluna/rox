@@ -49,6 +49,7 @@ use rox_panels::shader::{ShaderConfig, ShaderPanel};
 use rox_panels::spacer::{SpacerConfig, SpacerPanel};
 use rox_panels::spectrogram::{SpectrogramConfig, SpectrogramPanel};
 use rox_panels::spectrum::{SpectrumConfig, SpectrumPanel};
+use rox_panels::stations::{StationsConfig, StationsPanel};
 use rox_panels::stats_widget::{StatsWidgetConfig, StatsWidgetPanel};
 use rox_panels::status::{StatusConfig, StatusPanel};
 use rox_panels::transport::{
@@ -234,6 +235,17 @@ pub(crate) static CATALOGUE: PanelSection =
                 build: |state, _, _, cx| {
                     Arc::new(cx.new(|cx| {
                         BookmarksPanel::new(state.clone(), BookmarksConfig::default(), cx)
+                    }))
+                },
+            },
+            PanelDef {
+                label: "panel-catalog-stations",
+                name: "stations",
+                icon: icons::RADIO,
+                placement: PanelPlacement::Center,
+                build: |state, _, window, cx| {
+                    Arc::new(cx.new(|cx| {
+                        StationsPanel::new(state.clone(), StationsConfig::default(), window, cx)
                     }))
                 },
             },

@@ -49,10 +49,12 @@ Contract to the UI:
 
 Responsibility: hold the catalog, keep it fast, keep it current. SQLite is the durable
 source of truth and the write path. A full in-memory projection is the read path that
-makes browse, sort, and filter instant. Track identity is source-qualified, (source, id)
-with local files as the first source, so source extensions extend the catalog
-instead of forcing a migration (see
-[source extensibility](01-overview.md#source-extensibility)).
+makes browse, sort, and filter instant. Track identity is source-qualified: the key is
+(source, path, sub) and the id is the rowid behind it, with local files as the first
+source, so source extensions extend the catalog instead of forcing a migration (see
+[source extensibility](01-overview.md#source-extensibility) and
+[ADR 29](decisions/29-adr-source-contract.md)). The projection carries the source column
+too, so a view can filter on it without going back to SQLite.
 
 Boundary: browsing never touches SQLite. The UI reads the shared in-memory projection
 and derives its views from it; paths stay in the store, so playing a row costs one

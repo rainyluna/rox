@@ -1579,6 +1579,8 @@ mod tests {
 
     fn track(path: &str, artist: &str, year: u16) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),

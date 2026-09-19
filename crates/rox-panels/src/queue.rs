@@ -21,7 +21,7 @@ use gpui_component::scroll::Scrollbar;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
-use rox_library::cue::TrackKey;
+use rox_library::cue::{Origin, TrackKey};
 use rox_library::projection::{FilterSet, Filterable, TrackFields, parse_query};
 use rox_library::store::TrackMeta;
 
@@ -175,6 +175,10 @@ struct TrackRow {
     entry_id: u64,
     track_id: Option<i64>,
     pos: u32,
+    /// Where the entry came from, for the mark the row wears in place of
+    /// its number. Off the key rather than the path, which for a remote
+    /// track is the source's own id and says nothing about the source.
+    origin: Origin,
     title: String,
     artist: String,
     album: String,
@@ -211,6 +215,34 @@ impl Filterable for TrackRow {
             path: self.path.to_str().unwrap_or_default(),
         }
     }
+}
+
+/// The mark a row wears where its number would go: a station or a server
+/// for a track that didn't come off disk, nothing for one that did, which
+/// is most of them.
+fn origin_glyph(origin: Origin) -> Option<&'static str> {
+    match origin {
+        Origin::Local => None,
+
+        Origin::Radio => Some(icons::RADIO),
+
+        // The closest thing the icon set has to a server, and the same
+        // glyph the settings sidebar uses for the library itself.
+        Origin::Subsonic => Some(icons::DATABASE),
+    }
+}
+
+/// The number column's slot with a glyph in it instead of a number, the
+/// width and alignment the playing strip has always given its play mark so
+/// every title down the list stays on one edge.
+fn mark_slot(path: &'static str, color: gpui::Rgba) -> Div {
+    div()
+        .flex_none()
+        .w(px(22.))
+        .flex()
+        .justify_end()
+        .items_center()
+        .child(svg().path(path).size(px(12.)).text_color(color))
 }
 
 /// A queue entry's grouping inputs, borrowed for the album run aggregate. A
@@ -329,6 +361,10 @@ pub struct QueuePanel {
     /// queue when an edit happens or a track advances (which shrinks the queue).
     rev: Option<u64>,
     playing_key: Option<TrackKey>,
+    /// The station-title revision the rows were built at. A stream turns
+    /// its song over without the key or the queue moving, so without this
+    /// the strip would hold the station's own name all evening.
+    live_rev: Option<u64>,
     /// The selected entries, by entry id, so a rebuild or a regroup keeps the
     /// highlight on the same entries wherever they end up. Shift extends, cmd
     /// (ctrl elsewhere) toggles, Ctrl+A takes the lot, the library's rules.
@@ -426,6 +462,7 @@ impl QueuePanel {
             playing: None,
             rev: None,
             playing_key: None,
+            live_rev: None,
             selected: HashSet::new(),
             drag_gen: 0,
             drag_set: None,
@@ -486,11 +523,13 @@ impl QueuePanel {
     /// advance drops a played item off the front.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let rev = self.state.player.read(cx).queue_rev();
+        let live_rev = self.state.player.read(cx).title_rev();
         let playing_key = self.state.player.read(cx).now_playing().map(|now| now.key);
-        if rev == self.rev && playing_key == self.playing_key {
+        if rev == self.rev && live_rev == self.live_rev && playing_key == self.playing_key {
             return;
         }
         self.rev = rev;
+        self.live_rev = live_rev;
         self.playing_key = playing_key;
         let queued = self.state.player.read(cx).queued();
         // Every entry's key, through the pool mirror: the engine's own
@@ -507,10 +546,15 @@ impl QueuePanel {
         // entry, which was four round trips a row on every rebuild.
         let resolved: Vec<Option<(i64, TrackMeta)>> =
             keys.iter().map(|key| library.resolve_key(key)).collect();
+        // The strip's tags with a station's current song over them: the
+        // row names the station and the song under it only ever arrives in
+        // band, so the strip would otherwise read the station's name for
+        // however long it played.
         let playing_resolved: Option<(i64, TrackMeta)> = self
             .playing_key
             .as_ref()
-            .and_then(|key| library.resolve_key(key));
+            .and_then(|key| library.resolve_key(key))
+            .and_then(|(id, meta)| Some((id, self.state.player.read(cx).live_over(Some(meta))?)));
         // Total play counts for the queue's tracks and the playing one, one
         // projection pass, for the plays column.
         let plays = {
@@ -607,6 +651,7 @@ impl QueuePanel {
             .enumerate()
             .map(|(i, ((entry, key), resolved))| {
                 let track_id = resolved.as_ref().map(|(id, _)| *id);
+                let origin = key.origin();
                 let pos = (i + 1) as u32;
                 let count = track_id.and_then(|id| plays.get(&id).copied()).unwrap_or(0);
                 let sort = track_id
@@ -617,6 +662,7 @@ impl QueuePanel {
                         entry_id: entry.id,
                         track_id,
                         pos,
+                        origin,
                         title: m.title,
                         artist: m.artist,
                         album: m.album,
@@ -643,6 +689,7 @@ impl QueuePanel {
                             entry_id: entry.id,
                             track_id,
                             pos,
+                            origin,
                             title: r.title.clone(),
                             artist: r.artist.clone(),
                             album: r.album.clone(),
@@ -665,6 +712,7 @@ impl QueuePanel {
                             entry_id: entry.id,
                             track_id,
                             pos,
+                            origin,
                             title: file_label(&key.path),
                             artist: String::new(),
                             album: String::new(),
@@ -1292,11 +1340,19 @@ impl QueuePanel {
             plays: t.plays,
             cover,
         };
+        // The source mark stands in for the number on a row that didn't
+        // come off disk. The number is a position in a list you can already
+        // count, where the source is the thing you can't tell by looking.
+        let mark = origin_glyph(t.origin);
         for col in columns() {
             if !self.column_shown(col.key) {
                 continue;
             }
             if !has_track && (col.key == "rating" || col.key == "favourite") {
+                continue;
+            }
+            if let Some(path) = mark.filter(|_| col.key == "number") {
+                row = row.child(mark_slot(path, palette::text_muted()));
                 continue;
             }
             if let Some(c) = track_columns::cell(col.key, &cell, &self.state, ROW_H, false) {
@@ -1709,18 +1765,7 @@ impl QueuePanel {
                 let c = if col.key == "number" {
                     // The play icon takes the number's slot, right-aligned in
                     // the same width so the title lines up with the rows'.
-                    div()
-                        .flex_none()
-                        .w(px(22.))
-                        .flex()
-                        .justify_end()
-                        .items_center()
-                        .child(
-                            svg()
-                                .path(icons::PLAY)
-                                .size(px(12.))
-                                .text_color(palette::accent()),
-                        )
+                    mark_slot(icons::PLAY, palette::accent())
                 } else {
                     match track_columns::cell(col.key, &cell, &self.state, ROW_H, false) {
                         Some(c) => c,

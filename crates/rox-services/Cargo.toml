@@ -42,6 +42,9 @@ log = "0.4"
 # to the IPC loop off the main thread.
 discord-rich-presence = "1.x"
 async-channel = "2"
+# Stamps a capture with the day it landed, which its name pattern can ask
+# for. Already in the tree through rox-core, same 0.4 line.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Percent-encodes the art URL the presence hands Discord, so spaces and
 # unicode survive. Already in the tree, same 2.x line.
 url = "2"

@@ -43,7 +43,7 @@ use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, Side, Sizable, Size};
 use rox_dock::{Panel, PanelEvent, TabPanel};
-use rox_library::cue::TrackKey;
+use rox_library::cue::{Origin, TrackKey};
 use rox_library::listens::TrackSummary;
 use rox_library::projection::FilterField;
 use rox_library::writer::{self, Change, Field};
@@ -772,6 +772,11 @@ pub struct MetadataPanel {
     /// The cached source resolve, so the pump's per-frame notifies never
     /// turn into selection lookups.
     resolved: ResolvedTrack,
+    /// The Source row's text and the source string it was worked out for.
+    /// A server's name lives in the settings file, which is a disk read,
+    /// so it happens when the shown track changes source rather than per
+    /// frame.
+    source_label: Option<(String, SharedString)>,
     focus: FocusHandle,
     /// The cover opacity slider's scrub and readout-edit state.
     cover_scrub: ScrubState,
@@ -849,6 +854,7 @@ impl MetadataPanel {
             release_generation: 0,
             art: panel::TrackedImage::default(),
             resolved: ResolvedTrack::default(),
+            source_label: None,
             focus: cx.focus_handle().tab_stop(true),
             cover_scrub: ScrubState::default(),
             value_edit: panel::ValueEdit::default(),
@@ -2107,8 +2113,11 @@ fn read_facts(path: &Path, track_id: i64, model: Option<&str>) -> Facts {
         }
         _ => None,
     };
-    let lyrics = rox_library::lyrics::load(path, Some(&rox_core::settings::lyrics_dir()))
-        .map(|lyrics| lyrics.synced);
+    let lyrics = rox_library::lyrics::load(
+        &rox_library::lyrics::Subject::File(path.to_path_buf()),
+        Some(&rox_core::settings::lyrics_dir()),
+    )
+    .map(|lyrics| lyrics.synced);
     let similar = match model {
         Some(model) if track_id > 0 => similar_songs(track_id, model),
         _ => Vec::new(),
@@ -2528,6 +2537,60 @@ impl MetadataPanel {
             )
     }
 
+    /// What the Source row says for a remote track: the one word for a
+    /// station, the server's own address for a Subsonic row, since the
+    /// source string it's filed under is a digest nobody would recognize.
+    /// Held against that source string, because the address comes out of
+    /// the settings file and the sheet redraws on the pump.
+    fn source_label(&mut self, key: &TrackKey) -> SharedString {
+        let source = key.source.to_string();
+        if let Some((held, label)) = &self.source_label
+            && *held == source
+        {
+            return label.clone();
+        }
+
+        let label: SharedString = match key.origin() {
+            Origin::Radio => rox_i18n::t!("metadata-source-radio"),
+
+            // The host alone: the scheme and the path under it are the
+            // machine's business, and the row has one line to say where
+            // this came from.
+            Origin::Subsonic => {
+                let url = rox_core::settings::Settings::load().accounts.subsonic.url;
+                let host = url
+                    .trim()
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                match host.is_empty() {
+                    true => rox_i18n::t!("metadata-source-subsonic"),
+                    false => SharedString::from(host),
+                }
+            }
+
+            Origin::Local => SharedString::from(source.clone()),
+        };
+        self.source_label = Some((source, label.clone()));
+        label
+    }
+
+    /// What the playing station says about itself, for the row the station
+    /// is. None for every other row: the headers are read at the connect
+    /// and nothing stores them, so a station that isn't playing has
+    /// nothing anybody here can show.
+    fn station_info(&self, key: &TrackKey, cx: &App) -> Option<rox_playback::StationInfo> {
+        let player = self.state.player.read(cx);
+        player
+            .now_playing()
+            .filter(|now| now.live && now.key == *key)?;
+
+        player.station_info()
+    }
+
     /// The sheet under the toolbar: the display face, or the edit face
     /// while an edit is open.
     fn sheet_body(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2712,10 +2775,16 @@ impl MetadataPanel {
         // clickable. A global row is the exception, see above.
         let registry = self::fields();
         let mut fields: Vec<FieldRow> = Vec::new();
+        // A remote row was never scanned off a disk, so the date would be
+        // whenever the sync wrote it, which says nothing about the track.
+        let remote = !key.is_local();
         for shown in &self.config.fields {
             let Some(col) = registry.iter().find(|c| c.key == shown.as_str()) else {
                 continue;
             };
+            if remote && col.key == "added" {
+                continue;
+            }
             let value: Option<Value> = match col.key {
                 "lastfm_listeners" => global(&|s| {
                     (s.listeners > 0).then(|| rox_i18n::format::format_int(s.listeners as i64))
@@ -2984,6 +3053,41 @@ impl MetadataPanel {
                 });
             }
         }
+        // Where a remote track is coming from, ahead of its tags. Outside
+        // the field registry on purpose: these aren't tags, they only
+        // exist for a row that isn't a file, and a sheet full of switched
+        // off tag rows should still say what it's describing.
+        if remote {
+            let mut head: Vec<FieldRow> = vec![FieldRow {
+                label: rox_i18n::t!("metadata-field-source"),
+                value: Value::Text(self.source_label(&key).to_string()),
+                reading: String::new(),
+                search: None,
+            }];
+            // The station's own words about itself, which only exist while
+            // it's the thing playing: they come off the stream's headers
+            // and nothing writes them down.
+            if let Some(info) = self.station_info(&key, cx) {
+                for (label, value) in [
+                    (rox_i18n::t!("metadata-field-station"), info.name),
+                    (rox_i18n::t!("metadata-field-homepage"), info.homepage),
+                ] {
+                    let value = value.trim().to_string();
+                    if value.is_empty() {
+                        continue;
+                    }
+                    head.push(FieldRow {
+                        label,
+                        value: Value::Text(value),
+                        reading: String::new(),
+                        search: None,
+                    });
+                }
+            }
+            head.append(&mut fields);
+            fields = head;
+        }
+
         let artist = details
             .as_ref()
             .map(|d| d.artist.clone())

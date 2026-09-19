@@ -195,6 +195,7 @@ settings-language-system = (Lingua di sistema)
 settings-language-search = Cerca una lingua
 picker-no-matches = Nessun risultato
 settings-search-no-matches = Nessun risultato per "{ $text }"
+settings-search-scope = Cerca solo nella pagina aperta
 
 ## Embed dialog
 bookmark-new-title = Nuovo segnalibro
@@ -226,6 +227,10 @@ bookmark-menu-remove = Rimuovi
 bookmark-menu-remove-many = Rimuovi { $count } segnalibri
 bookmarks-title = Segnalibri
 bookmarks-empty = Nessun segnalibro ancora. Premi M mentre suona una traccia per metterne uno, o Maiusc+M per dargli un nome.
+cue-menu-insert = Inserisci punto qui
+cue-menu-bookmark = Aggiungi segnalibro qui
+cue-menu-remove = Rimuovi punto
+position-bound-streaming = Non disponibile durante lo streaming
 bake-window-title = rox - Incorpora i metadati salvati
 bake-title = Incorpora i metadati salvati
 bake-intro = Scrive ciò che rox ha già nei file stessi, così anche un altro lettore lo legge. Niente viene ricalcolato.
@@ -616,6 +621,35 @@ library-circular-portraits = Ritratti circolari
 library-genre-face = Immagine del genere
     .description = Raggruppato per genere, cosa mostra la tessera: le copertine, le copertine velate nel colore del genere, o una scheda a tinta unita sotto la sua geometria
 
+## Stations panel
+
+stations-title = Stazioni
+stations-play = Riproduci
+stations-remove = Rimuovi
+stations-find = Trova stazioni...
+stations-manage = Gestisci stazioni...
+stations-import = Importa stazioni...
+stations-import-empty = Quel file non contiene URL di stream
+stations-not-a-stream = Le stazioni si ascoltano via http o https; quello non è un URL di stream
+stations-empty-title = Nessuna stazione ancora
+stations-empty = Trovane una nella directory, oppure tieni la tua lista nelle impostazioni.
+stations-on-air = In onda
+stations-clocks = Tempo su questo brano e su questa stazione
+stations-homepage = Apri il sito
+
+## Station directory
+
+directory-window-title = Directory delle stazioni
+directory-placeholder = Trova stazioni su radio-browser.info
+directory-search = Cerca nella directory
+directory-add = Aggiungi
+directory-add-play = Aggiungi e riproduci
+directory-added = Già tra le tue stazioni
+directory-searching = Ricerca su radio-browser.info...
+directory-none = Niente su radio-browser.info corrisponde a "{ $text }"
+directory-failed = radio-browser.info non ha risposto: { $reason }
+directory-bitrate = { $kbps } kbps
+
 ## Album grid panel
 panel-title-album-grid = Griglia album
 grid-menu-scroll = Scorrimento
@@ -670,6 +704,7 @@ settings-page-ml-models = Modelli ML
 settings-page-playback = Riproduzione
 settings-page-providers = Provider
 settings-page-shader = Shader
+settings-page-sources = Sorgenti
 settings-page-storage = Archiviazione
 settings-page-workspace = Spazio di lavoro
 
@@ -931,6 +966,28 @@ settings-integrations-section-lastfm = Last.fm
 settings-integrations-section-librefm = Libre.fm
 settings-integrations-section-listenbrainz = ListenBrainz
 settings-integrations-section-scrobbling = Scrobbling
+settings-integrations-section-subsonic = Subsonic
+settings-integrations-subsonic-connect = Connetti
+settings-integrations-subsonic-credentials = Accesso
+    .description = L'account sul server; la password resta in accounts.json, mai in settings.json
+settings-integrations-subsonic-enable = Usa un server Subsonic
+    .description = Legge una libreria da un server Subsonic o OpenSubsonic e riproduce da lì
+settings-integrations-subsonic-password-placeholder = Password
+settings-integrations-subsonic-server = Server
+    .description = L'indirizzo del server con http:// o https://, e senza /rest alla fine
+settings-integrations-subsonic-status-failed = Server irraggiungibile: { $error }
+settings-integrations-subsonic-status-ok = Connesso a { $server }
+settings-integrations-subsonic-sync-count = { $n ->
+    [one] { $n } traccia, ultima sincronizzazione il { $date }
+   *[other] { $n } tracce, ultima sincronizzazione il { $date }
+}
+settings-integrations-subsonic-sync-failed = Sincronizzazione fallita: { $error }
+settings-integrations-subsonic-sync-never = Mai sincronizzato
+settings-integrations-subsonic-sync-now = Sincronizza ora
+    .description = Chiede al server cosa ha e allinea la libreria; le tracce che non elenca più vengono tolte
+settings-integrations-subsonic-syncing = Sincronizzazione dell'album { $done } di { $total }
+settings-integrations-subsonic-url-placeholder = https://musica.example.com
+settings-integrations-subsonic-user-placeholder = Nome utente
 
 ## Settings: keymap
 settings-keymap-clash = { $chord } è anche { $other }; solo una delle due scatterà
@@ -1045,6 +1102,23 @@ settings-playback-continuation-weighted = Ponderato
 settings-playback-keep-playing = Continua a suonare
     .description = Cosa suona quando la coda finisce. Qualunque cosa scelga viene accodata alla timeline come contesto normale, così resta visibile e rimovibile, non uno stato nascosto. Con l'ordine qui sopra su Simili continua a trovare tracce che suonano come quella in riproduzione, qualunque di queste sia scelta
     .keywords = continua riempi automatico coda
+settings-playback-live-buffer = Buffer della diretta
+    .description = Quanto indietro si può riavvolgere una stazione. La connessione resta aperta durante una pausa e continua a riempire il buffer, così alla ripresa riparti da dove ti sei fermato invece che dalla diretta. Dodici ore sono l'infinito pratico: niente che tu lasci acceso in una volta sola arriva a riempirle.
+settings-playback-live-buffer-memory = Circa { $low } a 128 kbps, { $high } a 320 kbps.
+settings-playback-live-buffer-playing = Stazione in riproduzione: circa { $size }.
+settings-playback-capture-album = Album delle registrazioni
+    .description = Cosa dice il tag album di un brano salvato. Vuoto non scrive alcun album, perché un brano preso dall'etere non ha una pubblicazione e i nomi delle stazioni nel campo album sporcano ogni vista per album. %station% ci mette la stazione; una parola come Radio o Singles li sistema su uno scaffale a parte. La stazione e l'URL dello stream vanno sempre nel commento.
+settings-playback-capture-album-placeholder = Lascia vuoto
+settings-playback-capture-choose = Scegli cartella...
+settings-playback-capture-enable = Salva i brani dalle sorgenti in streaming
+    .description = Scrive nella cartella delle registrazioni ogni brano che uno stream riproduce dall'inizio alla fine, nel formato dello stream stesso e senza ricodificare nulla, con i tag della stazione. La copertina del brano finisce accanto con lo stesso nome, quando se ne trova una. I confini tra i brani arrivano dai titoli che la stazione annuncia, e quelli precedono o seguono l'audio di qualche secondo, quindi una registrazione può contenere la coda del brano precedente. Un brano più lungo del buffer dal vivo non viene mai salvato, così un podcast o un mix resta in onda.
+settings-playback-capture-folder = Cartella delle registrazioni
+settings-playback-capture-pattern = Nomi delle registrazioni
+    .description = Come viene chiamato un brano salvato nella cartella delle registrazioni. Una / crea una cartella, così l'impostazione predefinita archivia una serata di radio per stazione invece di ammucchiare tutto. L'estensione viene dallo stream.
+settings-playback-capture-pattern-date = %date% è il giorno in cui il brano è stato salvato, come 2026-09-18.
+settings-playback-capture-pattern-preview = Anteprima: { $name }
+settings-playback-capture-pattern-station = %station% è il nome della stazione, e %album% dice la stessa cosa.
+settings-playback-section-capture = Registrazione
 settings-playback-play-order = Ordine di riproduzione
     .description = Come sono disposte le tracce già in coda mentre il casuale è attivo. Il pulsante casuale del trasporto lo attiva e disattiva; questo decide cosa fa una volta attivo
 settings-playback-rating-scale = Scala di valutazione
@@ -1054,6 +1128,7 @@ settings-playback-rating-scale-stars = Stelle
 settings-playback-restore-last-session = Ripristina l'ultima sessione
     .description = Parti con la coda di riproduzione come l'hai lasciata, in pausa sulla traccia che suonava e nel punto in cui era. Le tracce in coda fuori dalle cartelle della tua libreria non si possono ripristinare ed escono dall'ordine
 settings-playback-section-queue = Coda
+settings-playback-section-radio = Radio
 settings-playback-section-ratings = Valutazioni
 settings-playback-section-stepping = Passo
 settings-playback-step = Dimensione del passo
@@ -1121,6 +1196,18 @@ settings-shader-signals-block = Segnali
     .description = Quale segnale condiviso riceve ognuno dei sedici slot dello shader
 settings-shader-slots-block = Slot
     .description = Ogni slot così come lo riceve lo shader; gli slot senza route sono manopole impostate a mano
+
+## Settings: sources
+
+settings-sources-folders-note = Le cartelle che rox analizza si trovano nella pagina Libreria, accanto alle impostazioni di scansione e tag che le leggono.
+settings-sources-folders-open = Pagina Libreria
+settings-sources-section-folders = Cartelle locali
+settings-sources-section-stations = Stazioni radio
+settings-sources-stations-find = Trova stazioni...
+settings-sources-stations-import = Importa stazioni...
+settings-sources-stations-name-placeholder = Nome (facoltativo)
+settings-sources-stations-none = Nessuna stazione ancora
+settings-sources-stations-url-placeholder = URL dello stream
 
 ## Settings: storage
 settings-storage-artist-images = Immagini degli artisti
@@ -1826,6 +1913,12 @@ keymap-prev-bookmark = Segnalibro precedente
     .description = Tornare al segnalibro prima della posizione attuale
 keymap-next-bookmark = Segnalibro successivo
     .description = Saltare al segnalibro successivo
+keymap-cue = Aggiungi punto
+    .description = Mettere un punto di sessione alla posizione in riproduzione. I punti durano finché rox resta aperto
+keymap-cue-prev = Punto precedente
+    .description = Tornare al punto prima della testina
+keymap-cue-next = Punto successivo
+    .description = Saltare al punto successivo
 keymap-stop-playback = Ferma
     .description = Ferma la riproduzione e rilascia la traccia
 keymap-toggle-playback = Riproduci / Pausa
@@ -1948,6 +2041,7 @@ panel-catalog-group-visualizers = Visualizzatori
 panel-catalog-group-widgets = Widget
 panel-catalog-history = Cronologia
 panel-catalog-bookmarks = Segnalibri
+panel-catalog-stations = Stazioni
 panel-catalog-menu = Menu
 panel-catalog-metadata = Metadati
 panel-catalog-mini-toggle = Interruttore mini
@@ -2713,6 +2807,17 @@ waveform-bookmarks = Segnalibri
     .description = I segnalibri della traccia in riproduzione come frecce lungo il bordo inferiore: clic per saltare, clic destro per modificare
 waveform-split-channels = Canali separati
     .description = Una riga per canale, il sinistro sopra il destro; le tracce mono restano una riga sola
+waveform-live-mode = Forma in diretta
+    .description = Cosa disegna la striscia mentre suona una stazione radio: niente, il suono della stazione stessa, o una forma che disegna da sé
+waveform-live-trace = Traccia
+waveform-live-motion = Movimento
+waveform-live-window = Finestra in diretta
+    .description = Secondi di una stazione radio coperti dalla traccia scorrevole; una finestra più ampia scorre a velocità minore
+waveform-live-expression = Espressione del movimento
+    .description = x va da 0 a 1 lungo la striscia, t sono i secondi dell'orologio del pannello; sin cos tan abs sqrt exp ln floor min max clamp mix, con + - * / ^ pi e le parentesi
+waveform-live-expression-error = { $reason }, quindi la striscia disegna la forma predefinita
+waveform-section-live = In diretta
+waveform-streaming = IN STREAMING
 waveform-unavailable = Forma d'onda non disponibile per questa traccia
 
 ## VU panel
@@ -2963,6 +3068,11 @@ metadata-field-codec = Codec
 metadata-field-comment = Commento
 metadata-field-copies = Copie
 metadata-field-cover = Copertina
+metadata-field-source = Sorgente
+metadata-source-radio = Radio
+metadata-source-subsonic = Subsonic
+metadata-field-station = Stazione
+metadata-field-homepage = Sito web
 metadata-field-disc = Disco
 metadata-field-file = File
 metadata-field-first-played = Primo ascolto
@@ -3017,6 +3127,8 @@ metadata-stripes-description = Tinge una riga su due della tabella
 
 ## History panel
 history-column-last-played = Ultimo ascolto
+history-live-plays-file = Riproduce la tua copia di questo brano
+history-live-plays-station = Riproduce la stazione; la tua libreria non ha questo brano
 history-descending = Decrescente
     .description = Inverti l'ordinamento
 history-empty-never = Ogni traccia è stata ascoltata
@@ -3115,6 +3227,7 @@ playlists-empty = Ancora nessuna playlist, aggiungi tracce o usa Nuova playlist
 playlists-export-tooltip = Esporta playlist
 playlists-headings = Spezza le tracce di ogni playlist in blocchi per album; Espanse aggiunge la copertina e le statistiche
 playlists-import-tooltip = Importa playlist
+playlists-import = Importa playlist...
 playlists-imported-fallback = Importata
 playlists-new = Nuova playlist...
 playlists-new-smart = Nuova playlist intelligente...
@@ -3359,6 +3472,8 @@ track-info-opening = apertura...
 track-info-output-fallback = L'uscita esclusiva è stata rifiutata dal dispositivo, quindi la riproduzione passa dal mixer condiviso. Il dispositivo ha riferito: { $reason }
 track-info-output-resample-exclusive = Questo file è a { $source } kHz e la scheda ha accettato { $device } kHz, quindi ogni campione viene convertito in uscita. Il dispositivo non ha voluto girare alla frequenza del file.
 track-info-output-resample-mixer = Questo file è a { $source } kHz e il mixer gira a { $device } kHz, quindi ogni campione viene convertito in uscita. La modalità esclusiva passerebbe invece alla scheda la frequenza del file.
+track-info-output-resample-exclusive-stream = Questo flusso è a { $source } kHz e la scheda ha accettato { $device } kHz, quindi ogni campione viene convertito in uscita. Il dispositivo non ha voluto girare alla frequenza del flusso.
+track-info-output-resample-mixer-stream = Questo flusso è a { $source } kHz e il mixer gira a { $device } kHz, quindi ogni campione viene convertito in uscita. La modalità esclusiva passerebbe invece alla scheda la frequenza del flusso.
 track-info-overflow-loop = Cicla
 track-info-overflow-scroll = Scorri
 track-info-overflow-truncate = Tronca
@@ -3388,6 +3503,16 @@ seek-scrobble-marker = Segno di scrobble
 seek-bookmarks = Segnalibri
     .description = I segnalibri della traccia in riproduzione come frecce sotto la linea: clic per saltare, clic destro per modificare
 seek-show-timings = Mostra i tempi
+seek-dash-length = Lunghezza del tratto
+    .description = La lunghezza di ogni tratto dell'avvio, con uno spazio della stessa misura dopo
+seek-lead-in = Avvio del buffer
+    .description = Come viene disegnata la parte del buffer della stazione non ancora riempita, il tratto a sinistra del nastro
+seek-lead-in-dashed = Tratteggiata
+seek-lead-in-faint = Tenue
+seek-lead-in-hidden = Nascosta
+seek-lead-in-sweep = Scorrimento dell'avvio
+    .description = Una sfumatura che scorre lungo la parte non ancora riempita, come in una barra di caricamento
+seek-section-live = In diretta
 seek-thickness = Spessore
     .description = L'altezza della linea della traccia
 
@@ -3468,6 +3593,11 @@ theme-toggle-to-light = Passa al tema chiaro
 transport-favourite-add = Aggiungi ai preferiti
 transport-favourite-nothing = Niente da aggiungere ai preferiti
 transport-favourite-remove = Rimuovi dai preferiti
+transport-live = IN DIRETTA
+transport-live-opening = Connessione alla stazione
+transport-live-reconnecting = Il flusso è caduto; riconnessione in corso
+transport-live-dropped = Il flusso è sparito
+transport-live-jump = Torna alla diretta
 transport-pieces = Elementi
     .description = Trascina lungo una riga per riordinare e tra le righe per spostare; la x e il più di un chip nascondono e mostrano
 

@@ -194,6 +194,8 @@ mod tests {
     /// at their neutral defaults.
     fn track(path: &str, title: &str, artist: &str, album: &str, duration_ms: u32) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),

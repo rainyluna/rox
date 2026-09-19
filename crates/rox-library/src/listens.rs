@@ -209,6 +209,12 @@ pub struct TrackPlays {
     /// while the track exists, the snapshot's once it is gone, so a pruned
     /// file whose bytes are still on disk keeps its cover.
     pub path: String,
+    /// Whether the row behind the listen is a live stream. The one thing a
+    /// history view cannot work out from the columns above: a station's
+    /// listen carries the song's own title and artist, so it reads exactly
+    /// like a file's. False for a listen whose track is gone, since the
+    /// flag lives on the row.
+    pub live: bool,
 }
 
 fn track_plays_row(row: &rusqlite::Row) -> rusqlite::Result<TrackPlays> {
@@ -229,6 +235,7 @@ fn track_plays_row(row: &rusqlite::Row) -> rusqlite::Result<TrackPlays> {
         bit_depth: row.get(13)?,
         rating: row.get(14)?,
         path: row.get(15)?,
+        live: row.get(16)?,
     })
 }
 
@@ -236,12 +243,27 @@ fn track_plays_row(row: &rusqlite::Row) -> rusqlite::Result<TrackPlays> {
 /// path from the live catalog while the track exists, the snapshot once it
 /// is gone, then the album grouping and column metadata from the live
 /// catalog only.
-const SNAPSHOT_COLUMNS: &str = "COALESCE(t.title, l.title),
-     COALESCE(t.artist, l.artist), COALESCE(t.album, l.album),
+///
+/// A live row inverts that for the three tags. Preferring the catalog is
+/// right for a file, where the row is the song and a retag should re-bucket
+/// every play of it; it is wrong for a station, where the row is the
+/// station and the snapshot is the song that was on. Reading the row there
+/// would file a night of radio under one name. The rest of the columns
+/// still come off the catalog, since the snapshot never held them.
+///
+/// A listen whose track is gone joins to nothing, and a NULL `remote_live`
+/// takes the ELSE branch, so the dangling case reads exactly as before.
+const SNAPSHOT_COLUMNS: &str = "CASE WHEN t.remote_live THEN l.title
+         ELSE COALESCE(t.title, l.title) END,
+     CASE WHEN t.remote_live THEN l.artist
+         ELSE COALESCE(t.artist, l.artist) END,
+     CASE WHEN t.remote_live THEN l.album
+         ELSE COALESCE(t.album, l.album) END,
      COALESCE(t.album_artist, ''), COALESCE(t.year, 0), COALESCE(t.genre, ''),
      COALESCE(t.duration_ms, 0), COALESCE(t.codec, ''), COALESCE(t.bitrate, 0),
      COALESCE(t.sample_rate, 0), COALESCE(t.bit_depth, 0),
-     COALESCE(t.rating, 0), COALESCE(t.path, l.path)";
+     COALESCE(t.rating, 0), COALESCE(t.path, l.path),
+     COALESCE(t.remote_live, 0)";
 
 /// The newest events at or after `since` and before `until` first, one
 /// row per event; 0 and i64::MAX read them all.
@@ -337,7 +359,7 @@ pub fn never_played(
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT id, 0, 0, title, artist, album,
                 album_artist, year, genre, duration_ms, codec, bitrate,
-                sample_rate, bit_depth, rating, path
+                sample_rate, bit_depth, rating, path, 0
          FROM tracks
          WHERE source = 'local' AND id NOT IN (SELECT track_id FROM listens)
          ORDER BY {by} LIMIT ?1"
@@ -676,6 +698,8 @@ mod tests {
 
     fn track(path: &str, title: &str, artist: &str, album: &str, genre: &str) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -1209,5 +1233,78 @@ mod tests {
         );
         let artists = rollup(&conn, Rollup::Artist, 0, i64::MAX, 10, false).unwrap();
         assert_eq!(artists[0].name, "A");
+    }
+
+    /// The two halves of the snapshot rule in one walk. A file's row is the
+    /// song, so a retag re-buckets its history and the snapshot steps
+    /// aside; a station's row is the station and its snapshot is whatever
+    /// was on, so the row steps aside instead and a night of radio reads as
+    /// the songs it was rather than one line of the station's name.
+    #[test]
+    fn a_live_row_reads_its_snapshots() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[track("/m/1.mp3", "Typo", "A", "First", "rock")],
+        )
+        .unwrap();
+
+        listen(&conn, "/m/1.mp3", 100);
+        conn.execute("UPDATE tracks SET title = 'Fixed'", [])
+            .unwrap();
+
+        let mut station = track("https://host/stream", "The Station", "Radio", "", "");
+        station.remote_url = "https://host/stream".into();
+        station.remote_live = true;
+        store::upsert_source_rows(&mut conn, "radio", &[station]).unwrap();
+        let station_id = store::id_for_path(&conn, "radio", "https://host/stream")
+            .unwrap()
+            .unwrap();
+
+        for (at, title, artist) in [
+            (200, "Breathe", "The Prodigy"),
+            (300, "Firestarter", "The Prodigy"),
+        ] {
+            append(
+                &conn,
+                &Listen {
+                    track_id: station_id,
+                    played_at: at,
+                    title: title.into(),
+                    artist: artist.into(),
+                    album: "The Station".into(),
+                    genre: String::new(),
+                    path: String::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        let rows = recent(&conn, 0, i64::MAX, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
+            ["Firestarter", "Breathe", "Fixed"],
+            "the file follows its retagged row, each station play its own song"
+        );
+        assert_eq!(
+            rows[0].artist, "The Prodigy",
+            "the announced act, not the station's name"
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.live).collect::<Vec<_>>(),
+            [true, true, false],
+            "and the flag that tells the two kinds of row apart"
+        );
+
+        // The rollup side of the same read: the station's plays count
+        // together on its row, and the newest snapshot names it.
+        let played = most_played(&conn, 10).unwrap();
+        let station_row = played
+            .iter()
+            .find(|r| r.track_id == station_id)
+            .expect("the station's plays roll up");
+        assert_eq!(station_row.plays, 2);
+        assert_eq!(station_row.title, "Firestarter");
     }
 }

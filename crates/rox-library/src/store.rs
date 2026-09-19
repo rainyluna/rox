@@ -266,6 +266,24 @@ const MIGRATIONS: &[crate::migrate::Migration] = &[
         name: "bookmarks",
         up: crate::bookmarks::init_schema,
     },
+    // What a non-local row needs to become a locator again: the stream URL,
+    // and whether the stream ever ends. A remote row's `path` holds the
+    // source's own id (a Subsonic song id, a station URL), which is the
+    // key, not something anything can open. Headers stay out of the
+    // database on purpose: they're per-session credentials, so the live
+    // source rebuilds them at resolve time.
+    // No mtime reset here. Neither column is read out of a file's tags, so
+    // no file is owed a re-read and the usual "incremental scans skip
+    // unchanged files" trap doesn't apply.
+    crate::migrate::Migration {
+        name: "remote-rows",
+        up: |conn| {
+            conn.execute_batch(
+                "ALTER TABLE tracks ADD COLUMN remote_url TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE tracks ADD COLUMN remote_live INTEGER NOT NULL DEFAULT 0;",
+            )
+        },
+    },
 ];
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -1641,6 +1659,182 @@ pub fn paths_by_id(conn: &Connection, ids: &[i64]) -> rusqlite::Result<HashMap<i
     Ok(out)
 }
 
+/// Where each of these rows plays from: the path for a local one, the
+/// source's stored URL for a remote one. This is the playback resolve hop,
+/// the one [`paths_for`] used to be before a path stopped being the only
+/// answer. Ids the library no longer holds are dropped, same as there.
+///
+/// The headers a remote request needs aren't here and never were in the
+/// database: they're per-session credentials, so the caller fills them in
+/// from the live source before handing the locator to the engine.
+pub fn locators_for(
+    conn: &Connection,
+    ids: &[i64],
+) -> rusqlite::Result<Vec<crate::locator::Locator>> {
+    let mut stmt = conn
+        .prepare_cached("SELECT source, path, remote_url, remote_live FROM tracks WHERE id = ?1")?;
+
+    let mut out = Vec::with_capacity(ids.len());
+    for &id in ids {
+        let row = stmt.query_row([id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        });
+
+        if let Ok((source, path, url, live)) = row {
+            out.push(if source == crate::cue::LOCAL {
+                crate::locator::Locator::Local(PathBuf::from(path))
+            } else {
+                crate::locator::Locator::Remote(crate::locator::Remote {
+                    url,
+                    headers: Vec::new(),
+                    // A remote row's path is the source's own id, and the
+                    // container it serves is whatever the transport reads
+                    // off Content-Type.
+                    hint: String::new(),
+                    live: live != 0,
+                })
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Insert or refresh one batch of rows belonging to one non-local source.
+/// The transaction shape and the conflict key are [`insert_batch`]'s, with
+/// `source` bound rather than left to the column default, and without the
+/// scanner's business: no cue side rows, no ReplayGain keep rule, since a
+/// source hands back a catalog rather than files rox measured.
+///
+/// `added` stamps a first-seen row and is left alone on a refresh, so a
+/// sync that runs nightly doesn't keep resetting when a track joined the
+/// library.
+pub fn upsert_source_rows(
+    conn: &mut Connection,
+    source: &str,
+    rows: &[TrackRow],
+) -> rusqlite::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO tracks
+             (source, path, sub, title, artist, album_artist, album, genre, year,
+              disc_no, track_no, duration_ms, codec, bitrate, sample_rate, bit_depth,
+              rating, added, size, mtime, remote_url, remote_live,
+              title_sort, artist_sort, album_artist_sort, album_sort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+             ON CONFLICT (source, path, sub) DO UPDATE SET
+                title = excluded.title, artist = excluded.artist,
+                album_artist = excluded.album_artist,
+                album = excluded.album, genre = excluded.genre,
+                title_sort = excluded.title_sort,
+                artist_sort = excluded.artist_sort,
+                album_artist_sort = excluded.album_artist_sort,
+                album_sort = excluded.album_sort,
+                year = excluded.year, disc_no = excluded.disc_no,
+                track_no = excluded.track_no,
+                duration_ms = excluded.duration_ms, codec = excluded.codec,
+                bitrate = excluded.bitrate,
+                sample_rate = excluded.sample_rate, bit_depth = excluded.bit_depth,
+                rating = CASE excluded.rating WHEN 0 THEN rating ELSE excluded.rating END,
+                size = excluded.size, mtime = excluded.mtime,
+                remote_url = excluded.remote_url,
+                remote_live = excluded.remote_live",
+        )?;
+
+        for r in rows {
+            stmt.execute(rusqlite::params![
+                source,
+                r.path,
+                r.sub,
+                r.title,
+                r.artist,
+                r.album_artist,
+                r.album,
+                r.genre,
+                r.year,
+                r.disc_no,
+                r.track_no,
+                r.duration_ms,
+                r.codec,
+                r.bitrate_kbps,
+                r.sample_rate_hz,
+                r.bit_depth,
+                r.rating,
+                now,
+                r.size as i64,
+                r.mtime,
+                r.remote_url,
+                r.remote_live as i64,
+                r.title_sort,
+                r.artist_sort,
+                r.album_artist_sort,
+                r.album_sort,
+            ])?;
+        }
+    }
+
+    tx.commit()
+}
+
+/// Drop every row of one source whose path isn't in `keep`, and answer how
+/// many went. This is how a sync reconciles: the source lists what it still
+/// has, and what it no longer lists stops existing here. Scoped to
+/// `source`, so no sync can reach a local row or another server's.
+pub fn prune_source(
+    conn: &mut Connection,
+    source: &str,
+    keep: &std::collections::HashSet<String>,
+) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let mut gone = 0;
+    {
+        // Read the paths first rather than writing a NOT IN over the whole
+        // keep set: a catalog of a hundred thousand tracks would blow past
+        // SQLite's bound-parameter ceiling, and this stays one statement
+        // either way.
+        let mut have = tx.prepare("SELECT path FROM tracks WHERE source = ?1")?;
+        let paths: Vec<String> = have
+            .query_map([source], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut drop = tx.prepare_cached("DELETE FROM tracks WHERE source = ?1 AND path = ?2")?;
+        for path in paths {
+            if !keep.contains(&path) {
+                gone += drop.execute(rusqlite::params![source, path])?;
+            }
+        }
+    }
+
+    tx.commit()?;
+    Ok(gone)
+}
+
+/// Every source the library holds rows for, with how many rows each one
+/// has, ordered by name so the list doesn't reshuffle between reads. What
+/// the settings page shows and what a library facet would filter on.
+pub fn sources(conn: &Connection) -> rusqlite::Result<Vec<(String, usize)>> {
+    let mut stmt =
+        conn.prepare("SELECT source, COUNT(*) FROM tracks GROUP BY source ORDER BY source")?;
+
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+    })?;
+
+    rows.collect()
+}
+
 /// Every local track's id, artist, and title, for a caller matching outside
 /// names against the library. One pass over the table: the loved-tracks
 /// import folds this into its own lookup and does thousands of lookups
@@ -1726,19 +1920,29 @@ pub fn queue_meta_for_path(conn: &Connection, path: &str) -> rusqlite::Result<Qu
     }
 }
 
-/// The same for a full (path, sub) key, the subsong-aware lookup: a plain
-/// file asks with sub 0 and gets exactly what [`queue_meta_for_path`]
+/// The same for a full (source, path, sub) key, the subsong-aware lookup: a
+/// plain file asks with sub 0 and gets exactly what [`queue_meta_for_path`]
 /// answers, a cue track asks with its number and gets the span to play
 /// besides. An unknown key defaults the same way, so a file from outside the
 /// library still plays.
-pub fn queue_meta_for_key(conn: &Connection, path: &str, sub: u16) -> rusqlite::Result<QueueMeta> {
+///
+/// The source is a parameter rather than a literal in the SQL because a path
+/// string stopped being an identity: a source's own ids can collide with a
+/// path on disk, and a lookup that silently meant "local" would answer with
+/// the wrong row the first time they did.
+pub fn queue_meta_for_key(
+    conn: &Connection,
+    source: &str,
+    path: &str,
+    sub: u16,
+) -> rusqlite::Result<QueueMeta> {
     let mut stmt = conn.prepare_cached(
         "SELECT t.album_artist, t.album, t.rg_track_gain, t.rg_track_peak,
                 t.rg_album_gain, t.rg_album_peak, t.id, c.start_ms, c.end_ms
          FROM tracks t LEFT JOIN cue_tracks c ON c.track_id = t.id
-         WHERE t.source = 'local' AND t.path = ?1 AND t.sub = ?2",
+         WHERE t.source = ?1 AND t.path = ?2 AND t.sub = ?3",
     )?;
-    let mut rows = stmt.query(rusqlite::params![path, sub])?;
+    let mut rows = stmt.query(rusqlite::params![source, path, sub])?;
     match rows.next()? {
         Some(row) => {
             let album_artist: String = row.get(0)?;
@@ -1768,17 +1972,21 @@ pub fn queue_meta_for_key(conn: &Connection, path: &str, sub: u16) -> rusqlite::
 }
 
 /// The playable key for a library id, the reverse of
-/// [`queue_meta_for_key`]: path and sub straight off the row. What turns an
-/// id handed back by a background task (a continuation pick, say) into
-/// something the player can queue. None for an id no longer in the library.
+/// [`queue_meta_for_key`]: source, path and sub straight off the row. What
+/// turns an id handed back by a background task (a continuation pick, say)
+/// into something the player can queue. None for an id no longer in the
+/// library.
+///
+/// No source filter: an id is unique across the whole table, so scoping to
+/// local would only mean a remote pick came back as if it had been pruned.
 pub fn key_for_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<crate::cue::TrackKey>> {
-    let mut stmt =
-        conn.prepare_cached("SELECT path, sub FROM tracks WHERE source = 'local' AND id = ?1")?;
+    let mut stmt = conn.prepare_cached("SELECT source, path, sub FROM tracks WHERE id = ?1")?;
     let mut rows = stmt.query([id])?;
     match rows.next()? {
         Some(row) => Ok(Some(crate::cue::TrackKey {
-            path: std::path::PathBuf::from(row.get::<_, String>(0)?),
-            sub: row.get::<_, u16>(1)?,
+            source: crate::cue::source_id(&row.get::<_, String>(0)?),
+            path: std::path::PathBuf::from(row.get::<_, String>(1)?),
+            sub: row.get::<_, u16>(2)?,
         })),
         None => Ok(None),
     }
@@ -1804,11 +2012,11 @@ pub fn all_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
 }
 
 /// Resolve a playable path to its track id, for marking the playing row.
-/// Ok(None) when the path is not in the library.
-pub fn id_for_path(conn: &Connection, path: &str) -> rusqlite::Result<Option<i64>> {
-    let mut stmt =
-        conn.prepare_cached("SELECT id FROM tracks WHERE source = 'local' AND path = ?1")?;
-    let mut rows = stmt.query([path])?;
+/// Ok(None) when the path is not in the library. The source is a parameter
+/// for [`queue_meta_for_key`]'s reason: a path alone no longer names a row.
+pub fn id_for_path(conn: &Connection, source: &str, path: &str) -> rusqlite::Result<Option<i64>> {
+    let mut stmt = conn.prepare_cached("SELECT id FROM tracks WHERE source = ?1 AND path = ?2")?;
+    let mut rows = stmt.query([source, path])?;
     match rows.next()? {
         Some(row) => Ok(Some(row.get(0)?)),
         None => Ok(None),
@@ -1835,16 +2043,21 @@ pub struct TrackMeta {
 }
 
 /// Resolve a playable path back to its tags, for showing what is playing.
-/// Ok(None) when the path is not in the library.
-pub fn meta_for_path(conn: &Connection, path: &str) -> rusqlite::Result<Option<TrackMeta>> {
+/// Ok(None) when the path is not in the library. Source-scoped, so a remote
+/// row whose id happens to read like a path can't answer for a file.
+pub fn meta_for_path(
+    conn: &Connection,
+    source: &str,
+    path: &str,
+) -> rusqlite::Result<Option<TrackMeta>> {
     let mut stmt = conn.prepare_cached(
         "SELECT title, artist, album, track_no,
                 album_artist, year, genre, duration_ms, codec, bitrate,
                 sample_rate, bit_depth, rating
          FROM tracks
-         WHERE source = 'local' AND path = ?1",
+         WHERE source = ?1 AND path = ?2",
     )?;
-    let mut rows = stmt.query([path])?;
+    let mut rows = stmt.query([source, path])?;
     match rows.next()? {
         Some(row) => Ok(Some(TrackMeta {
             title: row.get(0)?,
@@ -1870,6 +2083,7 @@ pub fn meta_for_path(conn: &Connection, path: &str) -> rusqlite::Result<Option<T
 /// calling [`id_for_path`] and [`meta_for_path`] back to back on the same path.
 pub fn meta_row_for_path(
     conn: &Connection,
+    source: &str,
     path: &str,
 ) -> rusqlite::Result<Option<(i64, TrackMeta)>> {
     let mut stmt = conn.prepare_cached(
@@ -1877,9 +2091,9 @@ pub fn meta_row_for_path(
                 album_artist, year, genre, duration_ms, codec, bitrate,
                 sample_rate, bit_depth, rating
          FROM tracks
-         WHERE source = 'local' AND path = ?1",
+         WHERE source = ?1 AND path = ?2",
     )?;
-    let mut rows = stmt.query([path])?;
+    let mut rows = stmt.query([source, path])?;
     match rows.next()? {
         Some(row) => Ok(Some((
             row.get(0)?,
@@ -1916,10 +2130,14 @@ pub fn max_rowid(conn: &Connection) -> rusqlite::Result<i64> {
 /// sort names beside them, then the codec and stream numbers, the rating and scan time, the two ReplayGain
 /// figures, the tempo and where it came from, and last the subsong number.
 /// The path is selected so the projection can derive each track's folder, the
-/// sub so it can build a TrackKey. Spans aren't: they're sparse, and the
-/// projection fills them from [`cue_spans`].
+/// source and sub so it can build a TrackKey. Spans aren't: they're sparse,
+/// and the projection fills them from [`cue_spans`].
 pub struct ScanRow<'a> {
     pub id: i64,
+    /// Which source the row belongs to, "local" for a file on disk. Selected
+    /// because a path alone stopped being an identity: two sources can hand
+    /// back the same string for different music.
+    pub source: &'a str,
     pub path: &'a str,
     pub title: &'a str,
     pub artist: &'a str,
@@ -1960,7 +2178,7 @@ pub fn scan_range(
     mut sink: impl FnMut(ScanRow<'_>),
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, path, title, artist, album_artist, album,
+        "SELECT id, source, path, title, artist, album_artist, album,
                 title_sort, artist_sort, album_artist_sort, album_sort,
                 genre, year, disc_no, track_no,
                 duration_ms, codec, bitrate, sample_rate, bit_depth, rating, added,
@@ -1971,31 +2189,32 @@ pub fn scan_range(
     while let Some(row) = rows.next()? {
         sink(ScanRow {
             id: row.get(0)?,
-            path: row.get_ref(1)?.as_str().unwrap_or(""),
-            title: row.get_ref(2)?.as_str().unwrap_or(""),
-            artist: row.get_ref(3)?.as_str().unwrap_or(""),
-            album_artist: row.get_ref(4)?.as_str().unwrap_or(""),
-            album: row.get_ref(5)?.as_str().unwrap_or(""),
-            title_sort: row.get_ref(6)?.as_str().unwrap_or(""),
-            artist_sort: row.get_ref(7)?.as_str().unwrap_or(""),
-            album_artist_sort: row.get_ref(8)?.as_str().unwrap_or(""),
-            album_sort: row.get_ref(9)?.as_str().unwrap_or(""),
-            genre: row.get_ref(10)?.as_str().unwrap_or(""),
-            year: row.get::<_, i64>(11)? as u16,
-            disc_no: row.get::<_, i64>(12)? as u16,
-            track_no: row.get::<_, i64>(13)? as u16,
-            duration_ms: row.get::<_, i64>(14)? as u32,
-            codec: row.get_ref(15)?.as_str().unwrap_or(""),
-            bitrate_kbps: row.get::<_, i64>(16)? as u16,
-            sample_rate_hz: row.get::<_, i64>(17)? as u32,
-            bit_depth: row.get::<_, i64>(18)? as u8,
-            rating: row.get::<_, i64>(19)? as u8,
-            added: row.get::<_, i64>(20)?,
-            track_gain_db: row.get(21)?,
-            album_gain_db: row.get(22)?,
-            bpm: row.get(23)?,
-            bpm_source: crate::tempo::Source::from_code(row.get(24)?),
-            sub: row.get::<_, i64>(25)? as u16,
+            source: row.get_ref(1)?.as_str().unwrap_or(""),
+            path: row.get_ref(2)?.as_str().unwrap_or(""),
+            title: row.get_ref(3)?.as_str().unwrap_or(""),
+            artist: row.get_ref(4)?.as_str().unwrap_or(""),
+            album_artist: row.get_ref(5)?.as_str().unwrap_or(""),
+            album: row.get_ref(6)?.as_str().unwrap_or(""),
+            title_sort: row.get_ref(7)?.as_str().unwrap_or(""),
+            artist_sort: row.get_ref(8)?.as_str().unwrap_or(""),
+            album_artist_sort: row.get_ref(9)?.as_str().unwrap_or(""),
+            album_sort: row.get_ref(10)?.as_str().unwrap_or(""),
+            genre: row.get_ref(11)?.as_str().unwrap_or(""),
+            year: row.get::<_, i64>(12)? as u16,
+            disc_no: row.get::<_, i64>(13)? as u16,
+            track_no: row.get::<_, i64>(14)? as u16,
+            duration_ms: row.get::<_, i64>(15)? as u32,
+            codec: row.get_ref(16)?.as_str().unwrap_or(""),
+            bitrate_kbps: row.get::<_, i64>(17)? as u16,
+            sample_rate_hz: row.get::<_, i64>(18)? as u32,
+            bit_depth: row.get::<_, i64>(19)? as u8,
+            rating: row.get::<_, i64>(20)? as u8,
+            added: row.get::<_, i64>(21)?,
+            track_gain_db: row.get(22)?,
+            album_gain_db: row.get(23)?,
+            bpm: row.get(24)?,
+            bpm_source: crate::tempo::Source::from_code(row.get(25)?),
+            sub: row.get::<_, i64>(26)? as u16,
         });
     }
     Ok(())
@@ -2107,6 +2326,8 @@ mod tests {
 
     fn row(path: &str, album_artist: &str, album: &str, size: u64) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -2510,7 +2731,9 @@ mod tests {
         init_schema(&conn).unwrap();
         let track = || row("/m/a/1.mp3", "X", "Album", 100);
         insert_batch(&mut conn, &[track()]).unwrap();
-        let id = id_for_path(&conn, "/m/a/1.mp3").unwrap().unwrap();
+        let id = id_for_path(&conn, crate::cue::LOCAL, "/m/a/1.mp3")
+            .unwrap()
+            .unwrap();
 
         set_rating(&conn, id, 75).unwrap();
         insert_batch(&mut conn, &[track()]).unwrap();
@@ -3117,7 +3340,9 @@ mod tests {
         assert_eq!(work[1].sub, 1, "a cue subsong is measured like anything");
         assert_eq!(
             work[0].id,
-            id_for_path(&conn, "/m/a/1.mp3").unwrap().unwrap()
+            id_for_path(&conn, crate::cue::LOCAL, "/m/a/1.mp3")
+                .unwrap()
+                .unwrap()
         );
 
         // Measuring the two takes them off the list, and the subsong's write
@@ -3289,7 +3514,9 @@ mod tests {
         init_schema(&conn).unwrap();
         let track = || row("/m/a/1.mp3", "X", "Album", 100);
         insert_batch(&mut conn, &[track()]).unwrap();
-        let id = id_for_path(&conn, "/m/a/1.mp3").unwrap().unwrap();
+        let id = id_for_path(&conn, crate::cue::LOCAL, "/m/a/1.mp3")
+            .unwrap()
+            .unwrap();
 
         let added: i64 = conn
             .query_row("SELECT added FROM tracks WHERE id = ?1", [id], |r| r.get(0))
@@ -3463,7 +3690,7 @@ mod tests {
         .unwrap();
 
         // A single file rename keeps the row's id.
-        let file_id = id_for_path(&conn, "/m/Artist/Album/1.mp3")
+        let file_id = id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album/1.mp3")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -3476,22 +3703,22 @@ mod tests {
             1
         );
         assert!(
-            id_for_path(&conn, "/m/Artist/Album/1.mp3")
+            id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album/1.mp3")
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            id_for_path(&conn, "/m/Artist/Album/one.mp3").unwrap(),
+            id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album/one.mp3").unwrap(),
             Some(file_id),
             "a renamed file keeps its id"
         );
 
         // A folder rename moves the whole subtree, each row keeping its id,
         // and leaves the prefix-sibling folder untouched.
-        let sibling_id = id_for_path(&conn, "/m/Artist/Album Two/1.mp3")
+        let sibling_id = id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album Two/1.mp3")
             .unwrap()
             .unwrap();
-        let two_id = id_for_path(&conn, "/m/Artist/Album/2.mp3")
+        let two_id = id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album/2.mp3")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -3504,15 +3731,15 @@ mod tests {
             2
         );
         assert_eq!(
-            id_for_path(&conn, "/m/Artist/Record/one.mp3").unwrap(),
+            id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Record/one.mp3").unwrap(),
             Some(file_id)
         );
         assert_eq!(
-            id_for_path(&conn, "/m/Artist/Record/2.mp3").unwrap(),
+            id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Record/2.mp3").unwrap(),
             Some(two_id)
         );
         assert_eq!(
-            id_for_path(&conn, "/m/Artist/Album Two/1.mp3").unwrap(),
+            id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album Two/1.mp3").unwrap(),
             Some(sibling_id),
             "a name-prefix sibling folder is not swept up"
         );
@@ -3534,7 +3761,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let one = id_for_path(&conn, "/m/Artist/Album/1.mp3")
+        let one = id_for_path(&conn, crate::cue::LOCAL, "/m/Artist/Album/1.mp3")
             .unwrap()
             .unwrap();
         set_rating(&conn, one, 9).unwrap();
@@ -3551,7 +3778,7 @@ mod tests {
         )
         .unwrap();
 
-        let moved = id_for_path(&conn, "/m/Boards/Geogaddi/1.mp3")
+        let moved = id_for_path(&conn, crate::cue::LOCAL, "/m/Boards/Geogaddi/1.mp3")
             .unwrap()
             .unwrap();
         assert_eq!(moved, one, "the row is the same row");
@@ -3585,7 +3812,7 @@ mod tests {
         .unwrap();
         assert_eq!(count(&conn).unwrap(), 4);
 
-        let second = queue_meta_for_key(&conn, image, 2).unwrap();
+        let second = queue_meta_for_key(&conn, crate::cue::LOCAL, image, 2).unwrap();
         assert_eq!(
             second.span,
             Some(crate::cue::Span {
@@ -3594,7 +3821,7 @@ mod tests {
             })
         );
         assert_eq!(second.group, crate::hash::album_group("X", "Album"));
-        let last = queue_meta_for_key(&conn, image, 3).unwrap();
+        let last = queue_meta_for_key(&conn, crate::cue::LOCAL, image, 3).unwrap();
         assert_eq!(
             last.span,
             Some(crate::cue::Span {
@@ -3605,7 +3832,7 @@ mod tests {
         );
         // A plain file answers the same lookup with no span at all.
         assert_eq!(
-            queue_meta_for_key(&conn, "/m/Album/loose.mp3", 0)
+            queue_meta_for_key(&conn, crate::cue::LOCAL, "/m/Album/loose.mp3", 0)
                 .unwrap()
                 .span,
             None
@@ -3731,7 +3958,9 @@ mod tests {
         before.artist = "Someone".into();
         before.year = 1999;
         insert_batch(&mut conn, &[before]).unwrap();
-        let id = id_for_path(&conn, "/m/a/1.mp3").unwrap().unwrap();
+        let id = id_for_path(&conn, crate::cue::LOCAL, "/m/a/1.mp3")
+            .unwrap()
+            .unwrap();
 
         apply_changes(
             &conn,
@@ -3790,7 +4019,9 @@ mod tests {
         before.artist_sort = "Yonezu, Kenshi".into();
         before.album_artist_sort = "Various Artists".into();
         insert_batch(&mut conn, &[before]).unwrap();
-        let id = id_for_path(&conn, "/m/a/1.mp3").unwrap().unwrap();
+        let id = id_for_path(&conn, crate::cue::LOCAL, "/m/a/1.mp3")
+            .unwrap()
+            .unwrap();
 
         apply_changes(
             &conn,
@@ -3903,6 +4134,119 @@ mod tests {
         assert!(
             after.free > used.acoustic / 2,
             "the vectors' pages are free"
+        );
+    }
+
+    /// A remote row whose path string reads exactly like a scanned file's
+    /// is a second row, not a collision. The unique key is (source, path,
+    /// sub), so this is the whole reason the source is on the key.
+    #[test]
+    fn a_remote_row_and_a_local_one_can_share_a_path() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        insert_batch(&mut conn, &[row("/m/a/1.mp3", "A", "Album", 10)]).unwrap();
+
+        let mut remote = row("/m/a/1.mp3", "A", "Album", 0);
+        remote.remote_url = "https://host/stream/1".into();
+        upsert_source_rows(&mut conn, "subsonic:home", &[remote]).unwrap();
+
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE path = '/m/a/1.mp3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2, "one row per source");
+
+        assert_eq!(
+            sources(&conn).unwrap(),
+            vec![("local".to_string(), 1), ("subsonic:home".to_string(), 1)]
+        );
+    }
+
+    /// A sync reconciles by listing what it still has. What it stopped
+    /// listing goes, and nothing outside its own source moves.
+    #[test]
+    fn prune_source_only_touches_its_own_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        insert_batch(&mut conn, &[row("/m/a/1.mp3", "A", "Album", 10)]).unwrap();
+        upsert_source_rows(
+            &mut conn,
+            "subsonic:home",
+            &[
+                row("keep-1", "A", "Album", 0),
+                row("drop-1", "A", "Album", 0),
+            ],
+        )
+        .unwrap();
+        upsert_source_rows(&mut conn, "radio", &[row("station-1", "A", "Album", 0)]).unwrap();
+
+        let keep = std::collections::HashSet::from(["keep-1".to_string()]);
+        assert_eq!(prune_source(&mut conn, "subsonic:home", &keep).unwrap(), 1);
+
+        assert_eq!(
+            sources(&conn).unwrap(),
+            vec![
+                ("local".to_string(), 1),
+                ("radio".to_string(), 1),
+                ("subsonic:home".to_string(), 1),
+            ]
+        );
+    }
+
+    /// The whole identity hop in one walk: two rows sharing a path string,
+    /// a projection over both that resolves each row to its own source, and
+    /// `locators_for` handing back a file for one and a URL for the other.
+    #[test]
+    fn locators_for_answers_per_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        insert_batch(&mut conn, &[row("/m/a/1.mp3", "A", "Album", 10)]).unwrap();
+
+        let mut station = row("/m/a/1.mp3", "A", "Album", 0);
+        station.remote_url = "https://host/stream/1".into();
+        station.remote_live = true;
+        upsert_source_rows(&mut conn, "radio", &[station]).unwrap();
+
+        let local_id = id_for_path(&conn, crate::cue::LOCAL, "/m/a/1.mp3")
+            .unwrap()
+            .unwrap();
+        let remote_id = id_for_path(&conn, "radio", "/m/a/1.mp3").unwrap().unwrap();
+        assert_ne!(local_id, remote_id);
+
+        // The projection knows which is which without going back to SQLite.
+        let p = crate::projection::Projection::load_serial(&conn, false).unwrap();
+        let source_of = |id: i64| {
+            let row = p.db_id.iter().position(|&d| d == id).unwrap();
+            p.resolve(row as u32).source.to_string()
+        };
+        assert_eq!(source_of(local_id), "local");
+        assert_eq!(source_of(remote_id), "radio");
+
+        let locators = locators_for(&conn, &[local_id, remote_id]).unwrap();
+        assert_eq!(
+            locators[0],
+            crate::locator::Locator::Local(PathBuf::from("/m/a/1.mp3"))
+        );
+        assert_eq!(
+            locators[1],
+            crate::locator::Locator::Remote(crate::locator::Remote {
+                url: "https://host/stream/1".into(),
+                headers: Vec::new(),
+                hint: String::new(),
+                live: true,
+            })
+        );
+
+        // The key off an id carries the source the same way round.
+        assert_eq!(
+            &*key_for_id(&conn, remote_id).unwrap().unwrap().source,
+            "radio"
         );
     }
 }

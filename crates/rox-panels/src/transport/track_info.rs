@@ -16,7 +16,7 @@ use gpui::{
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
-use rox_library::cue::TrackKey;
+use rox_library::cue::{Origin, TrackKey};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
@@ -575,15 +575,35 @@ enum RowBit {
     Run(Vec<(String, bool)>),
     /// A piece that holds its own shape outside the crawl.
     Fixed(InfoPiece),
+    /// The source mark: a station's or a server's glyph, at the end of
+    /// the row whose text names where the track came from. Outside the
+    /// crawl so it holds its place while the line scrolls past it.
+    Glyph(&'static str),
 }
 
 /// Compose one row's pieces into its runs and fixed pieces. Same-color
 /// neighbors read as one phrase: bright pieces join with a space, the
 /// classic "05. Title (2:17)", muted ones with the byline's " - ". A
 /// piece whose field is empty just drops out of the line.
-fn row_bits(pieces: &[InfoPiece], texts: &PieceTexts) -> Vec<RowBit> {
+///
+/// `glyph` names the piece that decides which row wears the source mark
+/// and the icon to draw, None for a local track. The mark goes after that
+/// row's last run rather than beside the piece itself: a crawl scrolls a
+/// whole run as one box, so a mark dropped into the middle of a line
+/// splits it into two runs that then crawl on their own clocks, the song
+/// sliding one way while the station sits still beside it. Behind the
+/// line there is nothing to split, and the words start at the row's edge
+/// where the eye already goes for them.
+fn row_bits(
+    pieces: &[InfoPiece],
+    texts: &PieceTexts,
+    glyph: Option<(InfoPiece, &'static str)>,
+) -> Vec<RowBit> {
     let mut bits = Vec::new();
     let mut run: Vec<(String, bool)> = Vec::new();
+    // Whether this row draws the piece the mark belongs to. Only that row
+    // gets one, so a two-row arrangement doesn't wear two.
+    let mut marked = false;
     for piece in pieces {
         let text = match piece {
             InfoPiece::TrackNo => texts.trackno.clone().map(|t| (t, false)),
@@ -612,6 +632,11 @@ fn row_bits(pieces: &[InfoPiece], texts: &PieceTexts) -> Vec<RowBit> {
             InfoPiece::Break => continue,
         };
         let Some((text, muted)) = text else { continue };
+
+        if glyph.is_some_and(|(lead, _)| lead == *piece) {
+            marked = true;
+        }
+
         match run.last_mut() {
             Some((run_text, run_muted)) if *run_muted == muted => {
                 run_text.push_str(if muted { " - " } else { " " });
@@ -623,6 +648,17 @@ fn row_bits(pieces: &[InfoPiece], texts: &PieceTexts) -> Vec<RowBit> {
     if !run.is_empty() {
         bits.push(RowBit::Run(run));
     }
+
+    // Behind the last run, so the mark trails the words it belongs to and
+    // anything the arrangement put after the text (the chip, a spacer)
+    // keeps its own place at the row's far edge.
+    if let Some((_, path)) = glyph
+        && marked
+        && let Some(at) = bits.iter().rposition(|bit| matches!(bit, RowBit::Run(_)))
+    {
+        bits.insert(at + 1, RowBit::Glyph(path));
+    }
+
     bits
 }
 
@@ -646,7 +682,9 @@ pub struct TrackInfoPanel {
     /// The playing path's tags, or None for a file the library does not
     /// know. Cached because the pump notifies every frame and the lookup is
     /// a database query; cleared when the track or the catalog changes.
-    meta: Option<(TrackKey, Option<rox_library::store::TrackMeta>)>,
+    /// The station-title revision sits beside them, so a stream's turnover
+    /// re-resolves the line the way a track change does.
+    meta: Option<(TrackKey, u64, Option<rox_library::store::TrackMeta>)>,
     /// The explicit queue's readouts keyed on its revision: the depth and
     /// what plays next. The snapshot pass and the library lookup only
     /// rerun when the queue actually moves.
@@ -755,12 +793,7 @@ impl TrackInfoPanel {
             menu,
             window,
             cx,
-            Rc::new(move |cx: &App| {
-                let Some(now) = state.player.read(cx).now_playing() else {
-                    return Vec::new();
-                };
-                vec![panel::CopyText::from_key(&now.key, state.library.read(cx))]
-            }),
+            Rc::new(move |cx: &App| panel::CopyText::playing(&state, cx).into_iter().collect()),
         );
         let mut menu = menu
             .separator()
@@ -884,11 +917,23 @@ impl TrackInfoPanel {
     /// Keyed on the whole track, so two cue tracks of one image don't both
     /// draw whichever of them the library sorts first.
     fn meta_for(&mut self, key: &TrackKey, cx: &App) -> Option<&rox_library::store::TrackMeta> {
-        if self.meta.as_ref().map(|(k, _)| k) != Some(key) {
-            let meta = self.state.library.read(cx).meta_for_key(key);
-            self.meta = Some((key.clone(), meta));
+        // A station keeps one key for hours and turns its song over
+        // underneath, so the revision is part of what makes the cache
+        // stale. It moves once a song, which is the rate the lookup then
+        // runs at.
+        let live_rev = self.state.player.read(cx).title_rev().unwrap_or(0);
+        let stale = match self.meta.as_ref() {
+            Some((cached, rev, _)) => cached != key || *rev != live_rev,
+            None => true,
+        };
+
+        if stale {
+            let row = self.state.library.read(cx).meta_for_key(key);
+            let meta = self.state.player.read(cx).live_over(row);
+            self.meta = Some((key.clone(), live_rev, meta));
         }
-        self.meta.as_ref().and_then(|(_, meta)| meta.as_ref())
+
+        self.meta.as_ref().and_then(|(.., meta)| meta.as_ref())
     }
 
     /// The explicit queue's depth and next line, from the cache or one
@@ -1250,7 +1295,12 @@ impl TrackInfoPanel {
     /// face in their place when the tint is off, so a glance says whether
     /// what's playing is what the file holds. None when no stream has
     /// negotiated yet. `ix` keeps two chips across rows apart for gpui.
-    fn output_chip(&self, ix: usize, cx: &App) -> Option<Stateful<Div>> {
+    ///
+    /// `live` says the thing being converted is a station rather than a
+    /// file, which only the tooltip's wording cares about: telling someone
+    /// what "this file" is doing while they listen to radio reads as the
+    /// readout talking about some other track.
+    fn output_chip(&self, ix: usize, live: bool, cx: &App) -> Option<Stateful<Div>> {
         let status = self.state.player.read(cx).output_status()?;
         let negotiated = &status.negotiated;
         let exclusive = negotiated.mode == rox_playback::output::Mode::Exclusive;
@@ -1277,20 +1327,33 @@ impl TrackInfoPanel {
             // rate, and that's the case worth saying out loud: the toggle is
             // on, the claim went through, and it still isn't the file's own
             // samples.
+            //
+            // A station is the same story about something that was never a
+            // file, so it gets the same two sentences about a stream. The
+            // wording is the whole difference.
             (
                 palette::tone_warn(),
-                Some(if exclusive {
-                    rox_i18n::t!(
+                Some(match (exclusive, live) {
+                    (true, false) => rox_i18n::t!(
                         "track-info-output-resample-exclusive",
                         source = source,
                         device = device
-                    )
-                } else {
-                    rox_i18n::t!(
+                    ),
+                    (false, false) => rox_i18n::t!(
                         "track-info-output-resample-mixer",
                         source = source,
                         device = device
-                    )
+                    ),
+                    (true, true) => rox_i18n::t!(
+                        "track-info-output-resample-exclusive-stream",
+                        source = source,
+                        device = device
+                    ),
+                    (false, true) => rox_i18n::t!(
+                        "track-info-output-resample-mixer-stream",
+                        source = source,
+                        device = device
+                    ),
                 }),
             )
         } else {
@@ -1389,7 +1452,7 @@ impl TrackInfoPanel {
             };
             let chip = items
                 .contains(&InfoPiece::Output)
-                .then(|| self.output_chip(0, cx))
+                .then(|| self.output_chip(0, false, cx))
                 .flatten();
             return shell.child(
                 div()
@@ -1433,9 +1496,11 @@ impl TrackInfoPanel {
         let title = meta.map(|m| m.title.clone()).unwrap_or_default();
         let title = if title.is_empty() {
             now.path()
-                .file_stem()
+                .and_then(|path| path.file_stem())
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| now.path().display().to_string())
+                // No file behind it, so the key's own reference is the only
+                // name there is until the source hands tags over.
+                .unwrap_or_else(|| now.key.path.display().to_string())
         } else {
             title
         };
@@ -1478,11 +1543,22 @@ impl TrackInfoPanel {
         }
         // The inline art resolves only when a row includes the piece, the
         // header lines' rule; the thumb cache does the caching.
-        let thumb: Option<Thumb> = items.contains(&InfoPiece::Art).then(|| {
-            let path = now.path().to_path_buf();
-            self.state
-                .thumbs
-                .update(cx, |thumbs, cx| thumbs.get(&path, cx))
+        // A station has no file to pull embedded art out of, so the picture
+        // comes from the same place the backdrop's does: the song on air
+        // where the lookup found a cover for it, the station's own logo
+        // otherwise.
+        let thumb: Option<Thumb> = items.contains(&InfoPiece::Art).then(|| match now.path() {
+            Some(path) => {
+                let path = path.to_path_buf();
+                self.state
+                    .thumbs
+                    .update(cx, |thumbs, cx| thumbs.get(&path, cx))
+            }
+
+            None => match self.state.now_art.read(cx).live_art() {
+                Some(image) => Thumb::Ready(image),
+                None => Thumb::Missing,
+            },
         });
         // The chips build ahead of the row loop, one per occurrence, so
         // the loop below can hold the crawl states mutably.
@@ -1490,8 +1566,23 @@ impl TrackInfoPanel {
             .iter()
             .filter(|i| matches!(i, InfoPiece::Output))
             .count())
-            .map(|ix| self.output_chip(ix, cx))
+            .map(|ix| self.output_chip(ix, now.live, cx))
             .collect();
+
+        // The source mark, for a track that didn't come off disk. It leads
+        // whichever piece names where the track is from: the album, which
+        // for a station holds its own name once the overlay has run, and
+        // the title before the first announcement, when the row's title is
+        // still the station and there is no album to lead.
+        let glyph = match now.origin {
+            Origin::Local => None,
+            Origin::Radio => Some(icons::RADIO),
+            Origin::Subsonic => Some(icons::DATABASE),
+        }
+        .map(|path| match texts.album.is_some() {
+            true => (InfoPiece::Album, path),
+            false => (InfoPiece::Title, path),
+        });
 
         // The rows keep their editor indices so the scales line up even
         // past an empty row, and each row's plan splits into crawlable
@@ -1500,7 +1591,7 @@ impl TrackInfoPanel {
             .iter()
             .enumerate()
             .filter(|(_, row)| !row.is_empty())
-            .map(|(ix, row)| (ix, row_bits(row, &texts)))
+            .map(|(ix, row)| (ix, row_bits(row, &texts, glyph)))
             .collect();
         // The end-of-queue note trails the first row's last run, where
         // the single line has always worn it.
@@ -1597,7 +1688,7 @@ impl TrackInfoPanel {
                         RowBit::Fixed(InfoPiece::Rating) => {
                             star_iter.next();
                         }
-                        RowBit::Fixed(_) => {}
+                        RowBit::Fixed(_) | RowBit::Glyph(_) => {}
                     }
                 }
                 continue;
@@ -1664,14 +1755,23 @@ impl TrackInfoPanel {
                             // A line-tall square, scaled with its row's
                             // text so the art keeps matching the line.
                             let side = palette::scaled_px(20.) * scale;
-                            row = row.child(div().flex_none().w(side).h(side).child(
-                                group_head::art_content(
+                            // A station with no picture yet gets the radio
+                            // mark rather than the music note: the note is
+                            // the shape of a file with no cover, and this
+                            // is not a file.
+                            let empty_glyph = match now.live {
+                                true => icons::RADIO,
+                                false => icons::MUSIC,
+                            };
+                            row = row.child(div().flex_none().w(side).h(side).child(match thumb {
+                                Thumb::Ready(_) => group_head::art_content(
                                     thumb,
                                     f32::from(tokens::RADIUS),
                                     12.,
                                     false,
                                 ),
-                            ));
+                                _ => empty_cover(empty_glyph, 12. * scale),
+                            }));
                         }
                     }
                     RowBit::Fixed(InfoPiece::Spacer) => {
@@ -1680,6 +1780,17 @@ impl TrackInfoPanel {
                     RowBit::Fixed(InfoPiece::Divider) => {
                         row = row.child(div().flex_1().h(px(1.)).bg(palette::border()));
                     }
+                    RowBit::Glyph(path) => {
+                        // Muted and sized with its row's text, so it reads
+                        // as part of the byline rather than a control.
+                        row = row.child(
+                            svg()
+                                .path(path)
+                                .size(palette::scaled_px(13.) * scale)
+                                .flex_none()
+                                .text_color(palette::text_muted()),
+                        );
+                    }
                     RowBit::Fixed(_) => {}
                 }
             }
@@ -1687,6 +1798,26 @@ impl TrackInfoPanel {
         }
         shell.children(rows)
     }
+}
+
+/// The art piece with no picture behind it: the mark for the kind of row
+/// that's playing, centered in the square the cover would have filled.
+/// [`group_head::art_content`] draws its own music note here, which is the
+/// right shape for a file whose cover is missing and the wrong one for a
+/// station, where there was never a file to take a cover off.
+fn empty_cover(glyph: &'static str, icon_px: f32) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            svg()
+                .path(glyph)
+                .size(px(icon_px))
+                .text_color(palette::text_faint()),
+        )
+        .into_any_element()
 }
 
 /// One run of text sitting still: bright segments hold their width and
@@ -1848,7 +1979,7 @@ transport_panel!(
 
 #[cfg(test)]
 mod tests {
-    use super::{InfoPiece, PieceTexts, RowBit, TrackInfoConfig, editor_rows, row_bits};
+    use super::{InfoPiece, PieceTexts, RowBit, TrackInfoConfig, editor_rows, icons, row_bits};
     use crate::panel::Align;
 
     fn texts() -> PieceTexts {
@@ -1952,7 +2083,7 @@ mod tests {
             InfoPiece::Artist,
             InfoPiece::Album,
         ];
-        let bits = row_bits(&pieces, &texts());
+        let bits = row_bits(&pieces, &texts(), None);
         assert!(bits.len() == 1);
         let RowBit::Run(run) = &bits[0] else {
             panic!("expected a run");
@@ -1975,7 +2106,7 @@ mod tests {
             InfoPiece::Year,
             InfoPiece::Artist,
         ];
-        let bits = row_bits(&pieces, &texts());
+        let bits = row_bits(&pieces, &texts(), None);
         assert!(bits.len() == 3);
         assert!(matches!(&bits[0], RowBit::Run(run) if run.len() == 1));
         assert!(matches!(&bits[1], RowBit::Fixed(InfoPiece::Spacer)));
@@ -1984,6 +2115,43 @@ mod tests {
         };
         // The year is empty, so the muted phrase is the artist alone.
         assert!(run == &vec![("USAO".to_string(), true)]);
+    }
+
+    /// The source mark trails the row that names where the track came from
+    /// and leaves the text in one piece, so the whole line crawls on one
+    /// clock with the mark standing still. A local track never grows one.
+    #[test]
+    fn the_source_mark_trails_the_row_it_marks() {
+        let pieces = [InfoPiece::Title, InfoPiece::Artist, InfoPiece::Album];
+
+        let bits = row_bits(&pieces, &texts(), Some((InfoPiece::Album, icons::RADIO)));
+        assert!(bits.len() == 2);
+        let RowBit::Run(run) = &bits[0] else {
+            panic!("expected a run");
+        };
+        assert!(
+            run == &vec![
+                ("Level Up".to_string(), false),
+                ("USAO - REVOLUTION BEATZ".to_string(), true),
+            ]
+        );
+        assert!(matches!(&bits[1], RowBit::Glyph(icons::RADIO)));
+
+        // Behind the words, ahead of whatever the arrangement parked at
+        // the row's far edge.
+        let trailing = [InfoPiece::Title, InfoPiece::Album, InfoPiece::Output];
+        let bits = row_bits(&trailing, &texts(), Some((InfoPiece::Album, icons::RADIO)));
+        assert!(matches!(&bits[1], RowBit::Glyph(icons::RADIO)));
+        assert!(matches!(&bits[2], RowBit::Fixed(InfoPiece::Output)));
+
+        // A row without the marked piece keeps its own line clean.
+        let elsewhere = [InfoPiece::Title, InfoPiece::Artist];
+        let bits = row_bits(&elsewhere, &texts(), Some((InfoPiece::Album, icons::RADIO)));
+        assert!(bits.len() == 1);
+
+        // Nothing marked at all: the whole line is one run.
+        let bits = row_bits(&pieces, &texts(), None);
+        assert!(bits.len() == 1);
     }
 
     /// The editor's rows keep the empty well a trailing break makes, and

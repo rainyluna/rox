@@ -413,6 +413,8 @@ mod tests {
     /// A plain row; a test sets the fields its case is about.
     fn track(path: &str) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             path: path.into(),
             sub: 0,
             cue: None,

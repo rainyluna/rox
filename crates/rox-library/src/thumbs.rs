@@ -149,7 +149,9 @@ fn content_hash(bytes: &[u8]) -> i64 {
 }
 
 /// The thumbnail for one track: JPEG bytes, or None when the track has no
-/// art anywhere (or no longer stats). A hit is one point lookup; a miss
+/// art anywhere. A path that doesn't stat is a row from a source with no
+/// files under it and answers straight out of the pool, see [`stored`].
+/// A hit is one point lookup; a miss
 /// resolves the cover's bytes and checks the pool by their hash, so only
 /// the first sight of a cover pays the decode and re-encode: the rest of
 /// the album, and any other copy of the image, reuse the pooled row. The
@@ -159,7 +161,16 @@ fn content_hash(bytes: &[u8]) -> i64 {
 /// connection is shared across workers; the lock is held for the lookups,
 /// never the file reads or the encode.
 pub fn thumbnail(conn: &Mutex<Connection>, path: &Path) -> Option<Vec<u8>> {
-    let meta = std::fs::metadata(path).ok()?;
+    // A key that doesn't stat isn't a file and never will be: a station's
+    // URL, a Subsonic song id. There's nothing to re-read and no identity
+    // to check it against, so whatever [`store_bytes`] pooled under the
+    // key is the whole answer. A local file that has since been deleted
+    // lands here too and serves the cover it last had, which is a cache
+    // behaving like a cache.
+    let Ok(meta) = std::fs::metadata(path) else {
+        return stored(conn, &path.to_string_lossy());
+    };
+
     let size = meta.len() as i64;
     let mtime = meta
         .modified()
@@ -265,6 +276,79 @@ pub fn thumbnail(conn: &Mutex<Connection>, path: &Path) -> Option<Vec<u8>> {
         ])
         .ok()?;
     }
+    (!thumb.is_empty()).then_some(thumb)
+}
+
+/// The pooled image for a row keyed by something that isn't a path:
+/// [`store_bytes`]'s read side. The identity columns are zero on those
+/// rows and there's no file behind them, so the key alone decides. An
+/// empty pooled image is a source whose bytes wouldn't decode, which
+/// answers the same as no row at all.
+fn stored(conn: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
+    let conn = conn.lock().unwrap();
+
+    let image: Vec<u8> = conn
+        .prepare_cached(
+            "SELECT i.image FROM thumbs t JOIN images i ON i.hash = t.art_hash
+             WHERE t.path = ?1",
+        )
+        .ok()?
+        .query_row([key], |r| r.get(0))
+        .optional()
+        .ok()??;
+
+    (!image.is_empty()).then_some(image)
+}
+
+/// Store one image whose bytes came from somewhere other than a file, and
+/// hand back the thumbnail. What a non-local source uses: there's no path
+/// to stat and no cover file to key on, so the row's own key (a Subsonic
+/// song id) stands in for the path and the identity columns sit at zero.
+/// Everything past that is [`thumbnail`]'s own path, pool included, so two
+/// tracks of one album still store one image. [`thumbnail`] reads it back
+/// under the same key, which is what puts a station's favicon in a list
+/// row beside the files.
+///
+/// Takes the connection directly rather than the shared `Mutex` the
+/// lookups take: a source sync owns its connection outright, so there's
+/// nothing to contend with.
+pub fn store_bytes(conn: &Connection, bytes: &[u8], key: &str) -> Option<Vec<u8>> {
+    let hash = content_hash(bytes);
+
+    // A cover seen before skips the decode and the re-encode whole, the
+    // same as a local one.
+    let pooled: Option<Vec<u8>> = conn
+        .prepare_cached("SELECT image FROM images WHERE hash = ?1")
+        .ok()?
+        .query_row([hash], |r| r.get(0))
+        .optional()
+        .ok()?;
+
+    let thumb = match pooled {
+        Some(image) => image,
+
+        None => {
+            // Bytes that won't decode pool an empty image, so the failure
+            // caches and dedups the same way a success does.
+            let encoded = encode(bytes).unwrap_or_default();
+            conn.prepare_cached("INSERT OR IGNORE INTO images (hash, image) VALUES (?1, ?2)")
+                .ok()?
+                .execute(rusqlite::params![hash, encoded])
+                .ok()?;
+
+            encoded
+        }
+    };
+
+    conn.prepare_cached(
+        "INSERT OR REPLACE INTO thumbs \
+         (path, mtime, size, art_path, art_mtime, art_size, art_hash) \
+         VALUES (?1, 0, 0, '', 0, 0, ?2)",
+    )
+    .ok()?
+    .execute(rusqlite::params![key, hash])
+    .ok()?;
+
     (!thumb.is_empty()).then_some(thumb)
 }
 
@@ -556,6 +640,44 @@ mod tests {
         assert_eq!(count(&conn, "images"), 0, "and references no image");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row whose path is not a file reads its picture straight back out
+    /// of the pool. This is the whole reason a station's favicon and a
+    /// Subsonic cover can show at all: [`store_bytes`] put them there, and
+    /// before this the stat at the top of [`thumbnail`] made them
+    /// unreachable.
+    #[test]
+    fn a_non_file_key_reads_back_what_was_stored() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&conn, MIGRATIONS).unwrap();
+
+        let stored = store_bytes(&conn, &jpeg(8, 1), "https://host/jazz").expect("a thumbnail");
+
+        let conn = Mutex::new(conn);
+        assert_eq!(
+            thumbnail(&conn, Path::new("https://host/jazz")).as_ref(),
+            Some(&stored),
+            "the station's own key serves its picture"
+        );
+        assert!(
+            thumbnail(&conn, Path::new("https://host/nothing")).is_none(),
+            "a key nothing was stored under stays blank"
+        );
+    }
+
+    /// Bytes that aren't an image pool an empty picture, and an empty
+    /// picture reads as no art rather than as a zero-byte JPEG the
+    /// decoder then chokes on.
+    #[test]
+    fn a_non_file_key_with_undecodable_bytes_reads_as_no_art() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&conn, MIGRATIONS).unwrap();
+
+        assert!(store_bytes(&conn, b"not an image", "sg-1").is_none());
+
+        let conn = Mutex::new(conn);
+        assert!(thumbnail(&conn, Path::new("sg-1")).is_none());
     }
 
     /// A changed folder cover regenerates under a new pool key, and the

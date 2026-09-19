@@ -2674,6 +2674,7 @@ mod tests {
             id: i64::from(row),
             title: title.to_owned().into(),
             key: Some(TrackKey {
+                source: rox_library::cue::local(),
                 path: path.into(),
                 sub,
             }),
@@ -2815,6 +2816,7 @@ mod tests {
         reveal_cue(
             &mut expanded,
             &TrackKey {
+                source: rox_library::cue::local(),
                 path: "mix.flac".into(),
                 sub: 4,
             },
@@ -2829,6 +2831,7 @@ mod tests {
         reveal_cue(
             &mut expanded,
             &TrackKey {
+                source: rox_library::cue::local(),
                 path: "plain.mp3".into(),
                 sub: 0,
             },

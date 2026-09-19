@@ -42,6 +42,17 @@ symphonia = { version = "0.6", default-features = false, features = [
 # tests/fixtures/dense-transients.opus is the regression that catches the
 # panic; tests/fixtures/README.md has the comparison.
 opus-pure = "0.2"
+# The byte transport under the decoder for a remote source (ADR 29): range
+# requests for a seekable file, an endless body for a station. Same client
+# rox-net already uses, so the workspace carries one HTTP stack and one TLS
+# stack rather than two.
+#
+# This is the layering exception ADR 29 records. The rule is that wire calls
+# live in rox-net and run on the background executor; this one can't, because
+# the decode loop pulls bytes out of it synchronously the same way it pulls
+# them out of a File, and rox-net would have to take on symphonia's MediaSource
+# trait to host it. See crates/rox-playback/src/http.rs.
+ureq = "2"
 # Wait-free SPSC ring for the RT boundary (ADR 3), both the sample ring and the PCM tap.
 rtrb = "0.3"
 # ADR 19's resampler: windowed sinc from rubato, replacing the linear

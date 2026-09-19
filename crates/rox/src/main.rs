@@ -48,6 +48,7 @@ mod signals_window;
 mod smart_playlist;
 mod sortnames_job;
 mod startup;
+mod station_directory;
 mod stats_window;
 mod tags;
 mod tasks_window;
@@ -249,6 +250,7 @@ fn install_openers() {
         eq_window: eq_window::open,
         stats_window: stats_window::open,
         health_window: health_window::open,
+        station_directory: station_directory::open,
         signals_window: signals_window::open,
         shader_editor: shader_editor::open,
         milkdrop_picker: milkdrop_picker::open,
@@ -257,6 +259,7 @@ fn install_openers() {
         lyrics_edit: lyrics::edit::open,
         lyrics_matcher: lyrics::matcher::open,
         lyrics_saved: lyrics::saved,
+        lyrics_preview: lyrics::preview,
         add_panel_submenu: workspace::add_panel_submenu,
         host_settings_item: composite::host_settings_item,
         confirm_close_locked,
@@ -478,6 +481,10 @@ fn main() {
         providers::set_deezer_online(settings.accounts.providers.deezer);
         providers::set_lastfm_art_online(settings.accounts.providers.lastfm_art);
         providers::set_artist_online(settings.accounts.providers.artist);
+        // The source header table, filled before a window exists, so the
+        // first thing to resolve a remote row already has somewhere to ask
+        // how to authorize it.
+        rox_services::sources::install_registry();
         // An AppImage that moved since its menu entry was written has an
         // entry pointing at nothing; point it at where the file is now.
         startup::desktop_integration::heal();

@@ -9,3 +9,4 @@ pub mod lastfm;
 pub mod librefm;
 pub mod listenbrainz;
 pub mod providers;
+pub mod sources;

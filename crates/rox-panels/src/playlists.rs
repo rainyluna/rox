@@ -2628,6 +2628,15 @@ impl Panel for PlaylistsPanel {
     ) -> PopupMenu {
         let menu = self.new_playlist_item(menu);
 
+        // Import beside the new-playlist rows as well as on the tab bar,
+        // so it's reachable from a right-click on the tree whether or not
+        // the tab bar is drawn for this placement.
+        let menu = menu.item(
+            PopupMenuItem::new(rox_i18n::t!("playlists-import"))
+                .icon(Icon::default().path(icons::DOWNLOAD))
+                .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+        );
+
         // Display section: the view knobs under their own label, ahead of
         // the Panel section, the library's shape. The same knobs the View
         // settings page holds, one flyout each.
@@ -2764,10 +2773,23 @@ impl PlaylistsPanel {
                 div()
                     .flex_1()
                     .flex()
+                    .flex_col()
                     .items_center()
                     .justify_center()
+                    .gap(tokens::SPACE_SM)
                     .text_color(palette::text_faint())
-                    .child(message),
+                    .child(message)
+                    // Import is the tab bar's button, and the tab bar isn't
+                    // on screen for every placement, so an empty tree
+                    // offers it here too.
+                    .when(!searching, |empty| {
+                        empty.child(crate::settings::ui::small_button(
+                            rox_i18n::t!("playlists-import"),
+                            icons::DOWNLOAD,
+                            false,
+                            cx.listener(|this, _, window, cx| this.import(window, cx)),
+                        ))
+                    }),
             )
         } else {
             let this = cx.entity().downgrade();

@@ -204,7 +204,12 @@ pub struct BiographyPanel {
     /// read; empty inside for an untagged file. Cleared when the catalog
     /// changes. A tag naming several acts ("A, B", "A feat. B") splits
     /// into them, and `pick` says which one the sheet is about.
-    artist: Option<(TrackKey, Vec<String>)>,
+    ///
+    /// The number beside the key is the station-title revision the credits
+    /// were read at. A station's key stands still while the song under it
+    /// turns over, so without it the sheet would stay on whoever was
+    /// playing when the stream was tuned in.
+    artist: Option<(TrackKey, u64, Vec<String>)>,
     /// Which of the credited artists the sheet shows, an index into the
     /// list above; back to the first when the track changes.
     pick: usize,
@@ -270,7 +275,28 @@ impl BiographyPanel {
     pub fn new(state: AppState, config: BiographyConfig, cx: &mut Context<Self>) -> Self {
         // The sheet turns over with the track, not as it plays, so the
         // gated observe skips the pump's per-tick repaints.
-        let _player_changed = crate::player::observe_view(&state.player, cx);
+        //
+        // The title revision rides along with the view because a station
+        // is one track for the whole broadcast: the view holds the key,
+        // which doesn't move when the stream announces its next song, and
+        // that announcement is the only thing that names the act the sheet
+        // should be about.
+        let _player_changed = {
+            let mut last = {
+                let player = state.player.read(cx);
+                (player.view(), player.title_rev())
+            };
+            cx.observe(&state.player, move |_: &mut Self, player, cx| {
+                let now = {
+                    let player = player.read(cx);
+                    (player.view(), player.title_rev())
+                };
+                if now != last {
+                    last = now;
+                    cx.notify();
+                }
+            })
+        };
         let _selection_changed = cx.subscribe(
             &state.selection,
             |this: &mut Self, _, _: &SelectionEvent, cx| {
@@ -349,14 +375,16 @@ impl BiographyPanel {
     /// cache or one database read on a miss, the other tag standing in
     /// when the chosen one is empty. Empty for an untagged file or one
     /// the library doesn't know.
+    ///
+    /// A station's row names the station, so the read goes through the
+    /// player's overlay and comes back with the act the stream announced.
+    /// The revision moves once a song, which is the rate this then runs at.
     fn credits_for(&mut self, key: &TrackKey, cx: &App) -> Vec<String> {
-        if self.artist.as_ref().map(|(k, _)| k) != Some(key) {
+        let rev = self.live_rev(key, cx);
+        if self.artist.as_ref().map(|(k, r, _)| (k, *r)) != Some((key, rev)) {
             let known = self.known_acts(cx);
             let names = self
-                .state
-                .library
-                .read(cx)
-                .meta_for_key(key)
+                .live_meta(key, cx)
                 .map(|meta| {
                     let (first, second) = match self.config.name_source {
                         NameSource::Artist => (meta.artist, meta.album_artist),
@@ -371,14 +399,39 @@ impl BiographyPanel {
                     }
                 })
                 .unwrap_or_default();
-            self.artist = Some((key.clone(), names));
+            self.artist = Some((key.clone(), rev, names));
             self.pick = 0;
             self.trail.clear();
         }
         self.artist
             .as_ref()
-            .map(|(_, names)| names.clone())
+            .map(|(.., names)| names.clone())
             .unwrap_or_default()
+    }
+
+    /// The station-title revision the shown track sits at: the number that
+    /// moves when a stream announces its next song. Zero unless the shown
+    /// track is the live one playing, so a file and a selection both key on
+    /// nothing but themselves.
+    fn live_rev(&self, key: &TrackKey, cx: &App) -> u64 {
+        let player = self.state.player.read(cx);
+        match player.now_playing() {
+            Some(now) if now.live && now.key == *key => player.title_rev().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// The shown track's tags with a station's announced song laid over
+    /// them. A stream's library row is the station itself, whose artist
+    /// tag names the station, so the credits have to come off the overlay
+    /// or the sheet is about a radio station instead of the band on it.
+    fn live_meta(&self, key: &TrackKey, cx: &App) -> Option<rox_library::store::TrackMeta> {
+        let row = self.state.library.read(cx).meta_for_key(key);
+        let player = self.state.player.read(cx);
+        match player.now_playing() {
+            Some(now) if now.key == *key => player.live_over(row),
+            _ => row,
+        }
     }
 
     /// The library's album artists, folded, from the cache or one pass
@@ -413,7 +466,7 @@ impl BiographyPanel {
     fn picked(&self) -> String {
         self.artist
             .as_ref()
-            .and_then(|(_, names)| names.get(self.pick).or_else(|| names.first()))
+            .and_then(|(.., names)| names.get(self.pick).or_else(|| names.first()))
             .cloned()
             .unwrap_or_default()
     }
@@ -1969,9 +2022,18 @@ fn held_index(tables: [(FilterField, &[String]); 2]) -> HashMap<String, (FilterF
 /// split. A comma splits unless the parts around it, joined back, name
 /// an act `is_known` vouches for: the library's album artists, so
 /// "Earth, Wind & Fire" stays whole while "BABYMETAL, Electric Callboy"
-/// comes apart. The longest known run wins. An ampersand never splits,
-/// since "Simon & Garfunkel" is one act. Trimmed, empties dropped; a
-/// plain name comes back as itself.
+/// comes apart. The longest known run wins.
+///
+/// An ampersand is a coin flip between a duo and a collaboration, so it
+/// gets both readings: the whole credit first, then each side after it.
+/// "Teddy Killerz & Billain" comes back as itself and then the two acts,
+/// so the sheet opens on the collab's own page and either act is one
+/// chip away. `is_known` doesn't veto this: a collab with an album to
+/// its name is filed like a duo, so the album artists can't tell the two
+/// apart, and a duo's two spare chips cost less than a collab's dead
+/// sheet. The one exception is a run the comma rule glued back together,
+/// since "Earth, Wind & Fire" already proved itself one name. Trimmed,
+/// empties dropped; a plain name comes back as itself.
 fn credits(tag: &str, is_known: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut out = Vec::new();
     for segment in tag.split([';', '/']) {
@@ -1992,8 +2054,27 @@ fn credits(tag: &str, is_known: &dyn Fn(&str) -> bool) -> Vec<String> {
                         break;
                     }
                 }
-                out.push(parts[i..end].join(", "));
+                let name = parts[i..end].join(", ");
+                let glued = end - i > 1;
                 i = end;
+
+                // A name with an ampersand in it is also read as the acts
+                // on either side of it, unless the comma rule just proved
+                // the whole thing one act.
+                let sides: Vec<String> = if glued {
+                    Vec::new()
+                } else {
+                    name.split(" & ")
+                        .map(str::trim)
+                        .filter(|side| !side.is_empty())
+                        .map(String::from)
+                        .collect()
+                };
+
+                out.push(name);
+                if sides.len() > 1 {
+                    out.extend(sides);
+                }
             }
         }
     }
@@ -2169,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn credits_split_lists_and_features_but_not_ampersands() {
+    fn credits_split_lists_and_features() {
         let none = |_: &str| false;
         assert_eq!(
             credits("BABYMETAL, Electric Callboy", &none),
@@ -2180,8 +2261,29 @@ mod tests {
             ["Poppy", "BABYMETAL"]
         );
         assert_eq!(credits("A ft. B / C; D", &none), ["A", "B", "C", "D"]);
-        assert_eq!(credits("Simon & Garfunkel", &none), ["Simon & Garfunkel"]);
         assert_eq!(credits("  ", &none), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_ampersand_reads_whole_first_and_then_each_side() {
+        let none = |_: &str| false;
+        assert_eq!(
+            credits("Teddy Killerz & Billain", &none),
+            ["Teddy Killerz & Billain", "Teddy Killerz", "Billain"]
+        );
+        assert_eq!(
+            credits("Teddy Killerz & Billain, Foo", &none),
+            ["Teddy Killerz & Billain", "Teddy Killerz", "Billain", "Foo"]
+        );
+        // A duo the library files albums under still gets its sides: the
+        // album artists can't tell it from a collab with a record out.
+        let duo = |name: &str| fold_name(name) == fold_name("Simon & Garfunkel");
+        assert_eq!(
+            credits("Simon & Garfunkel", &duo),
+            ["Simon & Garfunkel", "Simon", "Garfunkel"]
+        );
+        // An ampersand with nothing on one side never adds a blank.
+        assert_eq!(credits("Simon & ", &none), ["Simon &"]);
     }
 
     #[test]

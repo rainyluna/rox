@@ -3,6 +3,10 @@
 //! over each one, and the color set behind them. Shared so a mark looks
 //! and acts the same on both strips and in the bookmarks panel, and so
 //! the panels stay out of the color business entirely.
+//!
+//! These are the kept marks, and they live on the strip's bottom edge as
+//! ribbons. The top edge belongs to [`crate::cue_ui`] and this listen's
+//! throwaway cues.
 
 use gpui::{
     App, Bounds, Context, Div, MouseButton, MouseDownEvent, MouseMoveEvent, Path, Pixels, Rgba,
@@ -18,6 +22,7 @@ use rox_library::cue::TrackKey;
 
 use crate::openers;
 use crate::panel::{AppState, ScrubState};
+use crate::position_bound;
 
 /// The quick picks a mark can take without opening a picker: a name key
 /// and its `#rrggbb`. Mid-saturation hues that hold up on a dark and a
@@ -97,33 +102,51 @@ pub fn mark_label(name: &str, position_ms: u32) -> String {
     }
 }
 
-/// The chevron's footprint: its base width and height in px, and the
-/// stroke it's drawn with. It sits on the strip's bottom edge pointing up
-/// at the line, so it reads as a tab under the track rather than a second
-/// playhead.
-pub const MARK_W: f32 = 10.0;
-pub const MARK_H: f32 = 6.0;
-const MARK_STROKE: f32 = 2.5;
-/// The hit target around a chevron, wider than the drawing so a pointer
+/// The ribbon's footprint: its width and height in px. It sits on the
+/// strip's bottom edge, so it reads as a tab under the track rather than
+/// a second playhead.
+///
+/// Taller than it is wide, and narrow: the proportions of the bookmark
+/// glyph itself, roughly two by three. A wider tab reads as a flag or a
+/// block of colour, and the only thing that makes this shape legible at
+/// nine pixels is that it stands up the way the icon does.
+pub const MARK_W: f32 = 6.0;
+pub const MARK_H: f32 = 9.0;
+/// How far the notch bites up into the ribbon's bottom edge, a third of
+/// its height. That's the bite the icon takes, and it leaves the label
+/// enough body above it to still read as one.
+const NOTCH_H: f32 = 3.0;
+/// The shortest a ribbon draws at. Under this the notch closes up and the
+/// shape is a smear, so a strip with less room than this draws nothing.
+const MIN_MARK_H: f32 = 4.0;
+/// The hit target around a ribbon, wider than the drawing so a pointer
 /// finds it without aiming.
 const HIT_W: f32 = 16.0;
-/// The chevron's alpha at full weight.
+/// The ribbon's alpha at full weight.
 const MARK_ALPHA: u8 = 0xe6;
 
 /// Paint the marks over a strip, the seek strip's and the waveform's
 /// shared look. `weight` scales the alpha, for a strip fading its shape in
 /// or out. Goes on after the played fill and before the playhead, so the
 /// head still crosses over a mark it reaches.
+///
+/// The shape is the ribbon everything else in the world uses for a
+/// bookmark: a solid tab with a notch bitten out of its bottom. It used to
+/// be a chevron, and the chevron moved to the top edge to stand for a
+/// session cue instead. One glyph per kind of mark, so which one you are
+/// looking at is never a question of which half of the strip you meant.
 pub fn paint_marks(marks: &[Mark], weight: f32, bounds: Bounds<Pixels>, window: &mut Window) {
     let w = f32::from(bounds.size.width);
     let h = f32::from(bounds.size.height);
-    if w <= 0.0 || h <= MARK_H || marks.is_empty() {
+    if w <= 0.0 || h <= MIN_MARK_H + 1.0 || marks.is_empty() {
         return;
     }
+
     let alpha = (MARK_ALPHA as f32 * weight.clamp(0.0, 1.0)) as u8;
     if alpha == 0 {
         return;
     }
+
     let (x0, y0) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let at = |x: f32, y: f32| gpui::point(px(x0 + x), px(y0 + y));
     let solid = (
@@ -131,27 +154,31 @@ pub fn paint_marks(marks: &[Mark], weight: f32, bounds: Bounds<Pixels>, window: 
         gpui::point(0., 1.),
         gpui::point(0., 1.),
     );
+
     let bottom = h - 1.0;
-    let top = bottom - MARK_H;
+    // The label held to the room under the line: a strip too short for the
+    // full height gets a shorter one, notch scaled with it, rather than
+    // losing its marks entirely.
+    let mark_h = MARK_H.min(bottom);
+    let notch_h = NOTCH_H * mark_h / MARK_H;
+    let top = bottom - mark_h;
     let half = MARK_W / 2.0;
-    // The inner edge's inset along the base: the stroke measured across
-    // the slope, so the band reads the same thickness up its whole arm.
-    let inset = MARK_STROKE * (half * half + MARK_H * MARK_H).sqrt() / MARK_H;
+
     for mark in marks {
         let x = mark.fraction.clamp(0.0, 1.0) * w;
-        // A chevron band: the outer triangle with its inner triangle taken
-        // out, as four triangles round the ring.
-        let apex = at(x, top);
-        let bl = at(x - half, bottom);
+        // The label as a filled pentagon: the four corners of the
+        // rectangle with the notch's point pushed up between the bottom
+        // two.
+        let tl = at(x - half, top);
+        let tr = at(x + half, top);
         let br = at(x + half, bottom);
-        let apex_in = at(x, top + MARK_STROKE);
-        let bl_in = at(x - half + inset, bottom);
-        let br_in = at(x + half - inset, bottom);
-        let mut path = Path::new(apex);
-        path.push_triangle((apex, br, br_in), solid);
-        path.push_triangle((apex, br_in, apex_in), solid);
-        path.push_triangle((apex, apex_in, bl_in), solid);
-        path.push_triangle((apex, bl_in, bl), solid);
+        let bl = at(x - half, bottom);
+        let notch = at(x, bottom - notch_h);
+
+        let mut path = Path::new(tl);
+        path.push_triangle((tl, tr, br), solid);
+        path.push_triangle((tl, br, notch), solid);
+        path.push_triangle((tl, notch, bl), solid);
         window.paint_path(path, palette::alpha(mark.color, alpha));
     }
 }
@@ -162,8 +189,12 @@ pub fn paint_marks(marks: &[Mark], weight: f32, bounds: Bounds<Pixels>, window: 
 const PREV_GRACE_SECS: f64 = 1.5;
 
 /// Jump the playing track to its next bookmark, or the one before the
-/// playhead. Nothing playing, or no mark that way, does nothing.
+/// playhead. Nothing playing, a station playing, or no mark that way, does
+/// nothing.
 pub fn step(state: &AppState, forward: bool, cx: &mut App) {
+    if !position_bound::allowed(state, cx) {
+        return;
+    }
     let Some(now) = state.player.read(cx).now_playing() else {
         return;
     };
@@ -189,10 +220,10 @@ fn step_target(marks: impl Iterator<Item = f64>, at: f64, forward: bool) -> Opti
     }
 }
 
-/// The interactive layer over a strip's marks: a hit target per chevron
+/// The interactive layer over a strip's marks: a hit target per ribbon
 /// that seeks on a click, reports its hover, and opens the mark's menu on
 /// a right click, plus the readout over the hovered one. Laid over the
-/// strip's own hover layer, so a pointer on a chevron reads the mark and
+/// strip's own hover layer, so a pointer on a ribbon reads the mark and
 /// not the time under it.
 ///
 /// `hovered` is the panel's record of which mark the pointer is on, kept by
@@ -222,7 +253,7 @@ pub fn overlay<V: 'static>(
             .size_full()
             .cursor_pointer()
             // The strip's own readout would keep tracking the pointer under
-            // the chevron; clearing it here and stopping the move leaves
+            // the ribbon; clearing it here and stopping the move leaves
             // the mark's readout as the only one showing.
             .on_mouse_move(cx.listener(move |_, _: &MouseMoveEvent, _, cx| {
                 hover_scrub.set_hover(None);
@@ -254,11 +285,17 @@ pub fn overlay<V: 'static>(
             });
         // Each slot carries its own id so the context menus inside them,
         // which all share one, get element state of their own.
+        //
+        // The bottom half only, because the cue slots hold the top half
+        // and a full-height column would swallow them: two marks within a
+        // hit width of each other would leave whichever was hosted last
+        // as the only one a pointer could reach. The split follows where
+        // the glyphs already are.
         layer = layer.child(
             div()
                 .id(("bookmark-slot", id as u64))
                 .absolute()
-                .top_0()
+                .top(relative(0.5))
                 .bottom_0()
                 .left(relative(mark.fraction))
                 .w(px(HIT_W))
@@ -273,7 +310,7 @@ pub fn overlay<V: 'static>(
 }
 
 /// The hovered mark's readout: its name over its time, or the time alone,
-/// in the seek preview's pill, centered over the chevron.
+/// in the seek preview's pill, centered over the ribbon.
 fn readout(mark: &Mark) -> Div {
     let time = fmt_time(mark.position_ms as f64 / 1000.0);
     let name = mark.name.trim();
@@ -332,27 +369,39 @@ pub fn menu_for(
     // Move only offers itself while the mark's track is the one playing:
     // the playhead is the target, and on any other track it points at
     // nothing to do with this mark.
-    let playing = state
-        .player
-        .read(cx)
-        .now_playing()
-        .filter(|now| now.key == key);
-    let menu = match playing {
-        Some(now) => {
-            let move_state = state.clone();
-            let position_ms = (now.position_secs.max(0.0) * 1000.0).round() as u32;
-            menu.item(
-                PopupMenuItem::new(rox_i18n::t!("bookmark-menu-move"))
-                    .icon(Icon::default().path(icons::LOCATE))
-                    .on_click(move |_, _, cx| {
-                        move_state
-                            .library
-                            .update(cx, |library, cx| library.move_bookmark(id, position_ms, cx));
-                    }),
-            )
+    //
+    // A station playing is the exception. The row shows greyed whatever
+    // the mark belongs to, because a listen clock is not a position and
+    // the question "why can't I move this" deserves an answer where it
+    // was asked. Bookmarks dropped on a station before the lockout
+    // existed are exactly the ones this menu opens over.
+    let move_label = rox_i18n::t!("bookmark-menu-move");
+    let menu = if !position_bound::allowed(&state, cx) {
+        menu.item(position_bound::locked_item(move_label, icons::LOCATE))
+    } else {
+        let playing = state
+            .player
+            .read(cx)
+            .now_playing()
+            .filter(|now| now.key == key);
+        match playing {
+            Some(now) => {
+                let move_state = state.clone();
+                let position_ms = (now.position_secs.max(0.0) * 1000.0).round() as u32;
+                menu.item(
+                    PopupMenuItem::new(move_label)
+                        .icon(Icon::default().path(icons::LOCATE))
+                        .on_click(move |_, _, cx| {
+                            move_state.library.update(cx, |library, cx| {
+                                library.move_bookmark(id, position_ms, cx)
+                            });
+                        }),
+                )
+            }
+            None => menu,
         }
-        None => menu,
     };
+
     let remove_state = state;
     menu.separator().item(
         PopupMenuItem::new(rox_i18n::t!("bookmark-menu-remove"))

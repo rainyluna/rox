@@ -37,6 +37,7 @@ use rox_design::palette::{self, Palette, Sides};
 use crate::acoustic;
 use crate::continuation;
 use crate::install;
+use crate::pattern::{self, Pattern, PatternField};
 
 /// The floor under every rox window. Applying a layout or toggling the
 /// mini-player resizes the window to a preset's stored size, and a bad or
@@ -591,6 +592,17 @@ pub struct Settings {
     /// The icecast broadcast sink (ADR 22), off by default. Applied at
     /// startup and whenever the settings save.
     pub broadcast: BroadcastSettings,
+    /// Saving whole songs off a live stream, off by default. The Sources
+    /// page's Capture section.
+    pub capture: CaptureSettings,
+    /// How much of a live stream is kept in memory behind the playhead, in
+    /// seconds. It's what makes a station pausable: the connection stays up
+    /// through a pause and the bytes pile up here, so Play carries on where
+    /// the listener stopped instead of at the broadcast's live edge, and the
+    /// last few minutes can be stepped back through. Held to
+    /// [`clamp_live_buffer_secs`]'s band, since the memory is real: ten
+    /// minutes of a 320 kbps stream is 24 MB.
+    pub live_buffer_secs: u32,
     /// Whether closing the last workspace window leaves the app resident,
     /// music playing, with the tray (Linux) or the dock (macOS) as the way
     /// back in. Off quits, the default. Ignored on Windows until a tray
@@ -1008,6 +1020,10 @@ pub struct AccountsState {
     /// Discord Rich Presence options (enable toggle, the Last.fm and
     /// YouTube buttons).
     pub discord: DiscordSettings,
+    /// The Subsonic server, on the same Integrations page. An account and
+    /// a server like the three connections above, and a library source on
+    /// top of that.
+    pub subsonic: SubsonicAccount,
 }
 
 impl Default for SessionState {
@@ -1626,6 +1642,28 @@ pub const DEFAULT_STEP_PREVIEW_MS: f32 = 100.0;
 /// shortest blip that's more than a pop.
 pub const STEP_PREVIEW_MS_MIN: f32 = 10.0;
 pub const STEP_PREVIEW_MS_MAX: f32 = STEP_MS_MAX;
+
+/// How much of a live stream is buffered behind the playhead out of the
+/// box: ten minutes. Long enough to take a call and come back to the song
+/// that was playing, and about 24 MB on the fattest stream anyone
+/// broadcasts.
+pub const DEFAULT_LIVE_BUFFER_SECS: u32 = 600;
+
+/// The band that buffer is held to. The floor is the shortest window that
+/// still survives a pause worth taking. The ceiling is twelve hours, which
+/// is the practical infinite: nobody leaves a station on longer than that
+/// in one sitting, so a buffer set here never rolls over and a pause is
+/// always resumable. It costs about 1.7 GB on a 320 kbps stream, which is
+/// the honest price of asking for that and the reason it isn't the default.
+pub const LIVE_BUFFER_SECS_MIN: u32 = 30;
+pub const LIVE_BUFFER_SECS_MAX: u32 = 43200;
+
+/// The buffer length as the engine is allowed to have it. Every byte of it
+/// is resident memory, so a hand-edited file doesn't get to ask for a week
+/// of radio.
+pub fn clamp_live_buffer_secs(secs: u32) -> u32 {
+    secs.clamp(LIVE_BUFFER_SECS_MIN, LIVE_BUFFER_SECS_MAX)
+}
 
 /// The frame knobs' ceilings, in px: every knob runs from 0 (off) up to
 /// its own. Shared by the app defaults' clamp and both settings windows'
@@ -2581,6 +2619,35 @@ pub struct LibreFm {
     pub username: String,
 }
 
+/// A Subsonic or OpenSubsonic server rox reads a catalog off. Unlike the
+/// three above it this isn't a scrobble destination, it's a library: the
+/// sync pulls rows in under its own source id and playback streams from
+/// it. One server for now, since two would want a list and a picker and
+/// nobody has asked for that yet.
+///
+/// The password sits here rather than in `settings.json` because it's a
+/// real account credential, not the shared-secret plumbing an icecast
+/// source password is. It's held in the clear because the protocol derives
+/// a per-request token from it, so there's nothing else the server would
+/// take.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubsonicAccount {
+    /// Whether the server is used at all: synced, browsed, streamed from.
+    /// Off leaves the rows in the library, since pruning someone's whole
+    /// catalog because they flipped a switch would be a surprise.
+    pub enabled: bool,
+    /// Base URL with scheme, no `/rest` on the end. Empty means not
+    /// configured.
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    /// When the last sync finished, unix seconds; 0 until one has. The
+    /// settings row reads it, and nothing else does: a sync is always
+    /// asked for, never scheduled off this.
+    pub last_sync: i64,
+}
+
 /// Where a fetched lyrics sheet saves: the embedded tag through the
 /// writer's atomic layer, an `.lrc` sidecar next to the audio file, or
 /// the app's own lyrics store under [`lyrics_dir`].
@@ -2892,6 +2959,83 @@ impl Default for BroadcastSettings {
             bitrate: 192,
         }
     }
+}
+
+/// Saving songs off a live stream. The bytes of a station are already
+/// passing through the transport in the container the station encodes in,
+/// and the in-band metadata marks where one song ends and the next begins,
+/// so a song heard from one title change to the next can be written to
+/// disk without a decoder or an encoder touching it. Off by default: an
+/// evening of radio is a few hundred megabytes, and nobody should find
+/// that on their disk without having asked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureSettings {
+    /// Whether whole songs get written out.
+    pub enabled: bool,
+    /// Where they land. A folder of its own rather than a library root,
+    /// because a station's boundaries are approximate and a capture is
+    /// worth looking at before it joins the collection.
+    pub folder: PathBuf,
+    /// What a saved song is called, in the renamer's pattern language.
+    /// A "/" in it makes a folder under [`CaptureSettings::folder`], so
+    /// the default files an evening of radio by station rather than
+    /// piling it up flat. Read through
+    /// [`CaptureSettings::parsed_pattern`], never straight.
+    pub pattern: String,
+    /// What a saved song's album tag says, in the same pattern language.
+    /// Empty writes no album at all, which is the default: a song off the
+    /// air has no release, and stamping the station's name into the album
+    /// field pollutes every album view it lands in. Someone who wants it
+    /// there types `%station%`; someone filing radio as a shelf of its own
+    /// types "Radio" or "Singles". The station always goes in the comment.
+    pub album: String,
+}
+
+impl Default for CaptureSettings {
+    fn default() -> Self {
+        CaptureSettings {
+            enabled: false,
+            folder: default_capture_folder(),
+            pattern: DEFAULT_CAPTURE_PATTERN.to_string(),
+            album: String::new(),
+        }
+    }
+}
+
+/// How a capture is named when nobody has said otherwise: the station's
+/// own folder, and the song inside it the way the air announced it.
+pub const DEFAULT_CAPTURE_PATTERN: &str = "%station%/%artist% - %title%";
+
+impl CaptureSettings {
+    /// The pattern, parsed, with the default standing in for one that
+    /// won't. A pattern is free text in a settings file and the only
+    /// place it gets checked is the row that types it, so a hand-edited
+    /// file or a placeholder retired from under it can't be allowed to
+    /// stop captures from landing.
+    pub fn parsed_pattern<F: PatternField>(&self) -> Pattern<F> {
+        if let Ok(pattern) = pattern::parse(&self.pattern) {
+            return pattern;
+        }
+
+        log::warn!(
+            "capture: {:?} is not a pattern, using the default",
+            self.pattern
+        );
+
+        pattern::parse(DEFAULT_CAPTURE_PATTERN).expect("the default capture pattern parses")
+    }
+}
+
+/// Where captures go when nobody has said otherwise: a folder of their own
+/// under the OS music directory, which is where a music player's output
+/// belongs and where the library is most likely already pointed. A machine
+/// that names no music directory falls back to the data dir, which always
+/// exists.
+pub fn default_capture_folder() -> PathBuf {
+    dirs::audio_dir()
+        .map(|dir| dir.join("rox Captures"))
+        .unwrap_or_else(|| data_dir().join("captures"))
 }
 
 /// Discord Rich Presence settings: enable toggle and metadata options.
@@ -3982,6 +4126,8 @@ impl Default for Settings {
             replay_gain: ReplayGainSettings::default(),
             output: OutputSettings::default(),
             broadcast: BroadcastSettings::default(),
+            capture: CaptureSettings::default(),
+            live_buffer_secs: DEFAULT_LIVE_BUFFER_SECS,
             quit_to_tray: false,
             design_mode: true,
             resize_lock: false,

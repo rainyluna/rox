@@ -355,7 +355,8 @@ pub fn estimate(path: &Path, duration_ms: u32) -> Result<Option<f32>, Unreadable
 /// read isn't a track without a tempo.
 fn probe_window(path: &Path, at: f64) -> Result<Option<Vote>, Unreadable> {
     let frames = (WINDOW_SECS * RATE as f64) as usize;
-    match rox_playback::engine::decode_window(&path.to_path_buf(), at, RATE, frames) {
+    let locator = rox_library::locator::Locator::Local(path.to_path_buf());
+    match rox_playback::engine::decode_window(&locator, at, RATE, frames) {
         Ok(stereo) => {
             let mono: Vec<f32> = stereo
                 .as_chunks::<2>()

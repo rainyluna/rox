@@ -1289,6 +1289,17 @@ impl RenderOnce for IconButton {
 /// covers conviction.
 pub const OVER: f32 = 4.0;
 
+/// How far one arrow key moves a log strip, as a fraction of it.
+///
+/// A press has to be worth a whole rounding step wherever it's made, or
+/// the readout lands back on the number it started from and the key reads
+/// as dead. The binding case is the bottom of the strip, where the values
+/// are small and the rounding is finest: on the live buffer's 30 s to
+/// 12 h, moving 30 s to the next multiple of five wants a ratio of 7 to 6,
+/// which is a fortieth of the strip. Forty presses to cross a range that
+/// wide is a fair trade for never pressing one that does nothing.
+const LOG_STEP: f32 = 0.025;
+
 /// A scalar knob's span and how its number reads: the range the strip
 /// scrubs across, the suffix trailing the value (its leading space
 /// included, so `" px"` stands off the number and `"%"` glues to it), the
@@ -1301,6 +1312,11 @@ pub struct Span {
     unit: &'static str,
     decimals: usize,
     over: f32,
+    /// Read the number as a length of time rather than a count of `unit`s,
+    /// which is [`span_secs`] and nothing else.
+    duration: bool,
+    /// Lay the strip out by ratio rather than by amount. See [`Span::log`].
+    log: bool,
 }
 
 /// The highest a typed value may go over a strip running `min` to
@@ -1321,6 +1337,116 @@ pub fn span(min: f32, max: f32, unit: &'static str) -> Span {
         unit,
         decimals: 0,
         over: OVER,
+        duration: false,
+        log: false,
+    }
+}
+
+/// A span of seconds whose readout reads as a length of time: `45 s`,
+/// `10 min`, `1 h 30 min`. Three thousand six hundred is not a number
+/// anyone thinks in, and a strip that prints it is handing the reader
+/// arithmetic the app already knows the answer to. The typed input takes
+/// the same forms back, plus a bare number of seconds.
+///
+/// The value the strip lands on is rounded to a step that suits its size,
+/// five seconds at the bottom and up to fifteen minutes at the top, so
+/// the readout stops on numbers a person would have chosen rather than on
+/// 1 h 7 min 13 s. That's also what makes the readout and the input exact
+/// inverses of each other.
+pub fn span_secs(min: f32, max: f32) -> Span {
+    Span {
+        min,
+        max,
+        unit: " s",
+        decimals: 0,
+        over: OVER,
+        duration: true,
+        log: false,
+    }
+}
+
+/// Seconds as a length of time, the readout [`span_secs`] draws. The
+/// largest unit that fits leads and the one under it follows when there's
+/// a remainder, which is as far as anyone reads a duration off a slider;
+/// an hours value with stray seconds under the minutes drops them.
+///
+/// `s`, `min` and `h` stay as they are in every locale. They're the
+/// symbols rather than the words, the same way the other spans' units
+/// travel, and no locale rox ships writes them differently.
+pub fn fmt_duration_secs(secs: f32) -> String {
+    let total = secs.max(0.0).round() as u64;
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+
+    if hours > 0 {
+        return match minutes {
+            0 => format!("{hours} h"),
+            _ => format!("{hours} h {minutes} min"),
+        };
+    }
+
+    if minutes > 0 {
+        return match seconds {
+            0 => format!("{minutes} min"),
+            _ => format!("{minutes} min {seconds} s"),
+        };
+    }
+
+    format!("{seconds} s")
+}
+
+/// The readout typed back, and the shorthand a person reaches for on the
+/// way: `600`, `600s`, `10 min`, `1 h 30 min`, `1,5 min`. A run of
+/// number-and-unit pairs added together, with a number carrying no unit
+/// counted as seconds, since that's what a bare number in a seconds field
+/// has always meant. Anything else is refused rather than guessed at, so
+/// a typo leaves the setting where it was.
+pub fn parse_duration_secs(text: &str) -> Option<f32> {
+    let text = text.trim().replace(',', ".").to_ascii_lowercase();
+    let mut rest = text.as_str();
+    let mut total = 0.0;
+    let mut read = false;
+
+    while !rest.trim_start().is_empty() {
+        rest = rest.trim_start();
+
+        // The number, then whatever letters follow it. Either may end the
+        // string, which is what the length fallbacks are for.
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        let value = rest[..digits].parse::<f32>().ok()?;
+        rest = rest[digits..].trim_start();
+        let letters = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        let scale = match &rest[..letters] {
+            "" | "s" | "sec" | "secs" => 1.0,
+            "m" | "min" | "mins" => 60.0,
+            "h" | "hr" | "hrs" => 3600.0,
+            _ => return None,
+        };
+        rest = &rest[letters..];
+
+        total += value * scale;
+        read = true;
+    }
+
+    read.then_some(total)
+}
+
+/// The step a duration strip rounds to at `secs`: fine enough down at the
+/// bottom that a small buffer can be set precisely, coarse enough at the
+/// top that twelve hours doesn't come with a minutes column nobody asked
+/// for. The ladder climbs gently on purpose, since a jump from five
+/// seconds straight to a minute would leave an arrow key unable to move
+/// the value at all just above the boundary.
+fn duration_step(secs: f32) -> f32 {
+    match secs {
+        s if s < 120.0 => 5.0,
+        s if s < 900.0 => 15.0,
+        s if s < 3600.0 => 60.0,
+        s if s < 10800.0 => 300.0,
+        _ => 900.0,
     }
 }
 
@@ -1339,6 +1465,30 @@ impl Span {
         self
     }
 
+    /// Lay the strip out by ratio rather than by amount: every step along
+    /// it is the same multiple of the one before, so the small end of the
+    /// range gets as much room as the large end.
+    ///
+    /// For the spans whose ends are orders apart. Thirty seconds to twelve
+    /// hours drawn evenly puts the whole first hour inside the first two
+    /// percent of the strip, which is a slider that can't be set to ten
+    /// minutes. Only the mapping changes: the readout and every value that
+    /// reaches the setter are in real units the way they always were.
+    ///
+    /// The soft ceiling goes with it, because the two don't compose. The
+    /// headroom in [`OVER`] is a multiple of the fraction, and a fraction
+    /// past one on a log strip multiplies the ratio instead of the value,
+    /// so four times the span of a strip running 30 to 43200 would let
+    /// someone type thirty thousand years. A log span is hard, and what's
+    /// on the strip is the whole of what the setting takes.
+    ///
+    /// `min` has to be above zero. A ratio from nothing isn't a ratio.
+    pub fn log(mut self) -> Self {
+        self.log = true;
+        self.over = 1.0;
+        self
+    }
+
     /// `value` as a fraction of the strip. Values past the top pin it
     /// full; the readout still reads the real number.
     fn fraction(&self, value: f32) -> f32 {
@@ -1348,6 +1498,14 @@ impl Span {
     /// The typed value's place on the strip, past the top included: the
     /// input's own headroom is applied downstream, against `over`.
     fn unclamped(&self, value: f32) -> f32 {
+        if self.log {
+            // Floored just above zero so a typed nothing lands off the
+            // bottom of the strip instead of at an infinity.
+            let ratio = (value / self.min).max(f32::MIN_POSITIVE);
+
+            return ratio.ln() / (self.max / self.min).ln();
+        }
+
         (value - self.min) / (self.max - self.min)
     }
 
@@ -1356,15 +1514,67 @@ impl Span {
     /// reads as a dead key. Never finer than a hundredth of the span
     /// either, or crossing a wide range would be a hundred presses.
     fn step(&self) -> f32 {
+        if self.log {
+            return LOG_STEP;
+        }
+
         let smallest = 10f32.powi(-(self.decimals as i32)) / (self.max - self.min);
         smallest.max(0.01)
     }
 
-    /// The value a strip fraction stands for, rounded to the decimals the
-    /// readout shows, so the applied value matches the one on screen.
+    /// The value a strip fraction stands for, rounded to what the readout
+    /// shows, so the applied value matches the one on screen.
     fn value(&self, fraction: f32) -> f32 {
+        let raw = match self.log {
+            true => self.min * (self.max / self.min).powf(fraction),
+            false => self.min + fraction * (self.max - self.min),
+        };
+
+        if self.duration {
+            let step = duration_step(raw);
+
+            return (raw / step).round() * step;
+        }
+
         let step = 10f32.powi(self.decimals as i32);
-        ((self.min + fraction * (self.max - self.min)) * step).round() / step
+        (raw * step).round() / step
+    }
+
+    /// The number as the strip shows it.
+    fn readout(&self, value: f32) -> String {
+        if self.duration {
+            return fmt_duration_secs(value);
+        }
+
+        // The readout is read, so its decimal mark follows the locale:
+        // a German build shows 0,5 where an English one shows 0.5. The
+        // unit includes its own leading space where it needs one, so it
+        // concatenates rather than going through format_unit.
+        format!(
+            "{}{}",
+            rox_i18n::format::format_float(value as f64, self.decimals as u8),
+            self.unit
+        )
+    }
+
+    /// What the readout's input opens with. A duration seeds with the
+    /// readout itself, so the forms on screen are the forms it takes
+    /// back; everything else seeds with a bare ASCII number, since the
+    /// localized readout would have to be retyped to parse.
+    fn edit_text(&self, value: f32) -> String {
+        if self.duration {
+            return fmt_duration_secs(value);
+        }
+
+        format!("{:.*}", self.decimals, value)
+    }
+
+    /// How the typed text is read back into the setting's own unit.
+    fn parse(&self) -> panel::ParseTyped {
+        match self.duration {
+            true => parse_duration_secs,
+            false => panel::parse_number,
+        }
     }
 }
 
@@ -1403,26 +1613,16 @@ pub fn scalar_sized<P: 'static>(
     apply: impl Fn(&mut P, f32, &mut Context<P>) + Clone + 'static,
     cx: &mut Context<P>,
 ) -> Div {
-    panel::value_slider_edit_sized(
+    panel::value_slider_edit_typed(
         scrub,
         edit,
         span.fraction(value),
-        // The readout is read, so its decimal mark follows the locale:
-        // a German build shows 0,5 where an English one shows 0.5. The
-        // unit includes its own leading space where it needs one, so it
-        // concatenates rather than going through format_unit.
-        format!(
-            "{}{}",
-            rox_i18n::format::format_float(value as f64, span.decimals as u8),
-            span.unit
-        ),
-        // The edit buffer is typed back and parsed as a plain f32, so it
-        // stays ASCII with a dot. The parse accepts a comma too, which is
-        // what makes the localized readout above safe to retype verbatim.
-        format!("{:.*}", span.decimals, value),
+        span.readout(value),
+        span.edit_text(value),
         span.over,
         width,
         span.step(),
+        span.parse(),
         move |typed| span.unclamped(typed),
         move |this, fraction, cx| apply(this, span.value(fraction), cx),
         cx,
@@ -1614,7 +1814,77 @@ pub fn role_grid(columns: usize, mut cell: impl FnMut(usize) -> AnyElement) -> D
 
 #[cfg(test)]
 mod tests {
-    use super::{OVER, Query, ceiling, span};
+    use super::{OVER, Query, ceiling, fmt_duration_secs, parse_duration_secs, span, span_secs};
+
+    /// The forms the live buffer's readout is written in, each one read
+    /// straight back off the screen. Retyping what the strip shows is the
+    /// whole contract of an editable readout, so every shape it can print
+    /// has to survive the round trip.
+    #[test]
+    fn a_duration_reads_back_as_the_seconds_it_was_written_from() {
+        for secs in [30.0, 45.0, 120.0, 600.0, 3600.0, 5400.0, 10800.0, 43200.0] {
+            let written = fmt_duration_secs(secs);
+            assert_eq!(parse_duration_secs(&written), Some(secs), "{written}");
+        }
+        assert_eq!(fmt_duration_secs(30.0), "30 s");
+        assert_eq!(fmt_duration_secs(120.0), "2 min");
+        assert_eq!(fmt_duration_secs(600.0), "10 min");
+        assert_eq!(fmt_duration_secs(3600.0), "1 h");
+        assert_eq!(fmt_duration_secs(5400.0), "1 h 30 min");
+        assert_eq!(fmt_duration_secs(43200.0), "12 h");
+        assert_eq!(fmt_duration_secs(95.0), "1 min 35 s");
+    }
+
+    /// The shorthand around the readout's own forms: a bare number is
+    /// seconds, the space is optional, the decimal mark is either, and
+    /// anything that isn't a duration is refused rather than guessed at.
+    #[test]
+    fn the_duration_input_takes_what_a_person_would_type() {
+        assert_eq!(parse_duration_secs("600"), Some(600.0));
+        assert_eq!(parse_duration_secs("600s"), Some(600.0));
+        assert_eq!(parse_duration_secs(" 10min "), Some(600.0));
+        assert_eq!(parse_duration_secs("1,5 min"), Some(90.0));
+        assert_eq!(parse_duration_secs("1h30min"), Some(5400.0));
+        assert_eq!(parse_duration_secs("2 HRS"), Some(7200.0));
+        assert_eq!(parse_duration_secs(""), None);
+        assert_eq!(parse_duration_secs("later"), None);
+        assert_eq!(parse_duration_secs("10 fortnights"), None);
+    }
+
+    /// A log strip's ends are its real ends, and its middle is the
+    /// geometric mean rather than the average. Thirty seconds to twelve
+    /// hours puts half an hour at the halfway mark, which is the whole
+    /// point: the same range drawn evenly would have it at four percent.
+    #[test]
+    fn a_log_strip_puts_the_middle_at_the_geometric_mean() {
+        let span = span_secs(30.0, 43200.0).log();
+        assert_eq!(span.value(0.0), 30.0);
+        assert_eq!(span.value(1.0), 43200.0);
+
+        // sqrt(30 * 43200) is 1138 seconds, which the duration rounding
+        // takes to the nearest minute.
+        assert_eq!(span.value(0.5), 1140.0);
+        assert!((span.fraction(1140.0) - 0.5).abs() < 0.01);
+
+        // And the mapping is its own inverse at every point on it.
+        for secs in [30.0, 300.0, 1800.0, 7200.0, 43200.0] {
+            assert_eq!(span.value(span.fraction(secs)), secs);
+        }
+    }
+
+    /// One arrow press has to move the number wherever it's standing. The
+    /// rounding is finest at the bottom of the strip, so that's where a
+    /// press is likeliest to land back on the value it started from.
+    #[test]
+    fn an_arrow_press_moves_a_log_strip_everywhere_on_it() {
+        let span = span_secs(30.0, 43200.0).log();
+        let presses = (1.0 / span.step()).round() as u32;
+        for press in 0..presses {
+            let here = span.value(press as f32 * span.step());
+            let next = span.value(((press + 1) as f32 * span.step()).min(1.0));
+            assert!(next > here, "stuck at {here} s");
+        }
+    }
 
     /// Every term must appear somewhere, any field counts, case folded.
     #[test]

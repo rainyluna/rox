@@ -10,21 +10,33 @@
 //! with several windows playing different tracks, the backdrop is per
 //! window but the seed is process-global and follows the most recent bake
 //! to finish.
+//!
+//! A row from a source with no files under it has no cover to read, so
+//! the picture comes from the thumbnail pool by the string that stands in
+//! for its path: a station's favicon, a Subsonic song's stored cover. A
+//! station goes one further and looks the song on air up online, which is
+//! [`crate::radio_art`]'s half; this is where that picture is held and
+//! what decides which of the two is showing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, Context, Entity, ObjectFit, Pixels, RenderImage, Rgba, Subscription, Window,
-    div, img, prelude::*,
+    AnyElement, App, Context, Entity, Image, ImageFormat, ObjectFit, Pixels, RenderImage, Rgba,
+    Subscription, Window, div, img, prelude::*,
 };
 use image::{Frame, RgbaImage};
 use std::sync::RwLock;
 
 use rox_design::{palette, tokens};
+use rox_library::cue::TrackKey;
+use rox_playback::IcyTitle;
 
 use crate::player::Player;
+use crate::radio::{Radio, TitleChanged};
+use crate::radio_art::{self, StationArt};
+use crate::thumbs::Thumbs;
 
 /// The shade the app lays over every backdrop layer: the backdrop
 /// shader's element, built by the layer above this crate, which owns the
@@ -59,9 +71,34 @@ pub fn set_gate(gate: impl Fn(&Window, &App) -> bool + Send + Sync + 'static) {
 /// the upscale to window size does the rest of the softening.
 const BAKE_SIZE: u32 = 128;
 
+/// How long a replaced cover handle stays decodable after the swap. Long
+/// enough for any surface's morph off it (`EASE_SECS` is a third of a
+/// second) plus the frame that started it, with room to spare.
+const RETIRE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The gaussian sigma at bake size, a heavy blur so no cover detail is
 /// left in the backdrop.
 const BLUR_SIGMA: f32 = 8.0;
+
+/// What the bake is following. A file is read for its cover the way it
+/// always was; a row from a source with no files under it carries the
+/// string that stands in for its path, which is what the thumbnail pool
+/// keyed its picture on.
+#[derive(Clone, PartialEq)]
+enum Playing {
+    File(PathBuf),
+    Row(String),
+}
+
+impl Playing {
+    fn of(key: &TrackKey) -> Self {
+        if key.is_local() {
+            Playing::File(key.path.clone())
+        } else {
+            Playing::Row(key.path.to_string_lossy().into_owned())
+        }
+    }
+}
 
 /// The playing track's art resolved once per track change and baked into
 /// the backdrop. One per workspace through
@@ -69,23 +106,70 @@ const BLUR_SIGMA: f32 = 8.0;
 /// different tracks each window's backdrop follows its own player.
 pub struct NowPlayingArt {
     player: Entity<Player>,
-    /// The track the current bake, or the one in flight, belongs to.
-    current: Option<PathBuf>,
+    /// The artwork store, for the rows whose picture is in the pool
+    /// rather than in a file.
+    thumbs: Entity<Thumbs>,
+    /// The row the current bake, or the one in flight, belongs to.
+    current: Option<Playing>,
+    /// A remote row's two pictures and which of them wins: the song a
+    /// station is playing, and the row's own. Empty for a local file,
+    /// which reads its cover straight off disk.
+    station: StationArt,
     backdrop: Option<Arc<RenderImage>>,
-    /// Discards stale bake results when the track changes mid-read.
+    /// The same picture the bake was made from, kept in the form the cover
+    /// surfaces take: a station's song art or its favicon, ready to hand
+    /// to `img`. Built once per change beside the bake rather than per
+    /// frame, since gpui keys a decode by the bytes' hash and re-minting
+    /// the handle every paint would re-hash them. None for a local file,
+    /// which every cover surface already reads off disk for itself.
+    live: Option<Arc<Image>>,
+    /// Handles this replaced and hasn't dropped yet. A cover surface that
+    /// took the old handle may still paint it this frame, and a morph
+    /// keeps it on screen for the ease after that; dropping the texture
+    /// under a paint is a panic in the atlas. So a handle waits here for
+    /// [`RETIRE_AFTER`] before it leaves the asset cache.
+    retiring: Vec<(Arc<Image>, Instant)>,
+    /// Discards stale art reads when the track changes mid-read.
     generation: u64,
+    /// Discards stale bakes. The picture can change without the row
+    /// moving (a station turning over mid-song), so the bake needs a
+    /// stamp of its own rather than riding the row's.
+    bake_gen: u64,
+    /// What the standing bake was made from, so a picture that hasn't
+    /// actually changed doesn't cost a bake and a cross-fade to itself.
+    shown: Option<u64>,
     _player_changed: Subscription,
+    _title_changed: Subscription,
 }
 
 impl NowPlayingArt {
-    pub fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        player: Entity<Player>,
+        radio: &Entity<Radio>,
+        thumbs: &Entity<Thumbs>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let _player_changed = cx.observe(&player, |this: &mut Self, _, cx| this.sync(cx));
+        // A station's song turns over without the queue moving, so this
+        // event is the only thing that says the picture should change
+        // while the same row keeps playing.
+        let _title_changed = cx.subscribe(radio, |this: &mut Self, _, event: &TitleChanged, cx| {
+            this.on_title(&event.title, cx);
+        });
+
         NowPlayingArt {
             player,
+            thumbs: thumbs.clone(),
             current: None,
+            station: StationArt::default(),
             backdrop: None,
+            live: None,
+            retiring: Vec::new(),
             generation: 0,
+            bake_gen: 0,
+            shown: None,
             _player_changed,
+            _title_changed,
         }
     }
 
@@ -95,20 +179,36 @@ impl NowPlayingArt {
         self.backdrop.clone()
     }
 
+    /// What a remote row has for a cover right now, unblurred: the song the
+    /// station announced where the lookup found one, its own picture
+    /// otherwise. None for a local track and for a station with neither, so
+    /// a cover surface asking this gets either a picture or the honest
+    /// nothing it should draw its own placeholder for.
+    ///
+    /// This is the same precedence the backdrop follows, read off the same
+    /// state, which is the point: the blur behind the window and the cover
+    /// on the transport are never two different pictures.
+    pub fn live_art(&self) -> Option<Arc<Image>> {
+        self.live.clone()
+    }
+
     /// Follow the player: a track change kicks one bake on the background
     /// executor, a stop clears the backdrop. The player notifies every
     /// pump tick, so everything up to the path compare stays cheap.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.retire_due(cx);
+
         let (playing, between_tracks) = {
             let player = self.player.read(cx);
+            let now = player.now_playing();
             // Keyed on the file, not the track: cue tracks of one image share
             // its cover, so a boundary between two of them is no reason to
             // bake the backdrop again.
-            let playing = player.now_playing().map(|now| now.path().to_path_buf());
+            let playing = now.as_ref().map(|now| Playing::of(&now.key));
             // The engine's position clock blinks off for a moment between
             // tracks and while a fresh queue opens, with the session very
             // much alive.
-            let between_tracks = playing.is_none() && player.is_active() && !player.queue_ended();
+            let between_tracks = now.is_none() && player.is_active() && !player.queue_ended();
             (playing, between_tracks)
         };
         // Hold through the blink instead of flashing the backdrop and
@@ -119,10 +219,161 @@ impl NowPlayingArt {
         if playing == self.current {
             return;
         }
+
         self.current = playing.clone();
         self.generation += 1;
         let generation = self.generation;
-        let Some(path) = playing else {
+        // The row moved, so the station's picture and the song that was on
+        // air belong to it rather than to whatever is playing now, and a
+        // lookup still out for that song lands on nothing.
+        self.station.clear();
+
+        match playing {
+            Some(Playing::File(path)) => {
+                cx.spawn(async move |this, cx| {
+                    let bytes = cx
+                        .background_executor()
+                        .spawn(async move {
+                            rox_library::art::cover_art(&path).map(|(bytes, _mime)| bytes)
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.generation != generation {
+                            return;
+                        }
+                        // A track without art clears the previous track's
+                        // backdrop and tint rather than leaving them up.
+                        this.show(bytes, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+
+            // No file to read, so the picture is whatever the pool holds
+            // under the row's own key. A station may replace it a moment
+            // later with the song it announces.
+            Some(Playing::Row(key)) => {
+                let Some(conn) = self.thumbs.read(cx).store_conn() else {
+                    self.show(None, cx);
+                    return;
+                };
+
+                cx.spawn(async move |this, cx| {
+                    let bytes = cx
+                        .background_executor()
+                        .spawn(
+                            async move { rox_library::thumbs::thumbnail(&conn, Path::new(&key)) },
+                        )
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.generation != generation {
+                            return;
+                        }
+                        this.station.set_station(bytes);
+                        this.show_station(cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+
+            None => self.show(None, cx),
+        }
+    }
+
+    /// A station announced the next song: look its cover up online and
+    /// show that until the song after it. Nothing is written anywhere,
+    /// see [`crate::radio_art`].
+    fn on_title(&mut self, title: &IcyTitle, cx: &mut Context<Self>) {
+        // A title for a row that isn't the one playing here, which is the
+        // narrow window between the turnover and the player's own pump
+        // reporting the row change.
+        if !matches!(self.current, Some(Playing::Row(_))) {
+            return;
+        }
+
+        let generation = self.station.arm();
+        let Some(query) = radio_art::query(title) else {
+            // A station that sends one unsplittable field says nothing
+            // worth searching on, so its own picture stands for this song
+            // too, and the last song's cover comes down.
+            if self.station.land(generation, None) {
+                self.show_station(cx);
+            }
+            return;
+        };
+
+        cx.spawn(async move |this, cx| {
+            let bytes = cx
+                .background_executor()
+                .spawn(async move { radio_art::lookup(&query) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.station.land(generation, bytes) {
+                    this.show_station(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Drop the replaced handles whose grace has run out. On the pump
+    /// cadence, so a swap costs nothing at the moment it happens.
+    fn retire_due(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let mut due = Vec::new();
+        self.retiring.retain(|(image, since)| {
+            if now.duration_since(*since) < RETIRE_AFTER {
+                return true;
+            }
+            due.push(Arc::clone(image));
+            false
+        });
+
+        for image in due {
+            image.remove_asset(cx);
+        }
+    }
+
+    /// Put up whichever of a remote row's pictures currently wins.
+    fn show_station(&mut self, cx: &mut Context<Self>) {
+        let bytes = self.station.current().map(<[u8]>::to_vec);
+        self.show(bytes, cx);
+    }
+
+    /// Bake a picture and put it up, or clear the backdrop when there is
+    /// none. Every route into the backdrop ends here, and each call
+    /// abandons the bake before it: a station's picture changes without
+    /// the row moving, so the bake carries a stamp of its own. A picture
+    /// identical to the standing one is left alone, so a turnover that
+    /// finds nothing doesn't cross-fade the station's favicon to itself.
+    fn show(&mut self, bytes: Option<Vec<u8>>, cx: &mut Context<Self>) {
+        let shown = bytes.as_deref().map(rox_library::hash::fnv1a);
+        if shown == self.shown {
+            return;
+        }
+        self.shown = shown;
+
+        // The cover surfaces' copy, for a remote row only: a file's cover
+        // is on disk and every one of those surfaces already reads it
+        // there. Retiring the handle this replaces is the thumbnail pool's
+        // rule, since a decode never leaves gpui's asset cache on its own.
+        let live = bytes
+            .as_ref()
+            .filter(|_| matches!(self.current, Some(Playing::Row(_))))
+            .map(|bytes| Arc::new(Image::from_bytes(image_format(bytes), bytes.clone())));
+        if let Some(old) = std::mem::replace(&mut self.live, live)
+            && self.live.as_ref().is_none_or(|new| new.id() != old.id())
+        {
+            self.retiring.push((old, Instant::now()));
+        }
+
+        self.bake_gen += 1;
+        let bake_gen = self.bake_gen;
+
+        let Some(bytes) = bytes else {
             if self.backdrop.take().is_some() {
                 cx.notify();
             }
@@ -132,20 +383,18 @@ impl NowPlayingArt {
             palette::set_seed(self.player.entity_id(), None, cx);
             return;
         };
+
         cx.spawn(async move |this, cx| {
             let baked = cx
                 .background_executor()
-                .spawn(async move {
-                    let (bytes, _mime) = rox_library::art::cover_art(&path)?;
-                    bake(&bytes)
-                })
+                .spawn(async move { bake(&bytes) })
                 .await;
             this.update(cx, |this, cx| {
-                if this.generation != generation {
+                if this.bake_gen != bake_gen {
                     return;
                 }
-                // A track without art clears the previous track's backdrop
-                // and tint rather than leaving them up.
+                // A picture that won't decode clears the backdrop and tint
+                // rather than leaving the last one up.
                 let (backdrop, seed) = match baked {
                     Some((image, seed)) => (Some(image), Some(seed)),
                     None => (None, None),
@@ -157,6 +406,22 @@ impl NowPlayingArt {
             .ok();
         })
         .detach();
+    }
+}
+
+/// Which decoder the bytes want. gpui decodes by the format it's told
+/// rather than by sniffing, so a station's cover coming back as a PNG from
+/// one provider and a JPEG from the next has to be named correctly or it
+/// simply fails to decode. Anything unrecognized is called a JPEG, which is
+/// what the thumbnail pool assumes too; the decode fails either way.
+fn image_format(bytes: &[u8]) -> ImageFormat {
+    match image::guess_format(bytes) {
+        Ok(image::ImageFormat::Png) => ImageFormat::Png,
+        Ok(image::ImageFormat::WebP) => ImageFormat::Webp,
+        Ok(image::ImageFormat::Gif) => ImageFormat::Gif,
+        Ok(image::ImageFormat::Bmp) => ImageFormat::Bmp,
+        Ok(image::ImageFormat::Tiff) => ImageFormat::Tiff,
+        _ => ImageFormat::Jpeg,
     }
 }
 

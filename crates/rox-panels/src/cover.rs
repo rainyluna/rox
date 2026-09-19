@@ -21,6 +21,7 @@ use gpui::{
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use image::Frame;
 use rox_dock::{Panel, PanelEvent, TabPanel};
+use rox_library::cue::TrackKey;
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -146,6 +147,16 @@ enum Slide {
     Empty,
     /// The track has no art anywhere: the dim disc stand-in.
     Disc,
+    /// A station with nothing to show yet: the radio mark, the disc's
+    /// sibling. A stream never had a file to carry a cover, so the disc
+    /// would be claiming the wrong kind of absence.
+    Radio,
+    /// The playing station's picture: the song on air where one was found
+    /// for it, the station's own logo otherwise, with its aspect ratio.
+    /// Drawn exactly like a file's art and retired differently: the handle
+    /// belongs to the shared art entity, which replaces it on the next
+    /// turnover, so this panel must not drop its decode.
+    Live(Arc<Image>, f32),
     /// A track's artwork, with its width over height so the art layer can
     /// size itself to the letterboxed fit, and the disc bake when the
     /// panel shows it as one.
@@ -160,7 +171,9 @@ impl Slide {
         match (self, other) {
             (Slide::Blank, Slide::Blank)
             | (Slide::Empty, Slide::Empty)
-            | (Slide::Disc, Slide::Disc) => true,
+            | (Slide::Disc, Slide::Disc)
+            | (Slide::Radio, Slide::Radio) => true,
+            (Slide::Live(a, _), Slide::Live(b, _)) => a.id() == b.id(),
             (Slide::Art(a, _, base_a), Slide::Art(b, _, base_b)) => {
                 a.id() == b.id()
                     && match (base_a, base_b) {
@@ -197,6 +210,9 @@ pub struct CoverArtPanel {
     /// The track a load is running for, so a render can tell "already
     /// fetching" from "needs a fetch".
     pending: Option<PathBuf>,
+    /// The playing station picture's id and the aspect ratio read off it,
+    /// so the letterbox doesn't re-parse a header every frame.
+    live_ratio: Option<(u64, f32)>,
     /// The cached source resolve, so the pump's per-frame notifies never
     /// turn into selection lookups.
     resolved: ResolvedTrack,
@@ -281,6 +297,7 @@ impl CoverArtPanel {
             config,
             art: None,
             pending: None,
+            live_ratio: None,
             resolved: ResolvedTrack::default(),
             generation: 0,
             from: Slide::Blank,
@@ -301,6 +318,37 @@ impl CoverArtPanel {
             _library_changed,
             _retire_on_drop,
         }
+    }
+
+    /// Whether this key is the remote row that's playing, and whether it's
+    /// a live stream: the rows whose cover comes from the shared art
+    /// entity rather than off a file. None for a local track and for a
+    /// remote row nobody is playing, which has no picture anyone has
+    /// fetched and so keeps the file read's answer.
+    fn remote_playing(&self, key: &TrackKey, cx: &App) -> Option<bool> {
+        let now = self.state.player.read(cx).now_playing()?;
+
+        (!key.is_local() && now.key == *key).then_some(now.live)
+    }
+
+    /// A station picture's width over height, read off the header and kept
+    /// against the picture's own id. The letterboxed frame needs the ratio
+    /// every frame and the bytes are already in memory, so the only thing
+    /// worth avoiding is parsing the header sixty times a second.
+    fn live_ratio(&mut self, image: &Arc<Image>) -> f32 {
+        if let Some((id, ratio)) = self.live_ratio
+            && id == image.id()
+        {
+            return ratio;
+        }
+
+        let ratio = image::ImageReader::new(std::io::Cursor::new(&image.bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|reader| reader.into_dimensions().ok())
+            .map_or(1.0, |(w, h)| w as f32 / h.max(1) as f32);
+        self.live_ratio = Some((image.id(), ratio));
+        ratio
     }
 
     /// Make sure the art for `path` is cached or on its way: read the file
@@ -890,6 +938,45 @@ fn layer(
                 ),
             )
         }
+        // The station stand-in: the disc's square claim, the radio mark
+        // inside it.
+        Slide::Radio => {
+            let mut frame = div()
+                .w_full()
+                .max_h_full()
+                .flex()
+                .items_center()
+                .justify_center();
+            frame.style().aspect_ratio = Some(1.0);
+            base.p(tokens::SPACE_SM).child(
+                frame.child(
+                    svg()
+                        .path(crate::assets::icons::RADIO)
+                        .size(px(48.))
+                        .text_color(palette::text_faint()),
+                ),
+            )
+        }
+        // A station's picture, drawn the way a file's art is: the same
+        // letterboxed frame, the same stretch and rounding.
+        Slide::Live(image, _) if stretch => base.child(
+            img(image.clone())
+                .object_fit(ObjectFit::Fill)
+                .size_full()
+                .when_some(rounding, |d, radius| d.rounded(px(radius))),
+        ),
+        Slide::Live(image, ratio) => {
+            let mut frame = div().w_full().max_h_full();
+            frame.style().aspect_ratio = Some(*ratio);
+            base.child(
+                frame.child(
+                    img(image.clone())
+                        .object_fit(ObjectFit::Contain)
+                        .size_full()
+                        .when_some(rounding, |d, radius| d.rounded(px(radius))),
+                ),
+            )
+        }
         // The disc'd art: the square bake in the same letterboxed fit,
         // spun on the GPU about its center. A disc keeps its circle, so
         // the stretch and the corner rounding don't apply.
@@ -958,6 +1045,30 @@ impl CoverArtPanel {
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         match self.resolved.get(self.config.source, &self.state, cx) {
             None => self.retarget(Slide::Empty, cx),
+            // A remote row has no file to read a cover out of, so the
+            // picture is the one the backdrop is already following: for a
+            // station the song on air where the lookup found a cover and
+            // the station's logo behind that, for a server row the cover
+            // the sync stored. Only for the row that's playing, since
+            // nothing has fetched a picture for any other. The stand-in
+            // follows the kind of row: a station never had a disc.
+            Some(key) if !key.is_local() => {
+                let live = self.remote_playing(&key, cx);
+                let art = live
+                    .is_some()
+                    .then(|| self.state.now_art.read(cx).live_art())
+                    .flatten();
+                let target = match art {
+                    Some(image) => {
+                        let ratio = self.live_ratio(&image);
+                        Slide::Live(image, ratio)
+                    }
+
+                    None if live == Some(true) => Slide::Radio,
+                    None => Slide::Disc,
+                };
+                self.retarget(target, cx);
+            }
             Some(key) => {
                 // Art is a property of the file, not the track: every cue
                 // track of one image shares its cover, so the cache stays
@@ -990,9 +1101,9 @@ impl CoverArtPanel {
         // settling target.
         let shape = match &self.to {
             Slide::Blank => 0.0,
-            Slide::Empty | Slide::Disc | Slide::Art(_, _, Some(_)) => 1.0,
-            Slide::Art(_, _, None) if self.config.stretch => -1.0,
-            Slide::Art(_, ratio, None) => *ratio,
+            Slide::Empty | Slide::Disc | Slide::Radio | Slide::Art(_, _, Some(_)) => 1.0,
+            Slide::Art(_, _, None) | Slide::Live(..) if self.config.stretch => -1.0,
+            Slide::Art(_, ratio, None) | Slide::Live(_, ratio) => *ratio,
         };
         panel::shader::note_content_shape(cx.entity().entity_id(), shape);
 

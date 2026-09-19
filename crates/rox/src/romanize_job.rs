@@ -751,6 +751,8 @@ mod tests {
         album: &str,
     ) -> rox_library::TrackRow {
         rox_library::TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             path: path.to_string(),
             sub: 0,
             cue: None,
