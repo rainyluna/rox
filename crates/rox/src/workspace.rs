@@ -26,7 +26,7 @@ use rox_dock::{
 use rox_library::cue::TrackKey;
 
 use gpui::rgba;
-use gpui_component::Icon;
+use gpui_component::{Icon, StyledExt};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;
 
