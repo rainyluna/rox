@@ -489,6 +489,12 @@ impl EqWindow {
                 false,
                 cx.listener(|_, _, _, cx| player::reset_eq_shape(cx)),
             ))
+            .child(small_button(
+                rox_i18n::t!("eq-autoeq"),
+                icons::HEADPHONES,
+                false,
+                cx.listener(|_, _, _, cx| crate::autoeq_window::open(cx)),
+            ))
             .child(panel::picker(
                 "eq-analyzer",
                 self.analyzer_style,
