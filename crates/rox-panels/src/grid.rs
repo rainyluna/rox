@@ -523,11 +523,9 @@ impl GridPanel {
                             this.follow_playing(cx);
                         }
                     }
-                    LibraryEvent::Played => {
-                        if this.config.labels && this.config.label_last_played {
-                            this.warm_last_played(cx);
-                            cx.notify();
-                        }
+                    LibraryEvent::Played if this.config.labels && this.config.label_last_played => {
+                        this.warm_last_played(cx);
+                        cx.notify();
                     }
                     _ => {}
                 }
