@@ -1141,12 +1141,12 @@ const TRANSPORT_ROW_H: f32 = 120.0;
 const SEARCH_BAR_H: f32 = 52.0;
 
 /// How far a library drag travels before the audio drop zones appear, in
-/// row-scaled px: about one row, so the pointer has to leave the row it
-/// grabbed. Under that, a slip that let go shows nothing and does nothing.
-const DROP_REVEAL_DISTANCE: f32 = 24.0;
+/// row-scaled px: about two rows, so the pointer has clearly started dragging.
+/// Under that, a slip that let go shows nothing and does nothing.
+const DROP_REVEAL_DISTANCE: f32 = 48.0;
 
 /// The drop zone strip's height along the bottom of the window, row-scaled.
-const DROP_ZONE_HEIGHT: f32 = 96.0;
+const DROP_ZONE_HEIGHT: f32 = 48.0;
 
 /// The reveal gate of an audio drag in flight: where the pointer was when
 /// the workspace first saw the drag, and whether it has since travelled far
@@ -4963,14 +4963,14 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .justify_end()
-                .p(tokens::SPACE_MD)
-                .bg(rgba(0x00000033))
+                .p(tokens::SPACE_SM)
+                .bg(rgba(0x00000022))
                 .child(
                     div()
                         .h(palette::scaled_px(DROP_ZONE_HEIGHT))
                         .flex()
                         .flex_row()
-                        .gap(tokens::SPACE_MD)
+                        .gap(tokens::SPACE_SM)
                         .child(self.drop_zone(
                             rox_i18n::t!("workspace-drop-play-now"),
                             icons::PLAY,
@@ -5010,7 +5010,7 @@ impl Workspace {
             .flex_1()
             .h_full()
             .flex()
-            .flex_col()
+            .flex_row()
             .items_center()
             .justify_center()
             .gap(tokens::SPACE_SM)
@@ -5023,7 +5023,7 @@ impl Workspace {
                 .bg(palette::alpha(palette::bg_menu_opaque(), 0x66))
                 .text_color(palette::text_faint())
                 .child(Icon::default().path(icon))
-                .child(div().text_lg().child(label.into()));
+                .child(div().text_sm().font_semibold().child(label.into()));
         }
 
         let card = card
@@ -5032,7 +5032,7 @@ impl Workspace {
             .bg(palette::bg_menu_opaque())
             .text_color(palette::text_muted())
             .child(Icon::default().path(icon))
-            .child(div().text_lg().child(label.into()))
+            .child(div().text_sm().font_semibold().child(label.into()))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 style
                     .border_color(palette::accent())

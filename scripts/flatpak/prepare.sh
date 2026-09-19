@@ -46,8 +46,13 @@ mkdir -p "$out/build"
 # tarballs itself.
 curl -fsSLo "$tmp/flatpak-cargo-generator.py" \
     "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$tools_sha/cargo/flatpak-cargo-generator.py"
-curl -fsSLo "$tmp/Cargo.lock" \
-    "https://raw.githubusercontent.com/zealsprince/rox/$commit/Cargo.lock"
+repo="${GITHUB_REPOSITORY:-zealsprince/rox}"
+if [ -f "$root/Cargo.lock" ]; then
+    cp "$root/Cargo.lock" "$tmp/Cargo.lock"
+else
+    curl -fsSLo "$tmp/Cargo.lock" \
+        "https://raw.githubusercontent.com/$repo/$commit/Cargo.lock"
+fi
 python3 "$tmp/flatpak-cargo-generator.py" "$tmp/Cargo.lock" -o "$out/cargo-sources.json"
 
 cp "$here/flathub.json" "$out/"
@@ -56,7 +61,7 @@ cp "$here/flathub.json" "$out/"
 # projectM further down has a commit line of its own, which the range
 # leaves alone.
 rox='\|url: https://github.com/zealsprince/rox.git|,/commit:/'
-sed -e "$rox{s|tag: .*|tag: v$version|;s|commit: .*|commit: $commit|;}" \
+sed -e "$rox{s|url: .*|url: https://github.com/$repo.git|;s|tag: .*|tag: v$version|;s|commit: .*|commit: $commit|;}" \
     "$here/$manifest" > "$out/$manifest"
 sed -e "$rox{/tag: /d;}" "$out/$manifest" > "$out/build/$manifest"
 

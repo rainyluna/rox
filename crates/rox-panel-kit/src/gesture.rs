@@ -218,7 +218,7 @@ struct FlickInner {
 
 /// Pointer travel below this stays a click, in px. Matches the slop a
 /// finger or a twitchy mouse needs before a press means "scroll".
-const FLICK_DEAD_ZONE: f32 = 4.0;
+const FLICK_DEAD_ZONE: f32 = 10.0;
 /// The coast's exponential decay: velocity multiplies by this each
 /// second, so a flick settles in about a second.
 const FLICK_DECAY: f32 = 0.02;

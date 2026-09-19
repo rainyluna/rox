@@ -118,7 +118,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y \
-            build-essential git curl ca-certificates dpkg-dev file \
+            build-essential git curl ca-certificates dpkg-dev file zip \
             pkg-config libasound2-dev libfontconfig1-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-dev libxcb1-dev libvulkan-dev \
             libssl-dev cmake
@@ -205,6 +205,7 @@ jobs:
           cp scripts/dist/README.txt "$staging/"
           cp LICENSE "$staging/"
           tar czf "$staging.tar.gz" "$staging"
+          zip -q -r "$staging.zip" "$staging"
 
       # Prebuilt binary instead of `cargo install`, which would compile
       # cargo-deb for minutes on every release.
@@ -331,7 +332,7 @@ jobs:
   # builds pins the commit alone.
   flatpak:
     needs: check
-    if: needs.check.outputs.release == 'true' && github.repository == 'zealsprince/rox'
+    if: needs.check.outputs.release == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/flatpak.yml
@@ -340,7 +341,7 @@ jobs:
       commit: ${{ github.event.workflow_run.head_sha || github.sha }}
 
   release:
-    needs: [check, build]
+    needs: [check, build, flatpak]
     # always() so a Flatpak failure never holds the release: the other
     # channels ship without the bundle, and once the leg is fixed a dispatch
     # of flatpak.yml rebuilds it as a run artifact. The matrix stays

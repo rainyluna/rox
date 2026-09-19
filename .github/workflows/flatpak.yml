@@ -74,7 +74,7 @@ jobs:
           COMMIT: ${{ inputs.commit }}
         run: |
           if [ -z "$COMMIT" ]; then
-            COMMIT=$(git ls-remote --tags https://github.com/zealsprince/rox.git \
+            COMMIT=$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY:-zealsprince/rox}.git" \
               "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -n1 | cut -f1)
           fi
           if [ -z "$COMMIT" ]; then

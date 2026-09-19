@@ -1,0 +1,46 @@
+--- a/src/elements/div.rs	2006-07-23 20:21:28.000000000 -0500
++++ b/src/elements/div.rs	2026-09-18 19:12:13.026133461 -0500
+@@ -44,7 +44,7 @@
+ 
+ use super::ImageCacheProvider;
+ 
+-const DRAG_THRESHOLD: f64 = 2.;
++const DRAG_THRESHOLD: f64 = 10.;
+ const TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
+ const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
+ 
+--- a/src/platform/linux/platform.rs	2006-07-23 20:21:28.000000000 -0500
++++ b/src/platform/linux/platform.rs	2026-09-18 19:12:13.026547178 -0500
+@@ -35,8 +35,8 @@
+ // Values match the defaults on GTK.
+ // Taken from https://github.com/GNOME/gtk/blob/main/gtk/gtksettings.c#L320
+ #[cfg(any(feature = "wayland", feature = "x11"))]
+-pub(crate) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+-pub(crate) const DOUBLE_CLICK_DISTANCE: Pixels = px(5.0);
++pub(crate) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
++pub(crate) const DOUBLE_CLICK_DISTANCE: Pixels = px(10.0);
+ pub(crate) const KEYRING_LABEL: &str = "zed-github-account";
+ 
+ #[cfg(any(feature = "wayland", feature = "x11"))]
+@@ -1022,10 +1022,10 @@
+     #[test]
+     fn test_is_within_click_distance() {
+         let zero = Point::new(px(0.0), px(0.0));
+-        assert!(is_within_click_distance(zero, Point::new(px(5.0), px(5.0))));
++        assert!(is_within_click_distance(zero, Point::new(px(10.0), px(10.0))));
+         assert!(is_within_click_distance(
+             zero,
+-            Point::new(px(-4.9), px(5.0))
++            Point::new(px(-9.9), px(10.0))
+         ));
+         assert!(is_within_click_distance(
+             Point::new(px(3.0), px(2.0)),
+@@ -1033,7 +1033,7 @@
+         ));
+         assert!(!is_within_click_distance(
+             zero,
+-            Point::new(px(5.0), px(5.1))
++            Point::new(px(10.0), px(10.1))
+         ),);
+     }
+ }
