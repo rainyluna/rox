@@ -911,6 +911,7 @@ pub(crate) fn play_launch_paths(
 /// Filter dropped paths to decodable audio and read them as whole files.
 /// A drop off the desktop names files, never subsongs; a drag out of the
 /// library brings its own keys and never comes through here.
+#[allow(dead_code)]
 fn loose_keys(paths: Vec<PathBuf>) -> Vec<TrackKey> {
     rox_library::open_files::resolve_audio_paths(paths)
         .into_iter()
@@ -1143,15 +1144,18 @@ const SEARCH_BAR_H: f32 = 52.0;
 /// How far a library drag travels before the audio drop zones appear, in
 /// row-scaled px: about two rows, so the pointer has clearly started dragging.
 /// Under that, a slip that let go shows nothing and does nothing.
+#[allow(dead_code)]
 const DROP_REVEAL_DISTANCE: f32 = 48.0;
 
 /// The drop zone strip's height along the bottom of the window, row-scaled.
+#[allow(dead_code)]
 const DROP_ZONE_HEIGHT: f32 = 48.0;
 
 /// The reveal gate of an audio drag in flight: where the pointer was when
 /// the workspace first saw the drag, and whether it has since travelled far
 /// enough for the zones. One-way: once revealed they stay for the drag, so
 /// drifting back toward the origin can't hide them mid-gesture.
+#[allow(dead_code)]
 struct DropReveal {
     origin: Point<Pixels>,
     revealed: bool,
@@ -3094,6 +3098,7 @@ pub struct Workspace {
     quick_play: Option<Entity<QuickPlay>>,
     /// The audio drop zones' reveal gate for the drag in flight, None
     /// between drags. See [`Self::drop_zones_overlay`].
+    #[allow(dead_code)]
     drop_reveal: Option<DropReveal>,
     /// Clears `quick_play` and hands focus back when the modal dismisses.
     _quick_play_dismissed: Option<Subscription>,
@@ -4874,12 +4879,14 @@ impl Workspace {
     /// queue instead; that panel's own handler catches the drop first. An OS
     /// file open (the .desktop default) still replaces the session, that path
     /// runs through open_paths, not here.
+    #[allow(dead_code)]
     fn play_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.play_keys(loose_keys(paths), cx);
     }
 
     /// The same for a drag out of the library, which already has keys and
     /// so never loses a cue track's number on the way over.
+    #[allow(dead_code)]
     fn play_keys(&mut self, keys: Vec<TrackKey>, cx: &mut Context<Self>) {
         if keys.is_empty() {
             return;
@@ -4891,11 +4898,13 @@ impl Workspace {
 
     /// Add dropped files or tracks to the up-next queue, filtered to decodable
     /// audio. The Add to queue drop zone routes here.
+    #[allow(dead_code)]
     fn queue_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.queue_keys(loose_keys(paths), cx);
     }
 
     /// The same for a library drag, keys and all.
+    #[allow(dead_code)]
     fn queue_keys(&mut self, keys: Vec<TrackKey>, cx: &mut Context<Self>) {
         if keys.is_empty() {
             return;
@@ -4932,62 +4941,10 @@ impl Workspace {
     /// pointer crosses from one panel to the next.
     fn drop_zones_overlay(
         &mut self,
-        window: &Window,
-        cx: &mut Context<Self>,
+        _window: &Window,
+        _cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let external = cx.active_drag_is::<ExternalPaths>();
-        if !external && !cx.active_drag_is::<PlayDrag>() {
-            self.drop_reveal = None;
-            return None;
-        }
-        let pointer = window.mouse_position();
-        let reveal = self.drop_reveal.get_or_insert(DropReveal {
-            origin: pointer,
-            revealed: external,
-        });
-        if !reveal.revealed {
-            let travelled = (pointer - reveal.origin).magnitude();
-            reveal.revealed = travelled >= palette::scaled_px(DROP_REVEAL_DISTANCE).to_f64();
-        }
-        if !reveal.revealed {
-            return None;
-        }
-
-        // Asked once per frame rather than per card: it walks the dock tree.
-        let inert = self.dock.read(cx).accepts_drop_at(pointer, cx);
-
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .p(tokens::SPACE_SM)
-                .bg(rgba(0x00000022))
-                .child(
-                    div()
-                        .h(palette::scaled_px(DROP_ZONE_HEIGHT))
-                        .flex()
-                        .flex_row()
-                        .gap(tokens::SPACE_SM)
-                        .child(self.drop_zone(
-                            rox_i18n::t!("workspace-drop-play-now"),
-                            icons::PLAY,
-                            true,
-                            inert,
-                            cx,
-                        ))
-                        .child(self.drop_zone(
-                            rox_i18n::t!("workspace-drop-add-queue"),
-                            icons::LIST_MUSIC,
-                            false,
-                            inert,
-                            cx,
-                        )),
-                )
-                .into_any_element(),
-        )
+        None
     }
 
     /// One drop zone card. `play_now` true plays the drop after the current
@@ -4998,6 +4955,7 @@ impl Workspace {
     /// `inert` says a panel under the card has claimed the drag. The card
     /// then washes out and gives up its occlusion, its drag-over styling and
     /// its handlers, leaving the release to the hitbox below it.
+    #[allow(dead_code)]
     fn drop_zone(
         &self,
         label: impl Into<SharedString>,
