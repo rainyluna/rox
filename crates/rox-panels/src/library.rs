@@ -47,7 +47,7 @@ use crate::settings::GainModeSetting;
 use crate::settings::ui as settings_ui;
 use crate::thumbs::Thumb;
 use crate::track_ui::track_cells;
-use crate::track_ui::track_drag::PlayDrag;
+use crate::track_ui::track_drag::{PlayDrag, PlayDragPreview};
 
 /// The header tiles' rounding knob ceiling, the panel frame sliders'
 /// scale.
@@ -504,13 +504,7 @@ impl TrackTable {
     /// actions use, so a drop enqueues exactly what those queue. The value is
     /// built eagerly every frame, so keys come from `drag_keys`, filled per
     /// id on the first grab that needs it rather than a query per row per frame.
-    #[allow(dead_code)]
-    fn drag_payload(&mut self, _ix: usize, _cx: &App) -> Option<PlayDrag> {
-        None
-    }
-
-    #[allow(dead_code)]
-    fn _drag_payload_unused(&mut self, ix: usize, cx: &App) -> Option<PlayDrag> {
+    fn drag_payload(&mut self, ix: usize, cx: &App) -> Option<PlayDrag> {
         let projection = self.state.library.read(cx).projection().cloned()?;
         let title = self
             .track_at(ix)
@@ -1473,6 +1467,7 @@ impl TableDelegate for TrackTable {
         // whole set when the grab starts inside a multi-selection, onto a drop
         // target that queues it. Resolved here so the payload is ready for
         // the frame.
+        let drag = self.drag_payload(row_ix, cx);
         div()
             // Group bounds resolve innermost-first, so one shared name
             // still scopes each cell's group_hover to its own row: the
@@ -1486,6 +1481,14 @@ impl TableDelegate for TrackTable {
             .when(selected, |d| d.bg(palette::alpha(palette::accent(), 0x26)))
             .when(self.playing_row == Some(row_ix) && !selected, |d| {
                 d.bg(palette::alpha(palette::highlight(), 0x12))
+            })
+            .when_some(drag, |d, drag| {
+                d.on_drag(drag, |drag, _pos, _window, cx| {
+                    cx.new(|_| PlayDragPreview {
+                        title: drag.title.clone(),
+                        extra: drag.len().saturating_sub(1),
+                    })
+                })
             })
     }
 

@@ -45,7 +45,7 @@ use crate::query::search::{SearchBox, SearchEvent};
 use crate::query::shared_query::{QueryFilter, QuerySource, SharedQueryEvent};
 use crate::selection::SelectionEvent;
 use crate::track_ui::track_columns;
-use crate::track_ui::track_drag::PlayDrag;
+use crate::track_ui::track_drag::{PlayDrag, PlayDragPreview};
 
 /// One row's height, the filter panel's, so the two read as one family.
 const ROW_H: f32 = 26.;
@@ -1154,13 +1154,7 @@ impl FolderTreePanel {
     /// Keys resolve through the shared cache, the library table's route
     /// into the play-drag story, and the ids they came from ride along for a
     /// playlist drop.
-    #[allow(dead_code)]
-    fn song_drag(&mut self, _ix: usize, _title: &SharedString, _cx: &App) -> Option<PlayDrag> {
-        None
-    }
-
-    #[allow(dead_code)]
-    fn _unused_song_drag(&mut self, ix: usize, title: &SharedString, cx: &App) -> Option<PlayDrag> {
+    fn song_drag(&mut self, ix: usize, title: &SharedString, cx: &App) -> Option<PlayDrag> {
         let id = self.song_id_at(ix)?;
         // A grab inside a multi-selection takes the whole set in visible order,
         // built once per selection or reflow and shared behind an Arc so it's a
@@ -1207,13 +1201,7 @@ impl FolderTreePanel {
     /// kept until the pointer moves to another folder or the tree reflows
     /// under it. The generation is the same one the song rows' drag set
     /// rides on, bumped by every reflatten.
-    #[allow(dead_code)]
-    fn folder_drag(&mut self, _path: &str, _title: &SharedString, _cx: &App) -> Option<PlayDrag> {
-        None
-    }
-
-    #[allow(dead_code)]
-    fn _unused_folder_drag(&mut self, path: &str, title: &SharedString, cx: &App) -> Option<PlayDrag> {
+    fn folder_drag(&mut self, path: &str, title: &SharedString, cx: &App) -> Option<PlayDrag> {
         if self.hover_folder.as_deref() != Some(path) {
             return None;
         }
@@ -1687,6 +1675,7 @@ impl FolderTreePanel {
                         .then(|| self.folder_cover_row(&path))
                         .flatten()
                         .and_then(|row| self.cover_for(row, cx));
+                    let drag = self.folder_drag(&path, &row.label, cx);
                     let (fold_path, hover_path) = (path.clone(), path.clone());
                     base.on_mouse_down(
                         MouseButton::Left,
@@ -1735,6 +1724,14 @@ impl FolderTreePanel {
                         this.folder_drag = None;
                         cx.notify();
                     }))
+                    .when_some(drag, |d, drag| {
+                        d.on_drag(drag, |drag, _pos, _window, cx| {
+                            cx.new(|_| PlayDragPreview {
+                                title: drag.title.clone(),
+                                extra: drag.len().saturating_sub(1),
+                            })
+                        })
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -1803,6 +1800,7 @@ impl FolderTreePanel {
                         .projection()
                         .map(|p| fmt_ms(p.duration_ms[*prow as usize]))
                         .unwrap_or_default();
+                    let drag = self.song_drag(ix, &row.label, cx);
                     let cover = self
                         .config
                         .cover
@@ -1846,6 +1844,14 @@ impl FolderTreePanel {
                             this.select(ix, Modifiers::default(), cx);
                         }
                     }))
+                    .when_some(drag, |d, drag| {
+                        d.on_drag(drag, |drag, _pos, _window, cx| {
+                            cx.new(|_| PlayDragPreview {
+                                title: drag.title.clone(),
+                                extra: drag.len().saturating_sub(1),
+                            })
+                        })
+                    })
                     // The chevron column stays empty so songs align with
                     // their folder's children.
                     .child(div().flex_none().w(px(16.)))
