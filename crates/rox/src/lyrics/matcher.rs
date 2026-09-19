@@ -5,13 +5,15 @@
 //! the selected sheet on the right. Apply saves the picked candidate
 //! through the same lyrics save the editor uses, honoring the Providers
 //! page's tag/sidecar/store destination, then tells every lyrics panel to
-//! re-read and closes. Nothing is written until Apply; closing leaves the
-//! file untouched.
+//! re-read and closes. A track with no file to write a tag or a sidecar
+//! beside takes the store whatever that page says. Nothing is written
+//! until Apply; closing leaves everything where it was.
 //!
-//! One window per track path, registered like the cover editor, so asking
-//! again focuses the open one instead of stacking a twin.
-
-use std::path::PathBuf;
+//! One window per subject, registered like the cover editor, so asking
+//! again focuses the open one instead of stacking a twin. A subject rather
+//! than a path because not every track is a file: a station's words belong
+//! to the song it announced, and this window is open on that song and not
+//! on the URL it came down.
 
 use gpui::{
     App, Bounds, Context, Div, Entity, FocusHandle, Global, KeyBinding, ScrollHandle, SharedString,
@@ -20,8 +22,7 @@ use gpui::{
 use gpui_component::Root;
 
 use rox_core::fmt::fmt_ms;
-use rox_library::cue::TrackKey;
-use rox_library::lyrics;
+use rox_library::lyrics::{self, Subject};
 
 use crate::matching::{
     Phase, WindowRegistry, confidence_badge, confidence_bar, note, open_or_focus,
@@ -33,7 +34,7 @@ use rox_net::providers::{self, LyricsCandidate, TrackQuery};
 use rox_panel_api::panel::AppState;
 use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
-use rox_services::lyrics::{query_for, save_target};
+use rox_services::lyrics::{LyricsTarget, save_target};
 use rox_services::player::fmt_time;
 
 /// The default window size: room for the candidate list beside a preview
@@ -53,26 +54,26 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("enter", Apply, Some(CONTEXT))]);
 }
 
-/// The open match windows, keyed by track path, so a second request for
+/// The open match windows, keyed by subject, so a second request for
 /// the same track focuses the first. The cover editor's registry shape.
 #[derive(Default)]
-struct OpenMatchers(Vec<(PathBuf, WindowHandle<Root>)>);
+struct OpenMatchers(Vec<(Subject, WindowHandle<Root>)>);
 
 impl Global for OpenMatchers {}
 
 impl WindowRegistry for OpenMatchers {
-    type Key = PathBuf;
-    fn entries(&mut self) -> &mut Vec<(PathBuf, WindowHandle<Root>)> {
+    type Key = Subject;
+    fn entries(&mut self) -> &mut Vec<(Subject, WindowHandle<Root>)> {
         &mut self.0
     }
 }
 
-/// Open a lyrics match window on `path`, or focus the one already on it. A
+/// Open a lyrics match window on `target`, or focus the one already on it. A
 /// save broadcasts through [`crate::lyrics::saved`], so the window never
 /// holds a panel of its own.
-pub fn open(state: AppState, path: PathBuf, cx: &mut App) {
+pub fn open(state: AppState, target: LyricsTarget, cx: &mut App) {
     open_or_focus::<OpenMatchers>(
-        path.clone(),
+        target.subject.clone(),
         move |cx| {
             let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
             rox_panel_api::panel::open_child_window(
@@ -80,7 +81,7 @@ pub fn open(state: AppState, path: PathBuf, cx: &mut App) {
                 rox_i18n::t!("lyrics-matcher-window-title"),
                 bounds,
                 Some(settings_ui::MIN_SIZE),
-                move |window, cx| cx.new(|cx| LyricsMatch::new(state, path, window, cx)),
+                move |window, cx| cx.new(|cx| LyricsMatch::new(state, target, window, cx)),
             )
         },
         cx,
@@ -88,8 +89,8 @@ pub fn open(state: AppState, path: PathBuf, cx: &mut App) {
 }
 
 struct LyricsMatch {
-    /// The track the words save back to.
-    path: PathBuf,
+    /// What the words save back to.
+    subject: Subject,
     /// The track as the header shows it, and what the candidates scored
     /// against.
     line: SharedString,
@@ -114,23 +115,23 @@ struct LyricsMatch {
 }
 
 impl LyricsMatch {
-    fn new(state: AppState, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // The query is the track's library tags, and the duration comes off
-        // the projection so it scores whether or not the track is playing.
-        let query = query_for(&state.library, &TrackKey::from(path.clone()), cx);
+    fn new(
+        state: AppState,
+        target: LyricsTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let LyricsTarget { subject, query } = target.clone();
         let duration_ms = query
             .duration_secs
             .map(|secs| (secs * 1000.0) as u32)
             .unwrap_or(0);
-        let mut line = query.title.clone();
-        if !query.artist.is_empty() {
-            line = format!("{} - {}", query.title, query.artist);
-        }
+        let line = target.label();
         let _backdrop_changed = cx.observe(&state.now_art, |_, _, cx| cx.notify());
         let focus = cx.focus_handle();
         window.focus(&focus);
         let this = LyricsMatch {
-            path,
+            subject,
             line: line.into(),
             duration_ms,
             phase: Phase::Searching,
@@ -183,7 +184,7 @@ impl LyricsMatch {
 
     /// Save the selected candidate where the Providers page says, off the
     /// UI thread. Success re-reads the panels and closes; a failure keeps
-    /// the window open with the error, the file untouched.
+    /// the window open with the error, nothing written.
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.saving {
             return;
@@ -198,26 +199,28 @@ impl LyricsMatch {
         else {
             return;
         };
-        let path = self.path.clone();
+        let subject = self.subject.clone();
         self.saving = true;
         self.error = None;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let saved =
-                cx.background_executor()
-                    .spawn({
-                        let path = path.clone();
-                        async move {
-                            lyrics::save(&path, &save_target(&path), &text, Some(&lyrics_dir()))
-                        }
-                    })
-                    .await;
+            let saved = cx
+                .background_executor()
+                .spawn({
+                    let subject = subject.clone();
+                    async move {
+                        let target = save_target(&subject);
+
+                        lyrics::save(&subject, &target, &text, Some(&lyrics_dir()))
+                    }
+                })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 match saved {
                     Ok(()) => {
                         // Panels cache lyrics off the projection, so every
                         // one of them needs a poke to re-read.
-                        crate::lyrics::saved(&path, cx);
+                        crate::lyrics::saved(&subject, cx);
                         window.remove_window();
                     }
                     Err(e) => {

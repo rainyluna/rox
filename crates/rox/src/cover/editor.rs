@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::Root;
 
 use rox_core::fmt::fmt_ms;
-use rox_library::cue::TrackKey;
+use rox_library::cue::{TrackKey, local};
 use rox_library::writer::{self, Edit, PicChange, PicKind};
 
 use crate::matching::{WindowRegistry, open_or_focus};
@@ -391,7 +391,9 @@ impl CoverEditor {
         let Some(track) = self.tracks.first() else {
             return;
         };
+        // The cover editor writes into files, so its keys are local.
         let key = TrackKey {
+            source: local(),
             path: track.path.clone(),
             sub: track.sub,
         };

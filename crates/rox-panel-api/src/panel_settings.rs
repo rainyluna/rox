@@ -182,6 +182,50 @@ pub fn open<P: PanelSettings>(panel: Entity<P>, cx: &mut App) {
         .insert(id, handle);
 }
 
+/// The app settings page a panel asked for, by the nav key the settings
+/// window lists it under. Set by [`open_app_page`] and taken by that
+/// window, so one that was already open jumps to the page too instead of
+/// staying where it was left.
+#[derive(Default)]
+struct RequestedAppPage(Option<&'static str>);
+
+impl Global for RequestedAppPage {}
+
+/// gpui's registered name for the action that opens the app settings
+/// window. The action itself is declared up in the workspace, so this is
+/// the one place the name is spelled; the settings window holds a test
+/// against its own type so a rename can't quietly break the jump.
+pub const SETTINGS_ACTION: &str = "rox::OpenSettings";
+
+/// Open the app's settings window on the page `key` names, the nav key in
+/// the window's own page table ("settings-page-sources" and its
+/// neighbours). What a panel points at when the thing it lists is
+/// configured somewhere else entirely: the stations panel's Manage
+/// Stations lands on Sources rather than on Appearance, where a plain
+/// open starts.
+///
+/// The window lives up in the binary, so this leaves the page behind and
+/// fires the action that opens it, built by name the way the keymap's own
+/// dispatch builds one. Naming the action's type here instead would mean
+/// moving it out of the workspace, which is more than this is worth. A key
+/// the window doesn't know leaves it wherever it was.
+pub fn open_app_page(key: &'static str, window: &mut Window, cx: &mut App) {
+    cx.set_global(RequestedAppPage(Some(key)));
+
+    let Ok(action) = cx.build_action(SETTINGS_ACTION, None) else {
+        log::warn!("the settings window's action is not registered");
+        return;
+    };
+
+    window.dispatch_action(action, cx);
+}
+
+/// The page a panel asked the settings window to open on, cleared as it's
+/// read so the next open lands where the user left it.
+pub fn requested_app_page(cx: &mut App) -> Option<&'static str> {
+    cx.default_global::<RequestedAppPage>().0.take()
+}
+
 /// How much of a pending source the approval block prints. Long enough to
 /// read a real shader, short enough that a file someone pasted a novel into
 /// doesn't build ten thousand elements.

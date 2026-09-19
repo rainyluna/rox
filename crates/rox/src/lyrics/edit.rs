@@ -15,10 +15,16 @@
 //! an arrow each way, and a press moves every stamp by the step, rewriting
 //! the tags in place.
 //!
-//! One window per track path, registered like the match window, so asking
-//! again focuses the open one instead of stacking a twin.
-
-use std::path::PathBuf;
+//! Every keystroke, stamp and nudge is handed straight back to the lyrics
+//! panels as an unsaved draft, so the sheet on screen moves with the one
+//! being typed. Nothing is written by that: the draft is given back when
+//! the window closes and the panels fall to whatever is stored.
+//!
+//! One window per subject, registered like the match window, so asking
+//! again focuses the open one instead of stacking a twin. A subject rather
+//! than a path because not every track is a file: a station's words belong
+//! to the song it announced, and the editor is open on that song and not
+//! on the URL it came down.
 
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Entity, Focusable, Global, KeyBinding, KeyDownEvent,
@@ -27,8 +33,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::{Root, Sizable};
 
-use rox_library::cue::TrackKey;
-use rox_library::lyrics::{self, Source};
+use rox_library::lyrics::{self, Source, Subject};
 
 use crate::matching::{WindowRegistry, open_or_focus};
 use rox_core::settings::lyrics_dir;
@@ -38,7 +43,8 @@ use rox_panel_api::panel::AppState;
 use rox_panel_kit::ui::{self as settings_ui, Seg, icon_button, kbd_line, section};
 use rox_panels::lyrics::StampLine;
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
-use rox_services::player::fmt_time;
+use rox_services::lyrics::{LyricsTarget, playing_subject, save_target};
+use rox_services::player::{fmt_time, song_clock};
 
 /// The default window size: tall enough for a verse or two at a glance,
 /// and wide enough that a timestamped line rarely wraps.
@@ -74,26 +80,26 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(SAVE_CHORD, Save, Some(CONTEXT))]);
 }
 
-/// The open edit windows, keyed by track path, so a second request for the
+/// The open edit windows, keyed by subject, so a second request for the
 /// same track focuses the first. The match window's registry shape.
 #[derive(Default)]
-struct OpenEditors(Vec<(PathBuf, WindowHandle<Root>)>);
+struct OpenEditors(Vec<(Subject, WindowHandle<Root>)>);
 
 impl Global for OpenEditors {}
 
 impl WindowRegistry for OpenEditors {
-    type Key = PathBuf;
-    fn entries(&mut self) -> &mut Vec<(PathBuf, WindowHandle<Root>)> {
+    type Key = Subject;
+    fn entries(&mut self) -> &mut Vec<(Subject, WindowHandle<Root>)> {
         &mut self.0
     }
 }
 
-/// Open a lyrics edit window on `path`, or focus the one already on it. A
+/// Open a lyrics edit window on `target`, or focus the one already on it. A
 /// save broadcasts through [`crate::lyrics::saved`], so the window never
 /// holds a panel of its own.
-pub fn open(state: AppState, path: PathBuf, cx: &mut App) {
+pub fn open(state: AppState, target: LyricsTarget, cx: &mut App) {
     open_or_focus::<OpenEditors>(
-        path.clone(),
+        target.subject.clone(),
         move |cx| {
             let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
             rox_panel_api::panel::open_child_window(
@@ -101,7 +107,7 @@ pub fn open(state: AppState, path: PathBuf, cx: &mut App) {
                 rox_i18n::t!("lyrics-edit-window-title"),
                 bounds,
                 Some(settings_ui::MIN_SIZE),
-                move |window, cx| cx.new(|cx| LyricsEdit::new(state, path, window, cx)),
+                move |window, cx| cx.new(|cx| LyricsEdit::new(state, target, window, cx)),
             )
         },
         cx,
@@ -110,15 +116,17 @@ pub fn open(state: AppState, path: PathBuf, cx: &mut App) {
 
 struct LyricsEdit {
     state: AppState,
-    /// The track the words save back to.
-    path: PathBuf,
+    /// What the words belong to and save back to.
+    subject: Subject,
     /// The track as the header shows it.
     line: SharedString,
     input: Entity<InputState>,
-    /// Where a save is written, resolved once the baseline read reports the
-    /// source; the tag until then, so a brand-new sheet writes a tag.
+    /// Where a save is written, resolved once the baseline read reports
+    /// the source. Until then it is the tag, so a brand-new sheet on a
+    /// file writes one, and the store for a track that has no file to
+    /// hold a tag.
     target: Source,
-    /// The text the file held, what save diffs against; None until the read
+    /// The text the read found, what save diffs against; None until it
     /// comes in, and save stays inert without it.
     baseline: Option<String>,
     /// A failed read or save, shown inline over the buttons.
@@ -140,10 +148,17 @@ struct LyricsEdit {
     _player_changed: Subscription,
     _input_changed: Subscription,
     _step_changed: Subscription,
+    _draft_dropped: Subscription,
 }
 
 impl LyricsEdit {
-    fn new(state: AppState, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        state: AppState,
+        target: LyricsTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subject = target.subject.clone();
         let input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
         window.focus(&input.read(cx).focus_handle(cx));
         // The step takes only what parses as seconds, so a slip of the
@@ -153,24 +168,20 @@ impl LyricsEdit {
                 .default_value(DEFAULT_STEP)
                 .validate(|s, _| s.trim().is_empty() || s.trim().parse::<f64>().is_ok())
         });
-        // The header names the track off its library tags, so the window
-        // says what it is even before the file read comes in.
-        let query =
-            rox_services::lyrics::query_for(&state.library, &TrackKey::from(path.clone()), cx);
-        let line = if query.artist.is_empty() {
-            query.title.clone()
-        } else {
-            format!("{} - {}", query.title, query.artist)
-        };
+        // The header names the track off the tags the target was built
+        // from, so the window says what it is even before the read comes in.
+        let line = target.label();
         let _backdrop_changed = cx.observe(&state.now_art, |_, _, cx| cx.notify());
         // The pump notifies the player on every tick; the window takes a
         // frame from it only when the lit row or the stamp readout moves.
         let _player_changed = cx.observe(&state.player, |this: &mut Self, _, cx| this.tick(cx));
         // Every edit, stamp, and nudge lands as a change on the input, so
-        // one hook keeps the stamp index honest.
+        // one hook keeps the stamp index honest and hands the draft to the
+        // panels.
         let _input_changed = cx.subscribe(&input, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.reindex(cx);
+                this.publish(cx);
             }
         });
         // The arrows go inert on an empty or zero step, so the header
@@ -180,13 +191,26 @@ impl LyricsEdit {
                 cx.notify();
             }
         });
+        // Closing takes the draft back, so the panels fall to whatever is
+        // stored rather than holding the words that were never saved.
+        let _draft_dropped = cx.on_release({
+            let subject = subject.clone();
+            move |_, cx| crate::lyrics::preview(&subject, None, cx)
+        });
+        // A brand-new sheet writes a tag, the way it always has; the read
+        // below repoints this at wherever the words already live. A track
+        // with no file to hold a tag takes the store instead.
+        let save_to = match subject.file() {
+            Some(_) => Source::Tag,
+            None => save_target(&subject),
+        };
         let now_art = state.now_art.clone();
         let this = LyricsEdit {
             state,
-            path,
+            subject,
             line: line.into(),
             input,
-            target: Source::Tag,
+            target: save_to,
             baseline: None,
             error: None,
             saving: false,
@@ -199,26 +223,41 @@ impl LyricsEdit {
             _player_changed,
             _input_changed,
             _step_changed,
+            _draft_dropped,
         };
         this.load(window, cx);
         this
     }
 
-    /// Fill the input from the file off the UI thread, pinning the save
-    /// target to the source the read reports. A track with no words starts
-    /// blank and writes a tag.
+    /// Hand the current text to every lyrics panel as the unsaved draft.
+    /// Runs on each change, which is what makes an offset nudge move the
+    /// words in the panel as the arrow is pressed. Held back until the
+    /// baseline read lands, so the empty input the window opens with never
+    /// blanks the panel for the frame before the words arrive.
+    fn publish(&self, cx: &mut Context<Self>) {
+        if self.baseline.is_none() {
+            return;
+        }
+        let text = self.input.read(cx).value().to_string();
+        let subject = self.subject.clone();
+        cx.defer(move |cx| crate::lyrics::preview(&subject, Some(&text), cx));
+    }
+
+    /// Fill the input off the UI thread, pinning the save target to the
+    /// source the read reports. A track with no words starts blank and
+    /// keeps the home it opened with.
     fn load(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self.path.clone();
+        let subject = self.subject.clone();
         cx.spawn_in(window, async move |this, cx| {
             let read = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
-                    async move { lyrics::load(&path, Some(&lyrics_dir())) }
+                    let subject = subject.clone();
+                    async move { lyrics::load(&subject, Some(&lyrics_dir())) }
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                if this.path != path {
+                if this.subject != subject {
                     return;
                 }
                 let text = read.as_ref().map(|l| l.text.clone()).unwrap_or_default();
@@ -235,16 +274,22 @@ impl LyricsEdit {
         .detach();
     }
 
-    /// Where playback is within the edited track, or None when a
-    /// different track (or nothing) is playing. The stamp button keys off
-    /// this.
+    /// Where playback is within the edited song, or None when a different
+    /// one (or nothing) is playing. The stamp button keys off this.
+    ///
+    /// Matched on the subject rather than the track, so a station's
+    /// announced song lines up with the window open on that song. A
+    /// station's own clock counts the listen, which is the evening and not
+    /// the song, so the position comes off the song clock; for a file the
+    /// two are the same number.
     fn playback_position(&self, cx: &App) -> Option<f64> {
-        self.state
-            .player
-            .read(cx)
-            .now_playing()
-            .filter(|now| now.path() == self.path)
-            .map(|now| now.position_secs)
+        let player = self.state.player.read(cx);
+        if playing_subject(player).as_ref() != Some(&self.subject) {
+            return None;
+        }
+        let now = player.now_playing()?;
+
+        Some(song_clock(now.position_secs, now.song_start_secs))
     }
 
     /// Re-read where the stamps sit after the text changes, and re-light
@@ -252,7 +297,7 @@ impl LyricsEdit {
     /// nothing to move, so the window takes a frame too.
     fn reindex(&mut self, cx: &mut Context<Self>) {
         self.rows = lyrics::stamp_rows(&self.input.read(cx).value());
-        self.mark(cx);
+        self.mark(self.playback_position(cx), cx);
         cx.notify();
     }
 
@@ -260,8 +305,11 @@ impl LyricsEdit {
     /// the stamp readout when its second turns over. Every other frame the
     /// pump would ask for is left alone.
     fn tick(&mut self, cx: &mut Context<Self>) {
-        self.mark(cx);
-        let secs = self.playback_position(cx).map(|secs| secs as u64);
+        // One read of the clock for both jobs: resolving what is playing
+        // takes the station's title lock, and this runs on the pump.
+        let position = self.playback_position(cx);
+        self.mark(position, cx);
+        let secs = position.map(|secs| secs as u64);
         if secs != self.shown_secs {
             self.shown_secs = secs;
             cx.notify();
@@ -271,10 +319,8 @@ impl LyricsEdit {
     /// Light the row under the playhead in the input, or none while
     /// another track (or nothing) plays. The input repaints itself when
     /// the row moves, so this costs no frame of the window's own.
-    fn mark(&mut self, cx: &mut Context<Self>) {
-        let row = self
-            .playback_position(cx)
-            .and_then(|position| lyrics::row_at(&self.rows, position));
+    fn mark(&mut self, position: Option<f64>, cx: &mut Context<Self>) {
+        let row = position.and_then(|position| lyrics::row_at(&self.rows, position));
         let wash = palette::alpha(palette::accent(), MARK_ALPHA);
         self.input.update(cx, |input, cx| {
             input.set_marked_line(row.map(|row| (row, wash.into())), cx);
@@ -415,25 +461,26 @@ impl LyricsEdit {
         }
         self.saving = true;
         self.error = None;
-        let path = self.path.clone();
+        let subject = self.subject.clone();
         let target = self.target.clone();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
+                    let subject = subject.clone();
                     let target = target.clone();
                     let text = text.clone();
-                    async move { lyrics::save(&path, &target, &text, Some(&lyrics_dir())) }
+                    async move { lyrics::save(&subject, &target, &text, Some(&lyrics_dir())) }
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(()) => {
                         // Panels cache lyrics off the projection, so every
-                        // one of them needs a poke to re-read.
-                        crate::lyrics::saved(&path, cx);
+                        // one of them needs a poke to re-read. The window
+                        // closing hands the draft back on the way out.
+                        crate::lyrics::saved(&subject, cx);
                         window.remove_window();
                     }
                     Err(e) => {

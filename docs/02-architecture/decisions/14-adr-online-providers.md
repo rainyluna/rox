@@ -29,11 +29,11 @@ Hardcoding is fine while there's one service per domain, and Last.fm already sho
 where that ends. The moment a domain has a second service, you need either a trait or a
 copy of the first integration, and the copy is the thing that drifts.
 
-The extension host is a different problem, #8's: sandboxing untrusted code so it can act
-as an audio source. First-party HTTP fetchers written by us don't need a sandbox, so
-making them wait on one would be paying for isolation nobody asked for. If providers do
-eventually ship as extensions, the per-domain trait is the surface the host would expose
-anyway, so nothing here is wasted.
+The extension host is a different problem, [ADR 29](29-adr-source-contract.md)'s:
+sandboxing untrusted code so it can act as an audio source. First-party HTTP fetchers
+written by us don't need a sandbox, so making them wait on one would be paying for
+isolation nobody asked for. If providers do eventually ship as extensions, the per-domain
+trait is the surface the host would expose anyway, so nothing here is wasted.
 
 HTTP goes through one shared blocking agent, ureq, which is already in the tree for
 scrobbling. Every request carries an app User-Agent, which MusicBrainz requires outright

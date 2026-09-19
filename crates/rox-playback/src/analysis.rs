@@ -216,6 +216,10 @@ pub fn measure(
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
+    // What the panic guard names a bad file under, resolved once here so the
+    // per-packet guards below format nothing.
+    let origin = path.display().to_string();
+
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -226,7 +230,7 @@ pub fn measure(
     // either has to read as a file this can't measure rather than as the end
     // of the worker. Nothing outlives the failed call, so there's no state
     // left half-updated to argue about.
-    let mut format = guard_decode("probe", path, || {
+    let mut format = guard_decode("probe", &origin, || {
         symphonia::default::get_probe().probe(
             &hint,
             mss,
@@ -272,7 +276,7 @@ pub fn measure(
                 .map(|secs| (secs * rate as f64).round() as u64)
         });
 
-    let mut decoder = guard_decode("decoder setup", path, || {
+    let mut decoder = guard_decode("decoder setup", &origin, || {
         crate::codecs::registry().make_audio_decoder(params, &AudioDecoderOptions::default())
     })?
     .map_err(|e| format!("decoder: {e}"))?;
@@ -294,7 +298,7 @@ pub fn measure(
         // error rather than as a dead worker, and it ends it for good: the
         // unwind came out of the middle of that state, so the loop never
         // goes back in for another packet.
-        let packet = match guard_decode("packet read", path, || format.next_packet())? {
+        let packet = match guard_decode("packet read", &origin, || format.next_packet())? {
             Ok(Some(p)) => p,
             Ok(None) => break,
             Err(e) => {
@@ -312,7 +316,7 @@ pub fn measure(
         // The copy into the scratch buffer is inside the guard because the
         // decoded audio is borrowed from the decoder: reading it runs the
         // codec's own code as much as producing it did.
-        let decoded = guard_decode("decode", path, || {
+        let decoded = guard_decode("decode", &origin, || {
             decoder.decode(&packet).map(|decoded| {
                 let frames = decoded.frames();
                 if frames == 0 {
@@ -429,12 +433,16 @@ pub fn decode_mono(
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
+    // What the panic guard names a bad file under, resolved once here so the
+    // per-packet guards below format nothing.
+    let origin = path.display().to_string();
+
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
 
-    let mut format = guard_decode("probe", path, || {
+    let mut format = guard_decode("probe", &origin, || {
         symphonia::default::get_probe().probe(
             &hint,
             mss,
@@ -455,7 +463,7 @@ pub fn decode_mono(
         .ok_or("no audio codec parameters")?;
     let rate = params.sample_rate.ok_or("unknown sample rate")?;
 
-    let mut decoder = guard_decode("decoder setup", path, || {
+    let mut decoder = guard_decode("decoder setup", &origin, || {
         crate::codecs::registry().make_audio_decoder(params, &AudioDecoderOptions::default())
     })?
     .map_err(|e| format!("decoder: {e}"))?;
@@ -466,7 +474,7 @@ pub fn decode_mono(
         // the head of the track instead of the span asked for. That's a
         // worse excerpt, not a broken one, so it's a warning rather than an
         // error: a format with no seek table still gets analyzed.
-        let seeked = guard_decode("seek", path, || {
+        let seeked = guard_decode("seek", &origin, || {
             format.seek(
                 SeekMode::Coarse,
                 SeekTo::Time {
@@ -478,7 +486,7 @@ pub fn decode_mono(
         if let Err(e) = seeked {
             log::warn!("seek to {from_secs:.1}s in {} failed: {e}", path.display());
         }
-        guard_decode("decoder reset", path, || decoder.reset())?;
+        guard_decode("decoder reset", &origin, || decoder.reset())?;
     }
 
     let want = ((max_secs * rate as f64) as usize).max(1);
@@ -491,7 +499,7 @@ pub fn decode_mono(
         // Same guard as [`measure`]: a panic out of the reader or the codec
         // is this excerpt failing, not this worker dying, and the decoder is
         // never re-entered after one.
-        let packet = match guard_decode("packet read", path, || format.next_packet())? {
+        let packet = match guard_decode("packet read", &origin, || format.next_packet())? {
             Ok(Some(p)) => p,
             Ok(None) => break,
             Err(e) => {
@@ -502,7 +510,7 @@ pub fn decode_mono(
         if packet.track_id != track_id {
             continue;
         }
-        let decoded = guard_decode("decode", path, || {
+        let decoded = guard_decode("decode", &origin, || {
             decoder.decode(&packet).map(|decoded| {
                 let spec = decoded.spec();
                 let got = (

@@ -1442,6 +1442,8 @@ mod tests {
     /// One scanned row with just the fields the seed reads set.
     fn track(path: &str, album_artist: &str, album: &str) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             path: path.into(),
             sub: 0,
             cue: None,

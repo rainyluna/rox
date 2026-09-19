@@ -13,11 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers,
     MouseButton, MouseDownEvent, ScrollStrategy, SharedString, Stateful, Subscription,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, svg, uniform_list,
 };
 use gpui_component::Icon;
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
+use gpui_component::tooltip::Tooltip;
 use rox_core::QUEUE_CAP;
 use rox_core::fmt::fmt_ago;
 use rox_dock::{Panel, PanelEvent, TabPanel};
@@ -35,8 +36,10 @@ use crate::panel_settings;
 use crate::query::search::{SearchBox, SearchEvent};
 use crate::query::shared_query::{QueryFilter, QuerySource, SharedQueryEvent};
 use crate::selection::SelectionEvent;
+use crate::thumbs::Thumb;
 use crate::track_ui::track_cells;
 use crate::track_ui::track_columns::{self, Column, ColumnHost, GroupTrack, HeadingHost};
+use rox_services::catalog::LocalCopy;
 use rox_services::history::HistoryEvent;
 
 /// One row's height; the list is a uniform_list, so every row is the same.
@@ -277,6 +280,14 @@ pub struct HistoryPanel {
     /// business knowing about the projection; a track the projection has
     /// no row for is simply absent.
     readings: HashMap<i64, rox_services::catalog::SortNames>,
+    /// The library's own file of each live row's song, by index into
+    /// `tracks`; None for a row off a file and for a song the library has
+    /// no copy of. A radio listen's row is the station and what it names
+    /// is the song, so this is where its cover comes from and what a
+    /// double click plays. Resolved once per refresh: the cover column
+    /// asks every visible row every frame, and the lookup walks the
+    /// projection.
+    locals: Vec<Option<LocalCopy>>,
     /// The search box, shared by every searching view; shown per config.
     search: Entity<SearchBox>,
     /// A pending box reset from a source toggle or a shared-query change,
@@ -390,6 +401,7 @@ impl HistoryPanel {
             config,
             tracks: Vec::new(),
             readings: HashMap::new(),
+            locals: Vec::new(),
             search,
             resync_box: false,
             selection_ids,
@@ -459,6 +471,18 @@ impl HistoryPanel {
                 !sort.title.is_empty() || !sort.artist.is_empty() || !sort.album.is_empty()
             })
             .collect();
+        // What the live rows named, looked up against the library in one
+        // pass. A row off a file asks nothing: its own path is already the
+        // file, so it takes the empty pair and comes back None.
+        let names: Vec<(&str, &str)> = self
+            .tracks
+            .iter()
+            .map(|t| match t.live {
+                true => (t.artist.as_str(), t.title.as_str()),
+                false => ("", ""),
+            })
+            .collect();
+        self.locals = library.local_copies(&names);
         self.favourites = library.favourite_ids();
         self.selected.clear();
         self.anchor = None;
@@ -787,6 +811,20 @@ impl HistoryPanel {
     /// click with a share kept for history. A track deleted since its event
     /// resolves to no path and drops out of the queue quietly.
     fn play_from(&mut self, ti: usize, cx: &mut Context<Self>) {
+        // A radio listen's row is the station, but what it names is the
+        // song. Playing the station would put whatever is on air now under
+        // a click on a song from last Tuesday, so the library's own copy
+        // wins when it has one, and the station is the fallback.
+        if let Some(local) = self.locals.get(ti).and_then(|local| local.as_ref()) {
+            let Ok(keys) = self.state.library.read(cx).keys_for(&[local.track_id]) else {
+                return;
+            };
+            self.state
+                .player
+                .update(cx, |player, cx| player.play_at(keys, 0, cx));
+            return;
+        }
+
         // Window over the visible tracks in query order, the rows on screen, not
         // the raw list. Windowing over `self.tracks` would pull query-hidden
         // tracks into the queue. `ti` indexes `self.tracks`; find where it is
@@ -938,12 +976,36 @@ impl HistoryPanel {
                     }
                 }),
             );
-        let cover = track_columns::cover_thumb(
-            &self.state,
-            (!t.path.is_empty()).then(|| std::path::Path::new(&t.path)),
-            self.column_shown("cover"),
-            cx,
-        );
+        // A radio listen's row plays one of two things and the row itself
+        // can't say which, so the tooltip does. Off the refresh's lookup,
+        // which is the same answer the click acts on.
+        let local = self.locals.get(ti).and_then(|local| local.as_ref());
+        if t.live {
+            let text = match local.is_some() {
+                true => rox_i18n::t!("history-live-plays-file"),
+                false => rox_i18n::t!("history-live-plays-station"),
+            };
+            row = row.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+        }
+
+        // A live row's picture ranks the way the transport's does: the
+        // song's own cover first, which for a capture off the air is the
+        // picture saved beside it, and the station's behind it. The row's
+        // own path is what the station's favicon is keyed on.
+        let shown = self.column_shown("cover");
+        let station = (!t.path.is_empty()).then(|| std::path::Path::new(&t.path));
+        let own = local.map(|local| local.path.as_path());
+        let mut cover = track_columns::cover_thumb(&self.state, own.or(station), shown, cx);
+        // The file exists and carries no art at all. The station's picture
+        // says more than an empty cell does.
+        if own.is_some() && matches!(cover, Some(Thumb::Missing)) {
+            cover = track_columns::cover_thumb(&self.state, station, shown, cx);
+        }
+        // A station's row has a favicon or nothing. The shared cell's
+        // music note is the shape of a file whose cover didn't load, and
+        // a night of radio listens wearing it reads as a broken column.
+        let blank_cover = t.live && !matches!(cover, Some(Thumb::Ready(_)));
+
         let sort = self.readings.get(&t.track_id);
         let cell = track_columns::Cell {
             pos: (ti + 1) as u32,
@@ -966,6 +1028,24 @@ impl HistoryPanel {
         for col in columns() {
             if !self.column_shown(col.key) {
                 continue;
+            }
+            if col.key == "cover" && blank_cover {
+                let side = palette::scaled_px(ROW_H - 6.);
+                row = row.child(div().flex_none().w(side).h(side));
+                continue;
+            }
+            // The mark that says this listen came off the air, ahead of the
+            // name it belongs to. A station's listen carries the song's own
+            // title and artist, so without it the row is indistinguishable
+            // from the file of the same song.
+            if col.key == "name" && t.live {
+                row = row.child(
+                    svg()
+                        .path(icons::RADIO)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(palette::text_muted()),
+                );
             }
             let c = match track_columns::cell(col.key, &cell, &self.state, ROW_H, false) {
                 Some(c) => c,

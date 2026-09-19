@@ -2,10 +2,13 @@
 //! through the rest of the app. A cue rip is one image file (a whole-disc
 //! FLAC or WAV) split into tracks by timestamps in a sidecar .cue sheet, so
 //! a track stops being a file and becomes a span inside one. Identity per
-//! the subsong model: a track is (path, sub), where sub is 0 for a plain
-//! file and the 1-based cue track number for a span.
+//! the subsong model: a track is (source, path, sub), where sub is 0 for a
+//! plain file and the 1-based cue track number for a span, and the source
+//! is "local" for everything that came off disk.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// A cue track's slice of its image file, in milliseconds from the start.
 /// `end_ms` is None on the last track of an image, which runs to the end of
@@ -25,40 +28,167 @@ impl Span {
     }
 }
 
-/// What a play request points at: a file, and which subsong of it. Plain
-/// files are sub 0; cue tracks use their 1-based track number. This is
-/// the currency the player and panels trade in where a bare PathBuf used
-/// to do, so two tracks of the same image stay distinct in a queue.
+/// Which source a track belongs to: "local" for a file on disk, whatever a
+/// source names itself otherwise ("subsonic:<server-id>", "radio"). An
+/// `Arc<str>` rather than a `String` because a key is cloned per queue entry
+/// and per queue snapshot while the value repeats across every row of a
+/// library, so the clone should be a pointer bump.
+pub type SourceId = Arc<str>;
+
+/// The source every track had before sources existed: a file on disk.
+pub const LOCAL: &str = "local";
+
+/// The one shared allocation behind every local key. Handing out clones of
+/// it keeps the overwhelmingly common case off the allocator.
+pub fn local() -> SourceId {
+    static LOCAL_ID: OnceLock<SourceId> = OnceLock::new();
+
+    LOCAL_ID.get_or_init(|| Arc::from(LOCAL)).clone()
+}
+
+/// A source string as a [`SourceId`], sharing the one local allocation for
+/// the case that's almost every row. Anything reading a source off a
+/// database row or a projection row goes through this rather than
+/// `Arc::from`, so a library of a million local tracks holds one.
+pub fn source_id(source: &str) -> SourceId {
+    if source == LOCAL {
+        local()
+    } else {
+        Arc::from(source)
+    }
+}
+
+/// The prefix every Subsonic source string carries, one source per
+/// configured server with a digest of its URL and user behind the colon.
+/// Written out here rather than imported because the format lives in
+/// rox-net, which this crate sits below.
+pub const SUBSONIC_PREFIX: &str = "subsonic:";
+
+/// Which kind of source a track came from, as the UI branches on it. The
+/// source string is the storage form and there are as many of them as
+/// there are configured servers; this is the three cases a surface
+/// actually draws differently. A station has no timeline and gets its
+/// song title off the stream, a server-backed track has no file behind
+/// it, and a local file is everything the app did before sources.
+///
+/// Anything the match doesn't recognize reads as [`Origin::Subsonic`]
+/// would be a lie, so it reads as local: a future source added without
+/// touching this still draws like a plain track rather than borrowing a
+/// station's live handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Origin {
+    Local,
+    Subsonic,
+    Radio,
+}
+
+impl Origin {
+    /// Read a source string. Takes the string rather than a key so a
+    /// projection row, which carries its source and no key, can ask too.
+    pub fn of(source: &str) -> Origin {
+        if source == crate::stations::SOURCE {
+            Origin::Radio
+        } else if source.starts_with(SUBSONIC_PREFIX) {
+            Origin::Subsonic
+        } else {
+            Origin::Local
+        }
+    }
+}
+
+/// What a play request points at: a source, something within it, and which
+/// subsong of that. Plain files are sub 0; cue tracks use their 1-based
+/// track number. This is the currency the player and panels trade in where
+/// a bare PathBuf used to do, so two tracks of the same image stay distinct
+/// in a queue.
+///
+/// The source is part of the key rather than a lookup off it, because
+/// identity repeats across sources: a Subsonic server's song id and a path
+/// on disk can be the same string, and two servers can hand back the same
+/// id for different music.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TrackKey {
+    pub source: SourceId,
     pub path: PathBuf,
     pub sub: u16,
 }
 
 impl From<PathBuf> for TrackKey {
     fn from(path: PathBuf) -> Self {
-        TrackKey { path, sub: 0 }
+        TrackKey {
+            source: local(),
+            path,
+            sub: 0,
+        }
     }
 }
 
 impl TrackKey {
+    /// True for a track that lives on disk, which is still most of them.
+    pub fn is_local(&self) -> bool {
+        &*self.source == LOCAL
+    }
+
+    /// Which kind of source this track came from, for the surfaces that
+    /// draw one differently.
+    pub fn origin(&self) -> Origin {
+        Origin::of(&self.source)
+    }
+
     /// The string form for stores that only hold text (m3u exports): the
     /// bare path for a plain file, `path#N` for a cue track. Readers try
     /// the string as a literal path first, so a real file whose name ends
     /// in `#2` still resolves to itself ahead of the fragment reading.
+    ///
+    /// A local key writes exactly what it always wrote, so an m3u exported
+    /// before sources and one exported after are the same file. Any other
+    /// source prefixes `source|`.
     pub fn to_fragment(&self) -> String {
         let path = self.path.display();
-        if self.sub == 0 {
+
+        let body = if self.sub == 0 {
             path.to_string()
         } else {
             format!("{path}#{}", self.sub)
+        };
+
+        if self.is_local() {
+            body
+        } else {
+            format!("{}|{body}", self.source)
         }
     }
 
     /// Read a fragment string back, `exists` deciding whether the literal
     /// reading wins: handed a callback that checks the store (or the disk),
-    /// a name that really ends in `#2` beats the cue reading of it.
+    /// a name that really ends in `#2` beats the cue reading of it. The
+    /// source prefix is read the same way round, since `|` is a legal
+    /// character in a file name and a path holding one has to stay whole.
     pub fn from_fragment(s: &str, exists: impl Fn(&str) -> bool) -> TrackKey {
+        if !exists(s)
+            && let Some((source, rest)) = s.split_once('|')
+            && !source.is_empty()
+            && source != LOCAL
+        {
+            // Past the prefix there's no on-disk reading left to lose to, so
+            // a `#N` suffix here means what it says.
+            let (path, sub) = match rest.rsplit_once('#') {
+                Some((path, sub)) => match sub.parse::<u16>() {
+                    Ok(sub) if sub > 0 => (path, sub),
+
+                    _ => (rest, 0),
+                },
+
+                None => (rest, 0),
+            };
+
+            return TrackKey {
+                source: Arc::from(source),
+                path: PathBuf::from(path),
+                sub,
+            };
+        }
+
         if !exists(s)
             && let Some((path, sub)) = s.rsplit_once('#')
             && let Ok(sub) = sub.parse::<u16>()
@@ -66,11 +196,14 @@ impl TrackKey {
             && exists(path)
         {
             return TrackKey {
+                source: local(),
                 path: PathBuf::from(path),
                 sub,
             };
         }
+
         TrackKey {
+            source: local(),
             path: PathBuf::from(s),
             sub: 0,
         }
@@ -666,6 +799,7 @@ FILE "Urban Hymns.flac" WAVE
         );
 
         let cue = TrackKey {
+            source: local(),
             path: PathBuf::from("/m/album.flac"),
             sub: 7,
         };
@@ -680,6 +814,81 @@ FILE "Urban Hymns.flac" WAVE
         assert_eq!(
             TrackKey::from_fragment("/m/track#2", |s| s == "/m/track#2"),
             literal
+        );
+    }
+
+    #[test]
+    fn non_local_fragments_carry_their_source() {
+        let remote = TrackKey {
+            source: Arc::from("subsonic:home"),
+            path: PathBuf::from("tr-1042"),
+            sub: 0,
+        };
+        assert_eq!(remote.to_fragment(), "subsonic:home|tr-1042");
+        assert_eq!(
+            TrackKey::from_fragment(&remote.to_fragment(), |_| false),
+            remote
+        );
+
+        let remote_cue = TrackKey {
+            source: Arc::from("subsonic:home"),
+            path: PathBuf::from("tr-1042"),
+            sub: 3,
+        };
+        assert_eq!(remote_cue.to_fragment(), "subsonic:home|tr-1042#3");
+        assert_eq!(
+            TrackKey::from_fragment(&remote_cue.to_fragment(), |_| false),
+            remote_cue
+        );
+    }
+
+    #[test]
+    fn origins_read_off_the_source_string() {
+        assert_eq!(Origin::of("local"), Origin::Local);
+        assert_eq!(Origin::of("radio"), Origin::Radio);
+        assert_eq!(Origin::of("subsonic:9f2a1c"), Origin::Subsonic);
+
+        // A source nobody has taught this about draws like a plain track
+        // rather than borrowing a station's live handling.
+        assert_eq!(Origin::of("tidal:abc"), Origin::Local);
+        assert_eq!(Origin::of(""), Origin::Local);
+
+        // The prefix is a prefix, not the whole string: a source that only
+        // spells the word is not a server.
+        assert_eq!(Origin::of("subsonic"), Origin::Local);
+    }
+
+    #[test]
+    fn keys_carry_their_origin() {
+        assert_eq!(
+            TrackKey::from(PathBuf::from("/m/a.flac")).origin(),
+            Origin::Local
+        );
+
+        let station = TrackKey {
+            source: Arc::from("radio"),
+            path: PathBuf::from("https://stream.example/live"),
+            sub: 0,
+        };
+        assert_eq!(station.origin(), Origin::Radio);
+
+        let served = TrackKey {
+            source: Arc::from("subsonic:home"),
+            path: PathBuf::from("tr-1042"),
+            sub: 0,
+        };
+        assert_eq!(served.origin(), Origin::Subsonic);
+    }
+
+    #[test]
+    fn a_path_with_a_pipe_in_it_stays_local() {
+        // `|` is legal in a file name, so the prefix split only happens when
+        // the whole string isn't a path the caller recognises.
+        let piped = TrackKey::from(PathBuf::from("/m/a|b.flac"));
+        assert_eq!(piped.to_fragment(), "/m/a|b.flac");
+        assert_eq!(
+            TrackKey::from_fragment("/m/a|b.flac", |s| s == "/m/a|b.flac"),
+            piped
         );
     }
 }

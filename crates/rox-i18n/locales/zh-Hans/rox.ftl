@@ -193,6 +193,7 @@ settings-language-system = （系统语言）
 settings-language-search = 搜索语言
 picker-no-matches = 无匹配项
 settings-search-no-matches = 没找到匹配“{ $text }”的项
+settings-search-scope = 仅搜索当前页面
 
 ## Embed dialog
 bookmark-new-title = 新建书签
@@ -224,6 +225,10 @@ bookmark-menu-remove = 删除
 bookmark-menu-remove-many = 删除 { $count } 个书签
 bookmarks-title = 书签
 bookmarks-empty = 还没有书签。播放时按 M 添加一个，或按 Shift+M 添加并命名。
+cue-menu-insert = 在此插入标记
+cue-menu-bookmark = 在此添加书签
+cue-menu-remove = 移除标记
+position-bound-streaming = 直播播放时不可用
 bake-window-title = rox - 嵌入已存储的元数据
 bake-title = 嵌入已存储的元数据
 bake-intro = 把已存储的元数据写进文件本身，别的播放器也能读到。不会重新计算任何内容。
@@ -604,6 +609,35 @@ library-circular-portraits = 圆形肖像
 library-genre-face = 流派图面
     .description = 按流派分组时图块显示什么：封面、按流派颜色染过的封面，或几何图形下的纯色卡片
 
+## Stations panel
+
+stations-title = 电台
+stations-play = 播放
+stations-remove = 删除
+stations-find = 查找电台...
+stations-manage = 管理电台...
+stations-import = 导入电台...
+stations-import-empty = 该文件里没有任何流地址
+stations-not-a-stream = 电台通过 http 或 https 播放，这不是流地址
+stations-empty-title = 还没有电台
+stations-empty = 在目录里找一个，或在设置里打理你自己的列表。
+stations-on-air = 正在播出
+stations-clocks = 这首歌和这个电台上的时长
+stations-homepage = 打开主页
+
+## Station directory
+
+directory-window-title = 电台目录
+directory-placeholder = 在 radio-browser.info 上查找电台
+directory-search = 搜索目录
+directory-add = 添加
+directory-add-play = 添加并播放
+directory-added = 已在我的电台中
+directory-searching = 正在搜索 radio-browser.info...
+directory-none = radio-browser.info 上没有与“{ $text }”匹配的电台
+directory-failed = radio-browser.info 没有响应：{ $reason }
+directory-bitrate = { $kbps } kbps
+
 ## Album grid panel
 panel-title-album-grid = 专辑墙
 grid-menu-scroll = 滚动
@@ -658,6 +692,7 @@ settings-page-ml-models = ML 模型
 settings-page-playback = 播放
 settings-page-providers = 数据源
 settings-page-shader = 着色器
+settings-page-sources = 来源
 settings-page-storage = 存储
 settings-page-workspace = 工作区
 
@@ -918,6 +953,27 @@ settings-integrations-section-lastfm = Last.fm
 settings-integrations-section-librefm = Libre.fm
 settings-integrations-section-listenbrainz = ListenBrainz
 settings-integrations-section-scrobbling = Scrobble
+settings-integrations-section-subsonic = Subsonic
+settings-integrations-subsonic-connect = 连接
+settings-integrations-subsonic-credentials = 登录
+    .description = 服务器上的账户；密码存在 accounts.json 里，不会写进 settings.json
+settings-integrations-subsonic-enable = 使用 Subsonic 服务器
+    .description = 从 Subsonic 或 OpenSubsonic 服务器读取媒体库并播放
+settings-integrations-subsonic-password-placeholder = 密码
+settings-integrations-subsonic-server = 服务器
+    .description = 服务器地址，带 http:// 或 https://，末尾不用加 /rest
+settings-integrations-subsonic-status-failed = 连不上服务器：{ $error }
+settings-integrations-subsonic-status-ok = 已连接到 { $server }
+settings-integrations-subsonic-sync-count = { $n ->
+   *[other] { $n } 首曲目，上次同步 { $date }
+}
+settings-integrations-subsonic-sync-failed = 同步失败：{ $error }
+settings-integrations-subsonic-sync-never = 尚未同步
+settings-integrations-subsonic-sync-now = 立即同步
+    .description = 问服务器有什么，再把媒体库对齐过去；它不再列出的曲目会被移除
+settings-integrations-subsonic-syncing = 正在同步第 { $done } / { $total } 张专辑
+settings-integrations-subsonic-url-placeholder = https://music.example.com
+settings-integrations-subsonic-user-placeholder = 用户名
 
 ## Settings: keymap
 settings-keymap-clash = { $chord } 也绑给了{ $other }；只有一个会触发
@@ -1023,6 +1079,23 @@ settings-playback-continuation-weighted = 加权
 settings-playback-keep-playing = 继续播放
     .description = 队列播完之后放什么。选出来的内容会作为普通上下文追加到时间线上，看得见也删得掉，不是藏起来的状态。上面的顺序设成“相似”时，无论这里选哪一个，它都会继续找和正在播放的听起来像的曲目
     .keywords = 续播 自动播放 队列 xubo duilie autoplay
+settings-playback-live-buffer = 直播缓冲
+    .description = 电台可以回退多远。暂停时连接仍然保持并继续填充缓冲，所以再次播放会从你停下的地方继续，而不是从直播处开始。十二小时就是实际上的无限：一次连着听的时长绕不完它
+settings-playback-live-buffer-memory = 128 kbps 下约 { $low }，320 kbps 下约 { $high }。
+settings-playback-live-buffer-playing = 正在播放的电台：约 { $size }。
+settings-playback-capture-album = 保存曲目的专辑
+    .description = 保存下来的歌曲的专辑标签写什么。留空则不写专辑，因为从电台录下的歌没有发行版本，专辑字段里塞满电台名会弄脏每个专辑视图。%station% 会填入电台名；像 Radio 或 Singles 这样的词会把它们归到单独的一格。电台及其流地址始终写在注释里。
+settings-playback-capture-album-placeholder = 留空
+settings-playback-capture-choose = 选择文件夹...
+settings-playback-capture-enable = 保存流媒体来源的歌曲
+    .description = 把流从头到尾播放的每首歌按流自己的格式写进保存文件夹，不做任何重新编码，并打上电台的标签。歌曲的封面会以同样的文件名存在旁边，只要能找到。歌曲的分界来自电台发送的曲目名，它比音频切换早或晚几秒，所以保存下来的歌可能带上前一首歌的尾巴。比直播缓冲更长的歌不会被保存，所以播客或混音会一直留在直播里。
+settings-playback-capture-folder = 保存文件夹
+settings-playback-capture-pattern = 保存名称
+    .description = 保存的歌曲在保存文件夹里叫什么名字。/ 会建立文件夹，所以默认按电台归档一晚上的广播，而不是全部堆在一起。扩展名跟随流本身。
+settings-playback-capture-pattern-date = %date% 是歌曲保存的日期，形如 2026-09-18。
+settings-playback-capture-pattern-preview = 预览：{ $name }
+settings-playback-capture-pattern-station = %station% 是电台的名称，%album% 表示同一个东西。
+settings-playback-section-capture = 保存
 settings-playback-play-order = 播放顺序
     .description = 随机开着时已入队的曲目按什么顺序排。播放控制上的随机按钮负责开关；这里决定开了之后怎么排
 settings-playback-rating-scale = 评分刻度
@@ -1032,6 +1105,7 @@ settings-playback-rating-scale-stars = 星星
 settings-playback-restore-last-session = 恢复上次会话
     .description = 启动时带上你离开时的播放队列，暂停在当时那首曲目和那个位置。媒体库文件夹之外的入队曲目恢复不了，会从顺序里掉出去
 settings-playback-section-queue = 队列
+settings-playback-section-radio = 电台
 settings-playback-section-ratings = 评分
 settings-playback-section-stepping = 步进
 settings-playback-step = 步长
@@ -1099,6 +1173,18 @@ settings-shader-signals-block = 信号
     .description = 着色器的十六个槽位各读哪个共享信号
 settings-shader-slots-block = 槽位
     .description = 每个槽位送到着色器时的样子；没有路由的槽位就是手动旋钮
+
+## Settings: sources
+
+settings-sources-folders-note = rox 扫描的文件夹在“媒体库”页面上，与读取它们的扫描和标签设置放在一起。
+settings-sources-folders-open = 媒体库页面
+settings-sources-section-folders = 本地文件夹
+settings-sources-section-stations = 电台
+settings-sources-stations-find = 查找电台...
+settings-sources-stations-import = 导入电台...
+settings-sources-stations-name-placeholder = 名称（可选）
+settings-sources-stations-none = 还没有电台
+settings-sources-stations-url-placeholder = 流地址
 
 ## Settings: storage
 settings-storage-artist-images = 艺术家图片
@@ -1779,6 +1865,12 @@ keymap-prev-bookmark = 上一个书签
     .description = 跳回播放位置之前的书签
 keymap-next-bookmark = 下一个书签
     .description = 跳到下一个书签
+keymap-cue = 添加标记
+    .description = 在当前播放位置放一个会话标记。标记在 rox 关闭前有效
+keymap-cue-prev = 上一个标记
+    .description = 跳回播放头之前的标记
+keymap-cue-next = 下一个标记
+    .description = 跳到下一个标记
 keymap-stop-playback = 停止
     .description = 停止播放并释放曲目
 keymap-toggle-playback = 播放 / 暂停
@@ -1901,6 +1993,7 @@ panel-catalog-group-visualizers = 可视化
 panel-catalog-group-widgets = 小部件
 panel-catalog-history = 播放历史
 panel-catalog-bookmarks = 书签
+panel-catalog-stations = 电台
 panel-catalog-menu = 菜单
 panel-catalog-metadata = 元数据
 panel-catalog-mini-toggle = 迷你切换
@@ -2578,6 +2671,17 @@ waveform-bookmarks = 书签
     .description = 以底边的小箭头显示当前曲目的书签：点击跳转，右键编辑
 waveform-split-channels = 分离声道
     .description = 一个声道一行，左上右下；单声道曲目仍是一行
+waveform-live-mode = 直播形状
+    .description = 电台播放时这条带子画什么：什么都不画、电台自己的声音，或者它自己画出的形状
+waveform-live-trace = 波形
+waveform-live-motion = 动态
+waveform-live-window = 直播窗口
+    .description = 滚动波形覆盖的电台音频秒数；窗口越长，滚动越慢
+waveform-live-expression = 动态表达式
+    .description = x 沿带子从 0 到 1，t 是面板时钟的秒数；可用 sin cos tan abs sqrt exp ln floor min max clamp mix，以及 + - * / ^ pi 和括号
+waveform-live-expression-error = { $reason }，所以带子画的是默认形状
+waveform-section-live = 直播
+waveform-streaming = 流媒体
 waveform-unavailable = 这首曲目没有波形
 
 ## VU panel
@@ -2822,6 +2926,11 @@ metadata-field-codec = 编码
 metadata-field-comment = 注释
 metadata-field-copies = 重复副本
 metadata-field-cover = 封面
+metadata-field-source = 来源
+metadata-source-radio = 广播
+metadata-source-subsonic = Subsonic
+metadata-field-station = 电台
+metadata-field-homepage = 主页
 metadata-field-disc = 碟片
 metadata-field-file = 文件
 metadata-field-first-played = 首次播放
@@ -2876,6 +2985,8 @@ metadata-stripes-description = 给表格隔行上色
 
 ## History panel
 history-column-last-played = 上次播放
+history-live-plays-file = 播放媒体库里的这首歌
+history-live-plays-station = 播放电台；媒体库里没有这首歌
 history-descending = 降序
     .description = 把排序反过来
 history-empty-never = 每首曲目都播过了
@@ -2973,6 +3084,7 @@ playlists-empty = 还没有播放列表，加些曲目或者用“新建播放�
 playlists-export-tooltip = 导出播放列表
 playlists-headings = 把每个播放列表的曲目按连续的同一专辑分段；“展开”还会加上封面和统计
 playlists-import-tooltip = 导入播放列表
+playlists-import = 导入播放列表...
 playlists-imported-fallback = 已导入
 playlists-new = 新建播放列表…
 playlists-new-smart = 新建智能播放列表…
@@ -3205,6 +3317,8 @@ track-info-opening = 正在打开…
 track-info-output-fallback = 设备拒绝了独占输出，所以播放走的是共享混音器。设备报告：{ $reason }
 track-info-output-resample-exclusive = 这个文件是 { $source } kHz，声卡接的是 { $device } kHz，所以每一个采样都在出去的路上被转换。设备跑不了文件自身的采样率。
 track-info-output-resample-mixer = 这个文件是 { $source } kHz，混音器跑在 { $device } kHz，所以每一个采样都在出去的路上被转换。独占模式会直接把文件自身的采样率交给声卡。
+track-info-output-resample-exclusive-stream = 这个音频流是 { $source } kHz，声卡接的是 { $device } kHz，所以每一个采样都在出去的路上被转换。设备跑不了音频流自身的采样率。
+track-info-output-resample-mixer-stream = 这个音频流是 { $source } kHz，混音器跑在 { $device } kHz，所以每一个采样都在出去的路上被转换。独占模式会直接把音频流自身的采样率交给声卡。
 track-info-overflow-loop = 循环
 track-info-overflow-scroll = 滚动
 track-info-overflow-truncate = 截断
@@ -3234,6 +3348,16 @@ seek-scrobble-marker = Scrobble 标记
 seek-bookmarks = 书签
     .description = 以线下方的小箭头显示当前曲目的书签：点击跳转，右键编辑
 seek-show-timings = 显示时间
+seek-dash-length = 虚线长度
+    .description = 前段每一段虚线的长度，后面留同样宽的间隔
+seek-lead-in = 缓冲前段
+    .description = 电台缓冲中尚未填满的那一段怎么画，也就是磁带左边的部分
+seek-lead-in-dashed = 虚线
+seek-lead-in-faint = 浅色
+seek-lead-in-hidden = 隐藏
+seek-lead-in-sweep = 前段流光
+    .description = 渐变沿着尚未填满的部分流过，和加载条的动静一样
+seek-section-live = 直播
 seek-thickness = 粗细
     .description = 曲目进度线的高度
 
@@ -3314,6 +3438,11 @@ theme-toggle-to-light = 切换到浅色主题
 transport-favourite-add = 加入收藏
 transport-favourite-nothing = 没有可收藏的
 transport-favourite-remove = 从收藏移除
+transport-live = 直播
+transport-live-opening = 正在连接电台
+transport-live-reconnecting = 流已中断，正在重连
+transport-live-dropped = 流已断开
+transport-live-jump = 跳到直播
 transport-pieces = 组件
     .description = 沿着一行拖动可以重排，在行与行之间拖动可以移动；小标签上的 x 和 + 负责隐藏和显示
 

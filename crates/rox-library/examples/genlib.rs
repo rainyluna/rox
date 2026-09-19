@@ -449,6 +449,8 @@ fn main() {
         let size = duration_ms as u64 * bytes_per_sec / 1000;
 
         rows.push(TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: sort_of(&title),
             artist_sort: sort_of(&artist),
             album_artist_sort: sort_of(&artist),

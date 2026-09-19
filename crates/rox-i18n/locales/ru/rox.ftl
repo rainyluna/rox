@@ -196,6 +196,7 @@ settings-language-system = (Системный язык)
 settings-language-search = Поиск языков
 picker-no-matches = Нет совпадений
 settings-search-no-matches = Нет совпадений для «{ $text }»
+settings-search-scope = Искать только на открытой странице
 
 ## Embed dialog
 bookmark-new-title = Новая закладка
@@ -227,6 +228,10 @@ bookmark-menu-remove = Удалить
 bookmark-menu-remove-many = Удалить закладки: { $count }
 bookmarks-title = Закладки
 bookmarks-empty = Закладок пока нет. Нажмите M во время воспроизведения, чтобы поставить закладку, или Shift+M, чтобы дать ей название.
+cue-menu-insert = Вставить метку здесь
+cue-menu-bookmark = Добавить закладку здесь
+cue-menu-remove = Удалить метку
+position-bound-streaming = Недоступно во время трансляции
 bake-window-title = rox - Встроить сохранённые метаданные
 bake-title = Встроить сохранённые метаданные
 bake-intro = Записывает сохранённые метаданные в сами файлы, чтобы их прочитал и другой плеер. Ничего не пересчитывается.
@@ -621,6 +626,35 @@ library-circular-portraits = Круглые портреты
 library-genre-face = Оформление жанра
     .description = При группировке по жанру плитка показывает обложки, обложки в цвете жанра или цветную карточку под геометрией
 
+## Stations panel
+
+stations-title = Радиостанции
+stations-play = Воспроизвести
+stations-remove = Удалить
+stations-find = Найти станции...
+stations-manage = Управление станциями...
+stations-import = Импортировать станции...
+stations-import-empty = В этом файле нет ни одного URL потока
+stations-not-a-stream = Станции играют по http или https; это не URL потока
+stations-empty-title = Станций пока нет
+stations-empty = Найдите станцию в каталоге или ведите свой список в настройках.
+stations-on-air = В эфире
+stations-clocks = Время на этом треке и на этой станции
+stations-homepage = Открыть сайт
+
+## Station directory
+
+directory-window-title = Каталог радиостанций
+directory-placeholder = Найти станции на radio-browser.info
+directory-search = Искать в каталоге
+directory-add = Добавить
+directory-add-play = Добавить и воспроизвести
+directory-added = Уже в ваших станциях
+directory-searching = Поиск на radio-browser.info...
+directory-none = На radio-browser.info ничего не найдено по запросу «{ $text }»
+directory-failed = radio-browser.info не ответил: { $reason }
+directory-bitrate = { $kbps } кбит/с
+
 ## Album grid panel
 panel-title-album-grid = Сетка альбомов
 grid-menu-scroll = Прокрутка
@@ -675,6 +709,7 @@ settings-page-ml-models = ML-модели
 settings-page-playback = Воспроизведение
 settings-page-providers = Провайдеры
 settings-page-shader = Шейдер
+settings-page-sources = Источники
 settings-page-storage = Хранилище
 settings-page-workspace = Рабочее пространство
 
@@ -938,6 +973,30 @@ settings-integrations-section-lastfm = Last.fm
 settings-integrations-section-librefm = Libre.fm
 settings-integrations-section-listenbrainz = ListenBrainz
 settings-integrations-section-scrobbling = Скробблинг
+settings-integrations-section-subsonic = Subsonic
+settings-integrations-subsonic-connect = Подключить
+settings-integrations-subsonic-credentials = Вход
+    .description = Учётная запись на сервере; пароль хранится в accounts.json и никогда в settings.json
+settings-integrations-subsonic-enable = Использовать сервер Subsonic
+    .description = Читать медиатеку с сервера Subsonic или OpenSubsonic и играть с него
+settings-integrations-subsonic-password-placeholder = Пароль
+settings-integrations-subsonic-server = Сервер
+    .description = Адрес сервера с http:// или https://, и без /rest в конце
+settings-integrations-subsonic-status-failed = Не удалось связаться с сервером: { $error }
+settings-integrations-subsonic-status-ok = Подключено к { $server }
+settings-integrations-subsonic-sync-count = { $n ->
+    [one] { $n } трек, синхронизировано { $date }
+    [few] { $n } трека, синхронизировано { $date }
+    [many] { $n } треков, синхронизировано { $date }
+   *[other] { $n } трека, синхронизировано { $date }
+}
+settings-integrations-subsonic-sync-failed = Синхронизация не удалась: { $error }
+settings-integrations-subsonic-sync-never = Ещё не синхронизировано
+settings-integrations-subsonic-sync-now = Синхронизировать
+    .description = Спросить у сервера, что у него есть, и привести медиатеку к этому; треки, которых он больше не отдаёт, удаляются
+settings-integrations-subsonic-syncing = Синхронизация альбома { $done } из { $total }
+settings-integrations-subsonic-url-placeholder = https://music.example.com
+settings-integrations-subsonic-user-placeholder = Имя пользователя
 
 ## Settings: keymap
 settings-keymap-clash = { $chord } — это ещё и { $other }; сработает только одно из двух
@@ -1043,6 +1102,23 @@ settings-playback-continuation-weighted = С весами
 settings-playback-keep-playing = Продолжать играть
     .description = Что играет, когда очередь кончилась. Всё, что выбрано здесь, дописывается на ленту как обычный контекст, то есть видно и удаляется, а не живёт скрытым состоянием. Если порядок выше выставлен на Похожие, rox продолжит искать треки, звучащие как играющий, при любом из этих вариантов
     .keywords = продолжение пополнение автовоспроизведение очередь
+settings-playback-live-buffer = Буфер эфира
+    .description = Насколько далеко можно отмотать станцию назад. На паузе соединение остаётся открытым и буфер продолжает заполняться, поэтому воспроизведение продолжится с места остановки, а не с эфира. Двенадцать часов это практическая бесконечность: ничто, оставленное играть за один раз, не успеет его перекрыть.
+settings-playback-live-buffer-memory = Около { $low } при 128 kbps, { $high } при 320 kbps.
+settings-playback-live-buffer-playing = Текущая станция: около { $size }.
+settings-playback-capture-album = Альбом для записей
+    .description = Что записывается в тег альбома сохранённой песни. Пусто означает без альбома: у песни из эфира нет релиза, а названия станций в поле альбома засоряют все представления по альбомам. %station% ставит туда станцию; слово вроде Radio или Singles складывает их на отдельную полку. Станция и URL потока всегда идут в комментарий.
+settings-playback-capture-album-placeholder = Оставьте пустым
+settings-playback-capture-choose = Выбрать папку...
+settings-playback-capture-enable = Сохранять песни из потоковых источников
+    .description = Записывает в папку для записей каждую песню, которую поток проигрывает от начала до конца, в формате самого потока и без перекодирования, с тегами станции. Обложка песни сохраняется рядом под тем же именем, если её удаётся найти. Границы между песнями берутся из названий, которые передаёт станция, а они приходят на несколько секунд раньше или позже звука, так что в запись может попасть хвост предыдущей песни. Песня длиннее живого буфера никогда не сохраняется, так что подкаст или микс остаются в эфире.
+settings-playback-capture-folder = Папка для записей
+settings-playback-capture-pattern = Имена записей
+    .description = Как называется сохранённая песня внутри папки для записей. Символ / создаёт папку, поэтому по умолчанию вечер радио раскладывается по станциям, а не сваливается в одну кучу. Расширение берётся из потока.
+settings-playback-capture-pattern-date = %date% подставляет день, когда песня была сохранена, в виде 2026-09-18.
+settings-playback-capture-pattern-preview = Предпросмотр: { $name }
+settings-playback-capture-pattern-station = %station% подставляет название станции, и %album% делает то же самое.
+settings-playback-section-capture = Запись
 settings-playback-play-order = Порядок воспроизведения
     .description = Как расставлены уже стоящие в очереди треки, пока включено перемешивание. Кнопка перемешивания в транспорте включает и выключает его; здесь настраивается, что оно делает
 settings-playback-rating-scale = Шкала оценок
@@ -1052,6 +1128,7 @@ settings-playback-rating-scale-stars = Звёзды
 settings-playback-restore-last-session = Восстанавливать прошлый сеанс
     .description = Запускаться с той очередью, которую вы оставили, на паузе на игравшем треке и на том месте, где он остановился. Треки из очереди вне папок медиатеки восстановить нельзя, и они выпадают из порядка
 settings-playback-section-queue = Очередь
+settings-playback-section-radio = Радио
 settings-playback-section-ratings = Оценки
 settings-playback-section-stepping = Шаг
 settings-playback-step = Размер шага
@@ -1119,6 +1196,18 @@ settings-shader-signals-block = Сигналы
     .description = Какой общий сигнал читает каждый из шестнадцати слотов шейдера
 settings-shader-slots-block = Слоты
     .description = Каждый слот в том виде, в каком его получает шейдер; слоты без маршрута — это регуляторы, выставленные вручную
+
+## Settings: sources
+
+settings-sources-folders-note = Папки, которые сканирует rox, находятся на странице «Медиатека», рядом с настройками сканирования и тегов, которые их читают.
+settings-sources-folders-open = Страница медиатеки
+settings-sources-section-folders = Локальные папки
+settings-sources-section-stations = Радиостанции
+settings-sources-stations-find = Найти станции...
+settings-sources-stations-import = Импортировать станции...
+settings-sources-stations-name-placeholder = Название (необязательно)
+settings-sources-stations-none = Станций пока нет
+settings-sources-stations-url-placeholder = URL потока
 
 ## Settings: storage
 settings-storage-artist-images = Изображения исполнителей
@@ -1818,6 +1907,12 @@ keymap-prev-bookmark = Предыдущая закладка
     .description = Вернуться к закладке перед позицией воспроизведения
 keymap-next-bookmark = Следующая закладка
     .description = Перейти к следующей закладке
+keymap-cue = Добавить метку
+    .description = Поставить сеансовую метку в текущей позиции. Метки живут до закрытия rox
+keymap-cue-prev = Предыдущая метка
+    .description = Вернуться к метке перед курсором
+keymap-cue-next = Следующая метка
+    .description = Перейти к следующей метке
 keymap-stop-playback = Стоп
     .description = Остановить воспроизведение и освободить трек
 keymap-toggle-playback = Воспроизведение / Пауза
@@ -1940,6 +2035,7 @@ panel-catalog-group-visualizers = Визуализация
 panel-catalog-group-widgets = Виджеты
 panel-catalog-history = История
 panel-catalog-bookmarks = Закладки
+panel-catalog-stations = Радиостанции
 panel-catalog-menu = Меню
 panel-catalog-metadata = Метаданные
 panel-catalog-mini-toggle = Переключатель мини
@@ -2672,6 +2768,17 @@ waveform-bookmarks = Закладки
     .description = Закладки текущего трека в виде галочек вдоль нижнего края: клик переходит к ним, правый клик открывает правку
 waveform-split-channels = Разделить каналы
     .description = По строке на канал, левый над правым; моно-треки остаются одной строкой
+waveform-live-mode = Вид в эфире
+    .description = Что рисует полоса, пока идёт радиопоток: ничего, звук самого потока или фигуру, которую она рисует сама
+waveform-live-trace = Дорожка
+waveform-live-motion = Движение
+waveform-live-window = Окно эфира
+    .description = Сколько секунд радиопотока охватывает бегущая дорожка; шире окно, медленнее прокрутка
+waveform-live-expression = Формула движения
+    .description = x идёт от 0 до 1 по ширине полосы, t — это секунды по часам панели; sin cos tan abs sqrt exp ln floor min max clamp mix, а также + - * / ^ pi и скобки
+waveform-live-expression-error = { $reason }, поэтому полоса рисует фигуру по умолчанию
+waveform-section-live = Эфир
+waveform-streaming = ПОТОК
 waveform-unavailable = Волновая форма для этого трека недоступна
 
 ## VU panel
@@ -2940,6 +3047,11 @@ metadata-field-codec = Кодек
 metadata-field-comment = Комментарий
 metadata-field-copies = Копии
 metadata-field-cover = Обложка
+metadata-field-source = Источник
+metadata-source-radio = Радио
+metadata-source-subsonic = Subsonic
+metadata-field-station = Радиостанция
+metadata-field-homepage = Сайт
 metadata-field-disc = Диск
 metadata-field-file = Файл
 metadata-field-first-played = Первое прослушивание
@@ -2994,6 +3106,8 @@ metadata-stripes-description = Подкрашивать каждую втору�
 
 ## History panel
 history-column-last-played = Последнее прослушивание
+history-live-plays-file = Сыграет вашу копию этой песни
+history-live-plays-station = Сыграет радиостанцию: этой песни нет в медиатеке
 history-descending = По убыванию
     .description = Развернуть сортировку
 history-empty-never = Каждый трек уже прослушан
@@ -3094,6 +3208,7 @@ playlists-empty = Пока нет плейлистов, добавьте тре�
 playlists-export-tooltip = Экспортировать плейлист
 playlists-headings = Разбивать треки каждого плейлиста на серии по альбомам; Развёрнутые добавляют обложку и статистику
 playlists-import-tooltip = Импортировать плейлист
+playlists-import = Импортировать плейлист...
 playlists-imported-fallback = Импортированный
 playlists-new = Новый плейлист...
 playlists-new-smart = Новый умный плейлист...
@@ -3344,6 +3459,8 @@ track-info-opening = открываем...
 track-info-output-fallback = Устройство отказало в монопольном выводе, поэтому воспроизведение идёт через общий микшер. Устройство сообщило: { $reason }
 track-info-output-resample-exclusive = Этот файл на { $source } кГц, а карта взяла { $device } кГц, так что каждый сэмпл преобразуется по пути наружу. Устройство отказалось работать на собственной частоте файла.
 track-info-output-resample-mixer = Этот файл на { $source } кГц, а микшер работает на { $device } кГц, так что каждый сэмпл преобразуется по пути наружу. Монопольный режим отдал бы карте собственную частоту файла.
+track-info-output-resample-exclusive-stream = Этот поток на { $source } кГц, а карта взяла { $device } кГц, так что каждый сэмпл преобразуется по пути наружу. Устройство отказалось работать на собственной частоте потока.
+track-info-output-resample-mixer-stream = Этот поток на { $source } кГц, а микшер работает на { $device } кГц, так что каждый сэмпл преобразуется по пути наружу. Монопольный режим отдал бы карте собственную частоту потока.
 track-info-overflow-loop = По кругу
 track-info-overflow-scroll = Прокрутка
 track-info-overflow-truncate = Обрезать
@@ -3373,6 +3490,16 @@ seek-scrobble-marker = Метка скробблинга
 seek-bookmarks = Закладки
     .description = Закладки текущего трека в виде галочек под линией: клик переходит к ним, правый клик открывает правку
 seek-show-timings = Показывать время
+seek-dash-length = Длина штриха
+    .description = Длина одного штриха в начале буфера, с таким же промежутком после него
+seek-lead-in = Начало буфера
+    .description = Как рисуется ещё не заполненная часть буфера станции, отрезок слева от плёнки
+seek-lead-in-dashed = Пунктир
+seek-lead-in-faint = Бледная
+seek-lead-in-hidden = Скрыта
+seek-lead-in-sweep = Бегущий градиент
+    .description = Градиент пробегает по ещё не заполненной части, как у полосы загрузки
+seek-section-live = Эфир
 seek-thickness = Толщина
     .description = Высота линии трека
 
@@ -3453,6 +3580,11 @@ theme-toggle-to-light = Переключить на светлую тему
 transport-favourite-add = Добавить в избранное
 transport-favourite-nothing = Нечего добавить в избранное
 transport-favourite-remove = Убрать из избранного
+transport-live = ЭФИР
+transport-live-opening = Подключение к станции
+transport-live-reconnecting = Поток оборвался, идёт переподключение
+transport-live-dropped = Поток пропал
+transport-live-jump = Перейти к эфиру
 transport-pieces = Части
     .description = Тяните вдоль строки, чтобы менять порядок, и между строками, чтобы переносить; x и плюс на плашке скрывают и показывают
 

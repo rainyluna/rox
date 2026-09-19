@@ -5,10 +5,9 @@
 pub mod edit;
 pub mod matcher;
 
-use std::path::Path;
-
 use gpui::{App, Global, WeakEntity};
 
+use rox_library::lyrics::Subject;
 use rox_panels::lyrics::LyricsPanel;
 
 /// Every live lyrics panel. Lyrics aren't part of the library projection,
@@ -36,13 +35,26 @@ pub fn watch(panel: WeakEntity<LyricsPanel>, cx: &mut App) {
     watchers.0.push(panel);
 }
 
-/// A sheet for `path` was written to disk: every live panel drops its cache for
-/// that track and re-reads on the next render.
-pub fn saved(path: &Path, cx: &mut App) {
+/// A sheet for `subject` was written: every live panel drops its cache for
+/// it and re-reads on the next render.
+pub fn saved(subject: &Subject, cx: &mut App) {
+    poke(cx, |panel, cx| panel.reload(subject, cx));
+}
+
+/// The edit window's draft for `subject` changed, or None when the window
+/// gave it back. Every panel showing that subject paints the draft instead
+/// of what is stored, which is what puts an offset nudge on screen at the
+/// press rather than at the save.
+pub fn preview(subject: &Subject, text: Option<&str>, cx: &mut App) {
+    poke(cx, |panel, cx| panel.set_preview(subject, text, cx));
+}
+
+/// Run `f` over every live panel, sweeping the handles that have died.
+fn poke(cx: &mut App, mut f: impl FnMut(&mut LyricsPanel, &mut gpui::Context<LyricsPanel>)) {
     let watchers = std::mem::take(&mut cx.default_global::<Watchers>().0);
     let mut alive = Vec::with_capacity(watchers.len());
     for panel in watchers {
-        if panel.update(cx, |panel, cx| panel.reload(path, cx)).is_ok() {
+        if panel.update(cx, &mut f).is_ok() {
             alive.push(panel);
         }
     }

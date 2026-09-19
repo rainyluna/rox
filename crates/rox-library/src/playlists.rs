@@ -931,6 +931,8 @@ mod tests {
 
     fn track(path: &str, title: &str, artist: &str, album: &str) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -1474,7 +1476,9 @@ mod tests {
         conn.execute("DELETE FROM tracks WHERE id = 1", []).unwrap();
         assert!(ids(&conn, pl).unwrap().is_empty(), "the member dangles");
         store::insert_batch(&mut conn, &[track("/m/1.mp3", "One", "A", "First")]).unwrap();
-        let new_id = store::id_for_path(&conn, "/m/1.mp3").unwrap().unwrap();
+        let new_id = store::id_for_path(&conn, crate::cue::LOCAL, "/m/1.mp3")
+            .unwrap()
+            .unwrap();
         assert_ne!(new_id, 1, "the returned file lands under a fresh id");
 
         assert_eq!(reattach(&conn).unwrap(), Some(1));
@@ -1491,7 +1495,9 @@ mod tests {
         // app closed), so the path snapshot misses; its tags still name it.
         conn.execute("DELETE FROM tracks WHERE id = 1", []).unwrap();
         store::insert_batch(&mut conn, &[track("/new/1.mp3", "One", "A", "First")]).unwrap();
-        let new_id = store::id_for_path(&conn, "/new/1.mp3").unwrap().unwrap();
+        let new_id = store::id_for_path(&conn, crate::cue::LOCAL, "/new/1.mp3")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(reattach(&conn).unwrap(), Some(1));
         let members = tracks(&conn, pl).unwrap();
@@ -1544,7 +1550,9 @@ mod tests {
         // does what it always did.
         conn.execute("DELETE FROM tracks WHERE id = 1", []).unwrap();
         store::insert_batch(&mut conn, &[track("/m/1.mp3", "One", "A", "First")]).unwrap();
-        let new_id = store::id_for_path(&conn, "/m/1.mp3").unwrap().unwrap();
+        let new_id = store::id_for_path(&conn, crate::cue::LOCAL, "/m/1.mp3")
+            .unwrap()
+            .unwrap();
         assert_eq!(reattach(&conn).unwrap(), Some(1));
         assert_eq!(ids(&conn, pl).unwrap(), [new_id, 2]);
         assert_eq!(reattach(&conn).unwrap(), None, "and it closes again");
@@ -1570,7 +1578,9 @@ mod tests {
 
         conn.execute("DELETE FROM tracks WHERE id = 1", []).unwrap();
         store::insert_batch(&mut conn, &[track("/m/one.mp3", "One", "A", "First")]).unwrap();
-        let new_id = store::id_for_path(&conn, "/m/one.mp3").unwrap().unwrap();
+        let new_id = store::id_for_path(&conn, crate::cue::LOCAL, "/m/one.mp3")
+            .unwrap()
+            .unwrap();
         assert_eq!(reattach(&conn).unwrap(), Some(1));
         assert_eq!(
             ids(&conn, pl).unwrap(),

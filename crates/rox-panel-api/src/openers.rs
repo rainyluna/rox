@@ -9,15 +9,16 @@
 //! the binary installs the table logs and does nothing; that only happens in
 //! a unit test that never opens a window, so it must never panic.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use gpui::{AnyWeakEntity, App, Div, Entity, EntityId, SharedString, WeakEntity, Window, div};
 use gpui_component::menu::PopupMenu;
 use rox_dock::{PanelView, TabPanel};
 use rox_library::cue::TrackKey;
+use rox_library::lyrics::Subject;
 use rox_services::backdrop::NowPlayingArt;
 use rox_services::catalog::Library;
+use rox_services::lyrics::LyricsTarget;
 
 use crate::panel::AppState;
 use crate::panel::shader::edit::ShaderEditTarget;
@@ -60,6 +61,9 @@ pub struct Openers {
     pub stats_window: fn(AppState, &mut App),
     /// The library health page over a workspace's state.
     pub health_window: fn(AppState, &mut App),
+    /// The station directory, where a web radio station is searched for
+    /// and added.
+    pub station_directory: fn(AppState, &mut App),
     /// The signals window, where the shared pool is tended.
     pub signals_window: fn(&mut App),
     /// The shader editor over one surface's source.
@@ -72,12 +76,18 @@ pub struct Openers {
     /// Register a lyrics panel for the reload broadcast. The handle is
     /// type-erased on the way down and downcast on the way back up.
     pub lyrics_watch: fn(AnyWeakEntity, &mut App),
-    /// The lyrics editor over one file.
-    pub lyrics_edit: fn(AppState, PathBuf, &mut App),
-    /// The lyrics search over one file.
-    pub lyrics_matcher: fn(AppState, PathBuf, &mut App),
-    /// Tell every watching lyrics panel a file changed on disk.
-    pub lyrics_saved: fn(&Path, &mut App),
+    /// The lyrics editor over one track.
+    pub lyrics_edit: fn(AppState, LyricsTarget, &mut App),
+    /// The lyrics search over one track.
+    pub lyrics_matcher: fn(AppState, LyricsTarget, &mut App),
+    /// Tell every watching lyrics panel a subject's sheet changed where it
+    /// is kept.
+    pub lyrics_saved: fn(&Subject, &mut App),
+    /// Hand every watching lyrics panel the editor's unsaved draft, or
+    /// None to take it back. The panel shows the draft in place of the
+    /// saved sheet, so nudging the offset in the editor moves the words in
+    /// the panel while the window is still open.
+    pub lyrics_preview: fn(&Subject, Option<&str>, &mut App),
     /// The Add Panel flyout, built from the app's panel catalog.
     pub add_panel_submenu:
         fn(PopupMenu, Option<WeakEntity<TabPanel>>, &mut Window, &mut App) -> PopupMenu,
@@ -215,6 +225,13 @@ pub fn health_window(state: AppState, cx: &mut App) {
     }
 }
 
+/// Open the station directory, or bring the open one to the front.
+pub fn station_directory(state: AppState, cx: &mut App) {
+    if let Some(openers) = openers("the station directory") {
+        (openers.station_directory)(state, cx);
+    }
+}
+
 /// Open the signals window.
 pub fn signals_window(cx: &mut App) {
     if let Some(openers) = openers("the signals window") {
@@ -244,17 +261,17 @@ pub fn lyrics_watch(panel: AnyWeakEntity, cx: &mut App) {
     }
 }
 
-/// Open the lyrics editor for `path`.
-pub fn lyrics_edit(state: AppState, path: PathBuf, cx: &mut App) {
+/// Open the lyrics editor for `target`.
+pub fn lyrics_edit(state: AppState, target: LyricsTarget, cx: &mut App) {
     if let Some(openers) = openers("the lyrics editor") {
-        (openers.lyrics_edit)(state, path, cx);
+        (openers.lyrics_edit)(state, target, cx);
     }
 }
 
-/// Open the lyrics search for `path`.
-pub fn lyrics_matcher(state: AppState, path: PathBuf, cx: &mut App) {
+/// Open the lyrics search for `target`.
+pub fn lyrics_matcher(state: AppState, target: LyricsTarget, cx: &mut App) {
     if let Some(openers) = openers("the lyrics search") {
-        (openers.lyrics_matcher)(state, path, cx);
+        (openers.lyrics_matcher)(state, target, cx);
     }
 }
 
@@ -265,10 +282,18 @@ pub fn shader_editor(state: AppState, target: ShaderEditTarget, cx: &mut App) {
     }
 }
 
-/// Tell every watching lyrics panel that `path` changed on disk.
-pub fn lyrics_saved(path: &Path, cx: &mut App) {
+/// Tell every watching lyrics panel that `subject`'s sheet changed.
+pub fn lyrics_saved(subject: &Subject, cx: &mut App) {
     if let Some(openers) = openers("the lyrics reload broadcast") {
-        (openers.lyrics_saved)(path, cx);
+        (openers.lyrics_saved)(subject, cx);
+    }
+}
+
+/// Hand every watching lyrics panel the editor's unsaved draft for
+/// `subject`, or None to take it back.
+pub fn lyrics_preview(subject: &Subject, text: Option<&str>, cx: &mut App) {
+    if let Some(openers) = openers("the lyrics preview broadcast") {
+        (openers.lyrics_preview)(subject, text, cx);
     }
 }
 

@@ -194,6 +194,7 @@ settings-language-system = (Systemsprache)
 settings-language-search = Sprachen durchsuchen
 picker-no-matches = Keine Treffer
 settings-search-no-matches = Nichts passt zu "{ $text }"
+settings-search-scope = Nur die geöffnete Seite durchsuchen
 
 ## Embed dialog
 bookmark-new-title = Neues Lesezeichen
@@ -225,6 +226,10 @@ bookmark-menu-remove = Entfernen
 bookmark-menu-remove-many = { $count } Lesezeichen entfernen
 bookmarks-title = Lesezeichen
 bookmarks-empty = Noch keine Lesezeichen. Drücke M, während ein Titel läuft, um eines zu setzen, oder Umschalt+M, um es zu benennen.
+cue-menu-insert = Marke hier einfügen
+cue-menu-bookmark = Lesezeichen hier hinzufügen
+cue-menu-remove = Marke entfernen
+position-bound-streaming = Während eines Streams nicht verfügbar
 bake-window-title = rox - Gespeicherte Metadaten einbetten
 bake-title = Gespeicherte Metadaten einbetten
 bake-intro = Schreibt gespeicherte Metadaten in die Dateien selbst, damit auch ein anderer Player sie liest. Nichts wird neu berechnet.
@@ -609,6 +614,35 @@ library-circular-portraits = Runde Porträts
 library-genre-face = Genre-Bild
     .description = Nach Genre gruppiert, was die Kachel zeigt: die Cover, die Cover in der Farbe des Genres getönt, oder eine Farbkarte unter ihrer Geometrie
 
+## Stations panel
+
+stations-title = Sender
+stations-play = Abspielen
+stations-remove = Entfernen
+stations-find = Sender finden...
+stations-manage = Sender verwalten...
+stations-import = Sender importieren...
+stations-import-empty = In dieser Datei stehen keine Stream-URLs
+stations-not-a-stream = Sender laufen über http oder https; das ist keine Stream-URL
+stations-empty-title = Noch keine Sender
+stations-empty = Finde einen im Verzeichnis oder pflege deine Liste in den Einstellungen.
+stations-on-air = Auf Sendung
+stations-clocks = Zeit in diesem Titel und auf diesem Sender
+stations-homepage = Website öffnen
+
+## Station directory
+
+directory-window-title = Senderverzeichnis
+directory-placeholder = Sender auf radio-browser.info finden
+directory-search = Im Verzeichnis suchen
+directory-add = Hinzufügen
+directory-add-play = Hinzufügen und abspielen
+directory-added = Schon bei deinen Sendern
+directory-searching = Suche auf radio-browser.info...
+directory-none = Auf radio-browser.info passt nichts zu "{ $text }"
+directory-failed = radio-browser.info hat nicht geantwortet: { $reason }
+directory-bitrate = { $kbps } kbit/s
+
 ## Album grid panel
 panel-title-album-grid = Albumraster
 grid-menu-scroll = Scrollen
@@ -663,6 +697,7 @@ settings-page-ml-models = ML-Modelle
 settings-page-playback = Wiedergabe
 settings-page-providers = Anbieter
 settings-page-shader = Shader
+settings-page-sources = Quellen
 settings-page-storage = Speicher
 settings-page-workspace = Arbeitsfläche
 
@@ -924,6 +959,28 @@ settings-integrations-section-lastfm = Last.fm
 settings-integrations-section-librefm = Libre.fm
 settings-integrations-section-listenbrainz = ListenBrainz
 settings-integrations-section-scrobbling = Scrobbeln
+settings-integrations-section-subsonic = Subsonic
+settings-integrations-subsonic-connect = Verbinden
+settings-integrations-subsonic-credentials = Anmeldung
+    .description = Das Konto auf dem Server; das Passwort liegt in accounts.json, nie in settings.json
+settings-integrations-subsonic-enable = Subsonic-Server nutzen
+    .description = Eine Bibliothek von einem Subsonic- oder OpenSubsonic-Server lesen und daraus abspielen
+settings-integrations-subsonic-password-placeholder = Passwort
+settings-integrations-subsonic-server = Server
+    .description = Die Adresse des Servers mit http:// oder https://, ohne /rest am Ende
+settings-integrations-subsonic-status-failed = Server nicht erreichbar: { $error }
+settings-integrations-subsonic-status-ok = Verbunden mit { $server }
+settings-integrations-subsonic-sync-count = { $n ->
+    [one] { $n } Titel, zuletzt abgeglichen am { $date }
+   *[other] { $n } Titel, zuletzt abgeglichen am { $date }
+}
+settings-integrations-subsonic-sync-failed = Abgleich fehlgeschlagen: { $error }
+settings-integrations-subsonic-sync-never = Noch nie abgeglichen
+settings-integrations-subsonic-sync-now = Jetzt abgleichen
+    .description = Den Server fragen, was er hat, und die Bibliothek daran angleichen; Titel, die er nicht mehr führt, fallen raus
+settings-integrations-subsonic-syncing = Album { $done } von { $total } wird abgeglichen
+settings-integrations-subsonic-url-placeholder = https://musik.example.com
+settings-integrations-subsonic-user-placeholder = Benutzername
 
 ## Settings: keymap
 settings-keymap-clash = { $chord } ist auch { $other }; nur eines von beiden löst aus
@@ -1035,6 +1092,23 @@ settings-playback-continuation-weighted = Gewichtet
 settings-playback-keep-playing = Weiterspielen
     .description = Was läuft, wenn die Warteschlange leer wird. Was auch immer das wählt, wird als gewöhnlicher Kontext an die Zeitleiste gehängt, ist also sichtbar und entfernbar statt versteckter Zustand. Steht die Reihenfolge oben auf Ähnlich, findet es weiter Titel, die dem laufenden ähneln, egal welches davon gewählt ist
     .keywords = weiterspielen nachfuellen automatisch warteschlange
+settings-playback-live-buffer = Live-Puffer
+    .description = Wie weit ein Sender zurückgespult werden kann. Die Verbindung bleibt bei einer Pause bestehen und füllt den Puffer weiter, also läuft es beim Weiterspielen dort weiter, wo du aufgehört hast, statt am Live-Punkt. Zwölf Stunden sind praktisch unendlich: was du an einem Stück laufen lässt, kommt nie darüber hinaus.
+settings-playback-live-buffer-memory = Etwa { $low } bei 128 kbps, { $high } bei 320 kbps.
+settings-playback-live-buffer-playing = Laufender Sender: etwa { $size }.
+settings-playback-capture-album = Aufnahme-Album
+    .description = Was im Album-Tag eines gespeicherten Songs steht. Leer schreibt kein Album, denn ein Song aus dem Radio hat keine Veröffentlichung, und Sendernamen im Album-Feld verschmutzen jede Albumansicht. %station% trägt den Sender ein; ein Wort wie Radio oder Singles legt sie in ein eigenes Regal. Sender und Stream-URL stehen immer im Kommentar.
+settings-playback-capture-album-placeholder = Leer lassen
+settings-playback-capture-choose = Ordner wählen...
+settings-playback-capture-enable = Songs aus Streaming-Quellen speichern
+    .description = Schreibt jeden von Anfang bis Ende gespielten Song eines Streams in den Aufnahmeordner, im Format des Streams und ohne neu zu kodieren, getaggt mit dem Sender. Das Cover des Songs landet unter demselben Namen daneben, sofern eines gefunden wird. Die Songgrenzen stammen aus den Titelmeldungen des Senders, und die kommen ein paar Sekunden vor oder nach dem Ton, also kann eine Aufnahme das Ende des vorherigen Songs enthalten. Ein Song, der länger als der Live-Puffer ist, wird nie gespeichert, ein Podcast oder ein Mix bleibt also auf Sendung.
+settings-playback-capture-folder = Aufnahmeordner
+settings-playback-capture-pattern = Benennung der Aufnahmen
+    .description = Wie ein gespeicherter Titel im Aufnahmeordner heißt. Ein / erzeugt einen Ordner, deshalb legt die Voreinstellung einen Radioabend nach Sender ab statt alles flach zu sammeln. Die Dateiendung kommt vom Stream.
+settings-playback-capture-pattern-date = %date% ist der Tag, an dem der Titel gespeichert wurde, als 2026-09-18.
+settings-playback-capture-pattern-preview = Vorschau: { $name }
+settings-playback-capture-pattern-station = %station% ist der Name des Senders, und %album% bedeutet dasselbe.
+settings-playback-section-capture = Aufnahme
 settings-playback-play-order = Wiedergabereihenfolge
     .description = Wie die bereits eingereihten Titel angeordnet werden, solange Zufall an ist. Die Zufallstaste im Transport schaltet ihn ein und aus; das hier ist, was er dann tut
 settings-playback-rating-scale = Bewertungsskala
@@ -1044,6 +1118,7 @@ settings-playback-rating-scale-stars = Sterne
 settings-playback-restore-last-session = Letzte Sitzung wiederherstellen
     .description = Mit der Warteschlange starten, wie du sie verlassen hast, pausiert auf dem Titel, der lief, und an der Stelle, wo er stand. Eingereihte Titel außerhalb deiner Bibliotheksordner lassen sich nicht wiederherstellen und fallen aus der Reihenfolge
 settings-playback-section-queue = Warteschlange
+settings-playback-section-radio = Radio
 settings-playback-section-ratings = Bewertungen
 settings-playback-section-stepping = Schrittweite
 settings-playback-step = Schrittgröße
@@ -1111,6 +1186,18 @@ settings-shader-signals-block = Signale
     .description = Welches gemeinsame Signal jeder der sechzehn Slots des Shaders bezieht
 settings-shader-slots-block = Slots
     .description = Jeder Slot, wie er den Shader erreicht; Slots ohne Route sind von Hand gesetzte Regler
+
+## Settings: sources
+
+settings-sources-folders-note = Die Ordner, die rox einliest, stehen auf der Seite Bibliothek, neben den Scan- und Tag-Einstellungen, die sie lesen.
+settings-sources-folders-open = Seite Bibliothek
+settings-sources-section-folders = Lokale Ordner
+settings-sources-section-stations = Radiosender
+settings-sources-stations-find = Sender finden...
+settings-sources-stations-import = Sender importieren...
+settings-sources-stations-name-placeholder = Name (optional)
+settings-sources-stations-none = Noch keine Sender
+settings-sources-stations-url-placeholder = Stream-URL
 
 ## Settings: storage
 settings-storage-artist-images = Interpretenbilder
@@ -1810,6 +1897,12 @@ keymap-prev-bookmark = Vorheriges Lesezeichen
     .description = Zum Lesezeichen vor der Abspielposition springen
 keymap-next-bookmark = Nächstes Lesezeichen
     .description = Zum nächsten Lesezeichen springen
+keymap-cue = Marke setzen
+    .description = Eine Sitzungsmarke an der laufenden Position setzen. Marken halten, bis rox geschlossen wird
+keymap-cue-prev = Vorherige Marke
+    .description = Zur Marke vor dem Abspielkopf zurückspringen
+keymap-cue-next = Nächste Marke
+    .description = Zur nächsten Marke springen
 keymap-stop-playback = Stopp
     .description = Die Wiedergabe beenden und den Titel freigeben
 keymap-toggle-playback = Wiedergabe / Pause
@@ -1932,6 +2025,7 @@ panel-catalog-group-visualizers = Visualisierungen
 panel-catalog-group-widgets = Widgets
 panel-catalog-history = Verlauf
 panel-catalog-bookmarks = Lesezeichen
+panel-catalog-stations = Sender
 panel-catalog-menu = Menü
 panel-catalog-metadata = Metadaten
 panel-catalog-mini-toggle = Mini-Umschalter
@@ -2674,6 +2768,17 @@ waveform-bookmarks = Lesezeichen
     .description = Die Lesezeichen des laufenden Titels als Winkel am unteren Rand: Klick springt dorthin, Rechtsklick bearbeitet
 waveform-split-channels = Kanäle trennen
     .description = Eine Zeile je Kanal, links über rechts; Mono-Titel bleiben eine einzelne Zeile
+waveform-live-mode = Live-Darstellung
+    .description = Was der Streifen zeigt, während ein Radiostream läuft: nichts, den Klang des Streams selbst, oder eine Form, die er sich selbst ausdenkt
+waveform-live-trace = Spur
+waveform-live-motion = Bewegung
+waveform-live-window = Live-Fenster
+    .description = Sekunden eines Radiostreams, die die laufende Spur umfasst; ein breiteres Fenster bedeutet langsameres Tempo
+waveform-live-expression = Bewegungsformel
+    .description = x läuft von 0 bis 1 über den Streifen, t sind Sekunden auf der Uhr des Panels; sin cos tan abs sqrt exp ln floor min max clamp mix, dazu + - * / ^ pi und Klammern
+waveform-live-expression-error = { $reason }, deshalb zeichnet der Streifen die Standardform
+waveform-section-live = Live
+waveform-streaming = STREAMING
 waveform-unavailable = Für diesen Titel gibt es keine Wellenform
 
 ## VU panel
@@ -2924,6 +3029,11 @@ metadata-field-codec = Codec
 metadata-field-comment = Kommentar
 metadata-field-copies = Kopien
 metadata-field-cover = Cover
+metadata-field-source = Quelle
+metadata-source-radio = Radio
+metadata-source-subsonic = Subsonic
+metadata-field-station = Sender
+metadata-field-homepage = Website
 metadata-field-disc = CD
 metadata-field-file = Datei
 metadata-field-first-played = Zuerst gespielt
@@ -2978,6 +3088,8 @@ metadata-stripes-description = Jede zweite Zeile der Tabelle tönen
 
 ## History panel
 history-column-last-played = Zuletzt gespielt
+history-live-plays-file = Spielt deine eigene Fassung dieses Titels
+history-live-plays-station = Spielt den Sender; deine Bibliothek hat diesen Titel nicht
 history-descending = Absteigend
     .description = Die Sortierung rückwärts laufen lassen
 history-empty-never = Jeder Titel wurde schon gespielt
@@ -3076,6 +3188,7 @@ playlists-empty = Noch keine Playlists, füge Titel hinzu oder nutze Neue Playli
 playlists-export-tooltip = Playlist exportieren
 playlists-headings = Die Titel jeder Playlist in Albenblöcke unterteilen; Ausgeklappt nimmt Cover und Zahlen dazu
 playlists-import-tooltip = Playlist importieren
+playlists-import = Playlist importieren...
 playlists-imported-fallback = Importiert
 playlists-new = Neue Playlist...
 playlists-new-smart = Neue intelligente Playlist...
@@ -3317,6 +3430,8 @@ track-info-opening = wird geöffnet...
 track-info-output-fallback = Das Gerät hat die exklusive Ausgabe abgelehnt, also läuft die Wiedergabe über den gemeinsamen Mixer. Das Gerät meldete: { $reason }
 track-info-output-resample-exclusive = Diese Datei hat { $source } kHz und die Karte nahm { $device } kHz, also wird jedes Sample auf dem Weg nach draußen umgewandelt. Das Gerät wollte nicht mit der eigenen Rate der Datei laufen.
 track-info-output-resample-mixer = Diese Datei hat { $source } kHz und der Mixer läuft mit { $device } kHz, also wird jedes Sample auf dem Weg nach draußen umgewandelt. Der Exklusivmodus würde der Karte stattdessen die eigene Rate der Datei geben.
+track-info-output-resample-exclusive-stream = Dieser Stream hat { $source } kHz und die Karte nahm { $device } kHz, also wird jedes Sample auf dem Weg nach draußen umgewandelt. Das Gerät wollte nicht mit der eigenen Rate des Streams laufen.
+track-info-output-resample-mixer-stream = Dieser Stream hat { $source } kHz und der Mixer läuft mit { $device } kHz, also wird jedes Sample auf dem Weg nach draußen umgewandelt. Der Exklusivmodus würde der Karte stattdessen die eigene Rate des Streams geben.
 track-info-overflow-loop = Umlaufen
 track-info-overflow-scroll = Pendeln
 track-info-overflow-truncate = Abschneiden
@@ -3346,6 +3461,16 @@ seek-scrobble-marker = Scrobble-Marke
 seek-bookmarks = Lesezeichen
     .description = Die Lesezeichen des laufenden Titels als Winkel unter der Linie: Klick springt dorthin, Rechtsklick bearbeitet
 seek-show-timings = Zeiten anzeigen
+seek-dash-length = Strichlänge
+    .description = Die Länge eines Strichs im Vorlauf, mit einer ebenso großen Lücke danach
+seek-lead-in = Puffer-Vorlauf
+    .description = Wie der noch nicht gefüllte Teil des Senderpuffers gezeichnet wird, das Stück links vom Band
+seek-lead-in-dashed = Gestrichelt
+seek-lead-in-faint = Blass
+seek-lead-in-hidden = Versteckt
+seek-lead-in-sweep = Vorlauf-Verlauf
+    .description = Ein Farbverlauf, der über den noch nicht gefüllten Teil wandert, wie bei einem Ladebalken
+seek-section-live = Live
 seek-thickness = Dicke
     .description = Die Höhe der Titellinie
 
@@ -3426,6 +3551,11 @@ theme-toggle-to-light = Zum hellen Farbschema wechseln
 transport-favourite-add = Zu Favoriten hinzufügen
 transport-favourite-nothing = Nichts zum Favorisieren
 transport-favourite-remove = Aus Favoriten entfernen
+transport-live = LIVE
+transport-live-opening = Verbindung zum Sender wird aufgebaut
+transport-live-reconnecting = Der Stream ist abgerissen; neuer Verbindungsversuch
+transport-live-dropped = Der Stream ist weg
+transport-live-jump = Zum Live-Punkt springen
 transport-pieces = Teile
     .description = Entlang einer Zeile ziehen zum Umordnen und zwischen Zeilen zum Verschieben; x und Plus eines Chips blenden aus und ein
 

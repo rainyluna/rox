@@ -218,7 +218,7 @@ pub fn candidates(
         if !has_stored_sheet(&file, lyrics_dir) {
             continue;
         }
-        let Some(sheet) = lyrics::load(&file, lyrics_dir) else {
+        let Some(sheet) = lyrics::load(&lyrics::Subject::File(file.clone()), lyrics_dir) else {
             continue;
         };
         if sheet.source == lyrics::Source::Tag {
@@ -300,7 +300,9 @@ fn has_stored_sheet(path: &Path, lyrics_dir: Option<&Path>) -> bool {
     lyrics::sidecar_candidates(path)
         .iter()
         .any(|side| side.is_file())
-        || lyrics_dir.is_some_and(|dir| lyrics::store_file(dir, path).is_file())
+        || lyrics_dir.is_some_and(|dir| {
+            lyrics::store_file(dir, &lyrics::Subject::File(path.to_path_buf())).is_file()
+        })
 }
 
 #[cfg(test)]
@@ -336,7 +338,11 @@ mod tests {
         let path = mp3_file(&dir, "track.mp3");
         let sheet = "[00:12.00] the first line\nthe second";
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(lyrics::store_file(&store, &path), sheet).unwrap();
+        std::fs::write(
+            lyrics::store_file(&store, &lyrics::Subject::File(path.clone())),
+            sheet,
+        )
+        .unwrap();
 
         let mut conn = library(&[(&path, 0)]);
         let gain = ReplayGain {

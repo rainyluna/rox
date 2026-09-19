@@ -10,11 +10,13 @@ use gpui::{
     deferred, div, prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, Side};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
 use serde::{Deserialize, Serialize};
 
+use rox_playback::StreamState;
 use rox_playback::engine::LoopMode;
 
 use crate::assets::icons;
@@ -1291,6 +1293,13 @@ impl TransportPanel {
         let player = self.state.player.read(cx);
         let playing = player.is_playing();
         let active = player.is_active();
+        // A station dialling, or dialling again after a drop. It's the one
+        // wait the transport has that outlasts a frame, and the press that
+        // started it landed on the play button, so that's where it shows.
+        // A file has none of these states and answers None.
+        let waiting = player
+            .stream_state()
+            .filter(|state| matches!(state, StreamState::Opening | StreamState::Reconnecting));
         let volume = player.volume();
         let muted = player.muted();
         // Loop state reads through the button itself: dim while off, the
@@ -1458,6 +1467,13 @@ impl TransportPanel {
         // The strip renders the config's list as-is: each shown button in
         // its place, whatever order the arrange editor left them in.
         let highlight = self.config.play_highlight;
+        // What the play button draws over: the accent fill, or the panel
+        // under it where the config took the fill away.
+        let play_ink = if highlight == PlayHighlight::None {
+            palette::text()
+        } else {
+            palette::text_on_accent()
+        };
         let mut controls: Vec<AnyElement> = Vec::new();
         for item in self.config.items.clone() {
             controls.push(match item {
@@ -1489,10 +1505,16 @@ impl TransportPanel {
                 // trails the shortcut.
                 PlaybackItem::Play => panel::Tip::keyed(
                     "play",
-                    if playing {
-                        rox_i18n::t!("playback-pause")
-                    } else {
-                        rox_i18n::t!("playback-item-play")
+                    match waiting {
+                        // The same two sentences the strip's LIVE mark
+                        // carries, so both surfaces answer a hover with one
+                        // story.
+                        Some(StreamState::Reconnecting) => {
+                            rox_i18n::t!("transport-live-reconnecting")
+                        }
+                        Some(_) => rox_i18n::t!("transport-live-opening"),
+                        None if playing => rox_i18n::t!("playback-pause"),
+                        None => rox_i18n::t!("playback-item-play"),
                     },
                 )
                 .action(&TogglePlayback, PLAYBACK_TIP_SCOPE)
@@ -1523,16 +1545,21 @@ impl TransportPanel {
                                 this.state.player.update(cx, |p, _| p.toggle_pause())
                             }),
                         )
-                        .child(
-                            svg()
+                        .child(match waiting {
+                            // The seconds a station spends answering are
+                            // the only wait this button has, and a pause
+                            // glyph through them says the press did
+                            // something it hasn't done yet. The spinner is
+                            // the one every other wait in the app draws,
+                            // and its stock size is the glyph's.
+                            Some(_) => Spinner::new().color(play_ink.into()).into_any_element(),
+
+                            None => svg()
                                 .path(if playing { icons::PAUSE } else { icons::PLAY })
                                 .size_4()
-                                .text_color(if highlight == PlayHighlight::None {
-                                    palette::text()
-                                } else {
-                                    palette::text_on_accent()
-                                }),
-                        ),
+                                .text_color(play_ink)
+                                .into_any_element(),
+                        }),
                 )
                 .into_any_element(),
                 PlaybackItem::SeekForward => panel::icon_control(

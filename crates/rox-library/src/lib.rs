@@ -21,6 +21,7 @@ pub mod genre_suggest;
 pub mod hash;
 pub mod health;
 pub mod listens;
+pub mod locator;
 pub mod lyrics;
 pub mod m3u;
 pub mod migrate;
@@ -36,6 +37,7 @@ pub mod replaygain;
 pub mod scanner;
 pub mod song;
 pub mod sort;
+pub mod stations;
 pub mod store;
 pub mod tag_source;
 pub mod tempo;
@@ -88,6 +90,12 @@ pub struct TrackRow {
     /// The span and sheet, for a cue track; None for a plain file. Part of
     /// the row so one upsert writes the track and its side row together.
     pub cue: Option<CueSlice>,
+    /// Where a non-local row's bytes come from: the stream URL, and whether
+    /// that stream ever ends. A file on disk leaves both empty, since its
+    /// `path` is the whole answer. Credentials never land here; the live
+    /// source rebuilds its headers when a track is resolved.
+    pub remote_url: String,
+    pub remote_live: bool,
     pub title: String,
     pub artist: String,
     /// The album's credited artist, falling back to the track artist when

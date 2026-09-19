@@ -52,7 +52,10 @@ Sources aren't equal, and the product shows the difference instead of papering o
 
 - **Full.** The source provides rox decodable audio (Tidal's API, yt-dlp streams,
   librespot's decoded samples). It plays through rox's engine, so gapless, ReplayGain,
-  and visualizers all work.
+  and visualizers all work. A self-hosted source like Subsonic is Full without the
+  fragility that put the other sources behind extensions, since the server is the user's
+  own. A live stream is Full on transport and gets visualizers, while gapless and
+  ReplayGain have nothing to act on.
 - **Tapped.** rox remote-controls playback elsewhere but captures the local audio
   output, so visualizers work while engine features don't. Only possible when the audio
   actually plays on this machine.

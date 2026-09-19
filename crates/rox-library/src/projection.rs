@@ -549,12 +549,14 @@ pub struct Builder {
     bpm_source: Vec<crate::tempo::Source>,
     sub: Vec<u16>,
     folder: Vec<u32>,
+    source: Vec<u32>,
     artists: Interner,
     album_artists: Interner,
     albums: Interner,
     genres: Interner,
     codecs: Interner,
     folders: Interner,
+    sources: Interner,
     /// Whether any row was refused because the title arena is full. The
     /// shard is still coherent, it's just short rows, so the merge can go
     /// ahead and the incremental patch can't: a patch that silently drops
@@ -692,11 +694,21 @@ impl Builder {
         self.sub.push(row.sub);
         // Interned per album directory, so it stays cheap even at ten
         // million rows; an empty parent (a bare filename) folds to "".
-        let folder = Path::new(row.path)
-            .parent()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_default();
+        // A remote row's path is a URL or a server's id, and splitting
+        // that like a filesystem path hands the folder tree a "http:"
+        // root full of hostnames, so it folds to "" the same way.
+        let folder = if row.source == crate::cue::LOCAL {
+            Path::new(row.path)
+                .parent()
+                .map(|p| p.to_string_lossy())
+                .unwrap_or_default()
+        } else {
+            std::borrow::Cow::Borrowed("")
+        };
         self.folder.push(self.folders.intern(&folder, ""));
+        // A library holds one source string per source, so this is the
+        // interner's best case: a whole local library is one symbol.
+        self.source.push(self.sources.intern(row.source, ""));
         true
     }
 
@@ -946,12 +958,18 @@ pub struct Projection {
     /// album directory, so interning keeps this a handful of symbols even
     /// across a huge library. Searchable and filterable like artist/album.
     pub folder: Vec<u32>,
+    /// Which source each row came from, interned. A library is almost
+    /// always one source or a handful, so this costs four bytes a row and
+    /// one symbol a source, and the catalog can build a whole TrackKey off
+    /// the projection without going back to SQLite.
+    pub source: Vec<u32>,
     pub artists: SymTable,
     pub album_artists: SymTable,
     pub albums: SymTable,
     pub genres: SymTable,
     pub codecs: SymTable,
     pub folders: SymTable,
+    pub sources: SymTable,
     /// The lowered-order rank of each symbol, filled on the first sort that
     /// needs it and reused after. The projection is immutable once loaded, so
     /// these never go stale; every sort's canonical tie-break wants the album
@@ -1026,6 +1044,7 @@ struct SymIndex {
     genres: Option<HashMap<Box<str>, u32>>,
     codecs: Option<HashMap<Box<str>, u32>>,
     folders: Option<HashMap<Box<str>, u32>>,
+    sources: Option<HashMap<Box<str>, u32>>,
 }
 
 impl SymIndex {
@@ -1037,6 +1056,7 @@ impl SymIndex {
             &self.genres,
             &self.codecs,
             &self.folders,
+            &self.sources,
         ]
         .into_iter()
         .flatten()
@@ -1106,6 +1126,8 @@ pub struct RowView<'a> {
     /// what a tagger wrote.
     pub bpm_source: crate::tempo::Source,
     pub folder: &'a str,
+    /// Which source the row came from, "local" for a file on disk.
+    pub source: &'a str,
     /// Which subsong of its file the row is, 0 for a plain file.
     pub sub: u16,
 }
@@ -2025,6 +2047,7 @@ impl Projection {
         let mut genres = Interner::folded(fold);
         let mut codecs = Interner::default();
         let mut folders = Interner::default();
+        let mut sources = Interner::default();
         let total: usize = shards.iter().map(|s| s.db_id.len()).sum();
 
         let mut out = Builder::default();
@@ -2049,6 +2072,7 @@ impl Projection {
         out.bpm_source.reserve(total);
         out.sub.reserve(total);
         out.folder.reserve(total);
+        out.source.reserve(total);
 
         for shard in shards {
             // A shard whose text won't fit under the ceiling is dropped
@@ -2071,6 +2095,7 @@ impl Projection {
             let map_g = genres.absorb(&shard.genres);
             let map_c = codecs.absorb(&shard.codecs);
             let map_f = folders.absorb(&shard.folders);
+            let map_s = sources.absorb(&shard.sources);
             out.db_id.extend_from_slice(&shard.db_id);
             // Checked to fit above, so these can't refuse.
             out.title.append(&shard.title);
@@ -2103,6 +2128,8 @@ impl Projection {
             out.sub.extend_from_slice(&shard.sub);
             out.folder
                 .extend(shard.folder.iter().map(|&s| map_f[s as usize]));
+            out.source
+                .extend(shard.source.iter().map(|&s| map_s[s as usize]));
         }
 
         let rows = out.db_id.len();
@@ -2146,12 +2173,14 @@ impl Projection {
             rating: out.rating.into_iter().map(AtomicU8::new).collect(),
             plays,
             folder: out.folder,
+            source: out.source,
             artists: SymTable::from(artists),
             album_artists: SymTable::from(album_artists),
             albums: SymTable::from(albums),
             genres: SymTable::from(genres),
             codecs: SymTable::from(codecs),
             folders: SymTable::from(folders),
+            sources: SymTable::from(sources),
             artist_ranks: OnceLock::new(),
             album_artist_ranks: OnceLock::new(),
             album_ranks: OnceLock::new(),
@@ -2197,6 +2226,7 @@ impl Projection {
             bpm: unpack_bpm(self.bpm[i]),
             bpm_source: self.bpm_source[i],
             folder: &self.folders.strings[self.folder[i] as usize],
+            source: &self.sources.strings[self.source[i] as usize],
             sub: self.sub[i],
         }
     }
@@ -2252,6 +2282,84 @@ impl Projection {
     /// and passes its own timestamp.
     pub fn search(&self, query: &str) -> Vec<u32> {
         self.search_at(query, now_secs())
+    }
+
+    /// The first local row whose artist and title are exactly each of
+    /// these, folded the way search folds, answered in the order asked.
+    /// For the surfaces that hold a song's two names and want the file of
+    /// it: a radio listen names the song it played, but the row behind it
+    /// is the station.
+    ///
+    /// Exact rather than substring, which is the whole point of not going
+    /// through [`Projection::search`]: "Love" as a substring lands on
+    /// "Love Will Tear Us Apart", and playing the wrong song is worse than
+    /// playing the station.
+    ///
+    /// A whole list at a time because nothing indexes the pair, so one
+    /// lookup is a row scan and a history view is hundreds of them. The
+    /// artist symbols are resolved into a mask first, so a row whose
+    /// artist nobody asked for is rejected on an array read and only the
+    /// handful left pay a title compare.
+    pub fn find_locals(&self, names: &[(&str, &str)]) -> Vec<Option<u32>> {
+        let folded: Vec<Option<(String, String)>> = names
+            .iter()
+            .map(|(artist, title)| {
+                let artist = crate::fold::fold(artist.trim());
+                let title = crate::fold::fold(title.trim());
+                (!artist.is_empty() && !title.is_empty()).then_some((artist, title))
+            })
+            .collect();
+
+        let mut wanted: HashMap<(&str, &str), Option<u32>> = folded
+            .iter()
+            .flatten()
+            .map(|(artist, title)| ((artist.as_str(), title.as_str()), None))
+            .collect();
+        let Some(local) = self
+            .sources
+            .strings
+            .iter()
+            .position(|source| source == crate::cue::LOCAL)
+        else {
+            return vec![None; names.len()];
+        };
+        if wanted.is_empty() {
+            return vec![None; names.len()];
+        }
+
+        // Which artist symbols could satisfy any of the names. Folded off,
+        // the table holds every casing as its own symbol, so a name can
+        // sit under several of them.
+        let asked: HashSet<&str> = wanted.keys().map(|(artist, _)| *artist).collect();
+        let by_artist: Vec<bool> = self
+            .artists
+            .lower
+            .iter()
+            .map(|lower| asked.contains(lower.as_str()))
+            .collect();
+
+        let local = local as u32;
+        for row in 0..self.len() as u32 {
+            let i = row as usize;
+            if self.source[i] != local || !by_artist[self.artist[i] as usize] || self.is_dead(row) {
+                continue;
+            }
+            let key = (
+                self.artists.lower[self.artist[i] as usize].as_str(),
+                self.title_lower.get(i),
+            );
+            if let Some(slot @ None) = wanted.get_mut(&key) {
+                *slot = Some(row);
+            }
+        }
+
+        folded
+            .iter()
+            .map(|pair| {
+                let (artist, title) = pair.as_ref()?;
+                wanted.get(&(artist.as_str(), title.as_str())).copied()?
+            })
+            .collect()
     }
 
     /// [`Projection::search`] with the now-timestamp handed in: unix
@@ -3225,19 +3333,20 @@ impl Projection {
         );
         let b = absorb_shard(&mut self.albums, &mut sym.albums, fold, &shard.albums);
         let g = absorb_shard(&mut self.genres, &mut sym.genres, fold, &shard.genres);
-        // Codecs and folders intern exactly whatever the case setting is,
-        // the way the full build does.
+        // Codecs, folders and sources intern exactly whatever the case
+        // setting is, the way the full build does.
         let c = absorb_shard(&mut self.codecs, &mut sym.codecs, false, &shard.codecs);
         let f = absorb_shard(&mut self.folders, &mut sym.folders, false, &shard.folders);
+        let s = absorb_shard(&mut self.sources, &mut sym.sources, false, &shard.sources);
         self.sym_index = Some(sym);
-        let tables = [&a, &aa, &b, &g, &c, &f];
+        let tables = [&a, &aa, &b, &g, &c, &f, &s];
         let symbols_moved = tables.iter().any(|t| t.moved);
         // Every table, not just the two the canonical order keys on: a
         // caller is free to keep an order sorted on any of them, and the
         // flag is about whether an order can be patched at all.
         let reordered = tables.iter().any(|t| t.reordered);
-        let (map_a, map_aa, map_b, map_g, map_c, map_f) =
-            (a.map, aa.map, b.map, g.map, c.map, f.map);
+        let (map_a, map_aa, map_b, map_g, map_c, map_f, map_s) =
+            (a.map, aa.map, b.map, g.map, c.map, f.map, s.map);
 
         let mut patch = Patch {
             reordered,
@@ -3278,6 +3387,7 @@ impl Projection {
             self.bpm_source.push(shard.bpm_source[i]);
             self.sub.push(shard.sub[i]);
             self.folder.push(map_f[shard.folder[i] as usize]);
+            self.source.push(map_s[shard.source[i] as usize]);
             self.dead.push(false);
             if let Some(&span) = spans.get(&id) {
                 self.spans.insert(row, span);
@@ -3443,7 +3553,8 @@ impl Projection {
                 + self.album.capacity()
                 + self.genre.capacity()
                 + self.codec.capacity()
-                + self.folder.capacity())
+                + self.folder.capacity()
+                + self.source.capacity())
                 * 4
             + (self.year.capacity()
                 + self.disc_no.capacity()
@@ -3460,6 +3571,7 @@ impl Projection {
             + self.genres.heap_bytes()
             + self.codecs.heap_bytes()
             + self.folders.heap_bytes()
+            + self.sources.heap_bytes()
             + self.dead.capacity()
             + self.sym_index.as_ref().map_or(0, |i| i.heap_bytes())
     }
@@ -3472,6 +3584,8 @@ mod tests {
 
     fn row(path: &str, album: &str, disc_no: u16, track_no: u16) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -3502,6 +3616,8 @@ mod tests {
 
     fn track(path: &str, title: &str, artist: &str, year: u16) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -4125,6 +4241,123 @@ mod tests {
         store::init_schema(&conn).unwrap();
         store::insert_batch(&mut conn, rows).unwrap();
         (db, conn)
+    }
+
+    /// The radio listen's way home: a song's two names find the local file
+    /// of it, exactly, and a near miss finds nothing. The remote row with
+    /// the same names is not an answer either, since the point of the
+    /// lookup is to land on a file.
+    #[test]
+    fn a_song_name_finds_its_local_file() {
+        let (_db, mut conn) = sorted_library(
+            "find-local",
+            &[
+                track("/m/one.flac", "So What", "Miles Davis", 1959),
+                track("/m/two.flac", "So What If", "Miles Davis", 1960),
+            ],
+        );
+
+        let mut remote = track("cloud-9", "So What", "Miles Davis", 1959);
+        remote.remote_url = "https://host/stream/9".into();
+        store::upsert_source_rows(&mut conn, "subsonic:home", &[remote]).unwrap();
+
+        let p = Projection::load_serial(&conn, false).unwrap();
+        let one = |artist: &str, title: &str| p.find_locals(&[(artist, title)])[0];
+
+        let found = one("Miles Davis", "So What").expect("the file");
+        assert_eq!(p.resolve(found).source, "local");
+        assert_eq!(p.resolve(found).title, "So What");
+
+        // Case and accents fold, a longer title is a different song, and
+        // an artist nobody in the library carries answers nothing.
+        assert!(one("miles davis", "so what").is_some());
+        assert!(one("Miles Davis", "So").is_none());
+        assert!(one("Bill Evans", "So What").is_none());
+    }
+
+    /// A list of songs answers in the order asked, hit or miss, and a
+    /// half-named song (the station that sends one unsplittable field)
+    /// takes its slot without matching anything.
+    #[test]
+    fn a_list_of_songs_answers_in_order() {
+        let (_db, conn) = sorted_library(
+            "find-locals",
+            &[
+                track("/m/one.flac", "So What", "Miles Davis", 1959),
+                track("/m/two.flac", "Blue In Green", "Miles Davis", 1959),
+            ],
+        );
+
+        let p = Projection::load_serial(&conn, false).unwrap();
+        let found = p.find_locals(&[
+            ("Miles Davis", "Blue In Green"),
+            ("Bill Evans", "Peace Piece"),
+            ("", "So What"),
+            ("miles davis", "SO WHAT"),
+        ]);
+
+        let titles: Vec<Option<&str>> = found
+            .iter()
+            .map(|row| row.map(|row| p.resolve(row).title))
+            .collect();
+        assert_eq!(
+            titles,
+            vec![Some("Blue In Green"), None, None, Some("So What")]
+        );
+    }
+
+    /// Two rows from two sources come back carrying the source they were
+    /// written under. The column is interned, so the check is really that
+    /// the symbol survives the shard merge and lands on the right row.
+    #[test]
+    fn a_row_resolves_its_own_source() {
+        let (_db, mut conn) = sorted_library(
+            "mixed-sources",
+            &[track("/m/local.flac", "At Home", "Aviary", 1991)],
+        );
+
+        let mut remote = track("cloud-7", "On A Server", "Aviary", 1991);
+        remote.remote_url = "https://host/stream/7".into();
+        store::upsert_source_rows(&mut conn, "subsonic:home", &[remote]).unwrap();
+
+        let p = Projection::load_serial(&conn, false).unwrap();
+        let by_title = |title: &str| {
+            (0..p.len() as u32)
+                .find(|&row| p.resolve(row).title == title)
+                .map(|row| p.resolve(row).source.to_string())
+                .unwrap()
+        };
+
+        assert_eq!(by_title("At Home"), "local");
+        assert_eq!(by_title("On A Server"), "subsonic:home");
+    }
+
+    /// A remote row has no folder: its path is a URL or a server's id,
+    /// and the folder tree would otherwise grow a root for the scheme and
+    /// a node per host. It interns the empty folder, the bare-filename
+    /// case the tree already skips.
+    #[test]
+    fn a_remote_row_has_no_folder() {
+        let (_db, mut conn) = sorted_library(
+            "remote-folders",
+            &[track("/m/local.flac", "At Home", "Aviary", 1991)],
+        );
+
+        let mut station = track("http://play.example/stream", "Noise FM", "", 0);
+        station.remote_url = "http://play.example/stream".into();
+        station.remote_live = true;
+        store::upsert_source_rows(&mut conn, "radio", &[station]).unwrap();
+
+        let p = Projection::load_serial(&conn, false).unwrap();
+        let folder_of = |title: &str| {
+            (0..p.len() as u32)
+                .find(|&row| p.resolve(row).title == title)
+                .map(|row| p.resolve(row).folder.to_string())
+                .unwrap()
+        };
+
+        assert_eq!(folder_of("At Home"), "/m");
+        assert_eq!(folder_of("Noise FM"), "");
     }
 
     /// A row whose names carry Latin sort forms is found by typing them,
@@ -5042,6 +5275,8 @@ mod tests {
     fn search_surfaces_albums_and_artists() {
         fn full(path: &str, album_artist: &str, album: &str, title: &str) -> TrackRow {
             TrackRow {
+                remote_url: String::new(),
+                remote_live: false,
                 title_sort: String::new(),
                 artist_sort: String::new(),
                 album_artist_sort: String::new(),
@@ -5392,6 +5627,8 @@ mod tests {
     fn search_grouped_matches_reference() {
         fn full(path: &str, album_artist: &str, album: &str, title: &str) -> TrackRow {
             TrackRow {
+                remote_url: String::new(),
+                remote_live: false,
                 title_sort: String::new(),
                 artist_sort: String::new(),
                 album_artist_sort: String::new(),
@@ -5488,6 +5725,8 @@ mod tests {
     fn search_cache_is_stable_across_calls() {
         fn full(path: &str, album_artist: &str, album: &str) -> TrackRow {
             TrackRow {
+                remote_url: String::new(),
+                remote_live: false,
                 title_sort: String::new(),
                 artist_sort: String::new(),
                 album_artist_sort: String::new(),
@@ -5699,7 +5938,7 @@ mod tests {
         format!(
             "{id} {title:?} {artist:?} {album_artist:?} {album:?} {genre:?} {year} {disc}/{track} \
              {duration} {codec:?} {bitrate} {rate}/{depth} r{rating} p{plays} a{added} \
-             {track_gain:?}/{album_gain:?} {bpm:?} {source:?} {folder:?} sub{sub} \
+             {track_gain:?}/{album_gain:?} {bpm:?} {bpm_source:?} {source:?} {folder:?} sub{sub} \
              sorts {title_sort:?}/{artist_sort:?}/{aa_sort:?}/{album_sort:?} \
              keys {title_key:?}/{artist_key:?}/{aa_key:?}/{album_key:?}/{genre_key:?} \
              span {span:?}",
@@ -5723,7 +5962,8 @@ mod tests {
             track_gain = v.track_gain_db,
             album_gain = v.album_gain_db,
             bpm = v.bpm,
-            source = v.bpm_source,
+            bpm_source = v.bpm_source,
+            source = v.source,
             folder = v.folder,
             sub = v.sub,
             title_sort = v.title_sort,

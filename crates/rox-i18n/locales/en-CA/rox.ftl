@@ -206,6 +206,7 @@ settings-language-system = (System Language)
 settings-language-search = Search languages
 picker-no-matches = No matches
 settings-search-no-matches = Nothing matches "{ $text }"
+settings-search-scope = Search only the open page
 
 ## Embed dialog
 
@@ -238,6 +239,10 @@ bookmark-menu-remove = Remove
 bookmark-menu-remove-many = Remove { $count } Bookmarks
 bookmarks-title = Bookmarks
 bookmarks-empty = No bookmarks yet. Press M while a track plays to drop one, or Shift+M to name it.
+cue-menu-insert = Insert Marker Here
+cue-menu-bookmark = Add Bookmark Here
+cue-menu-remove = Remove Marker
+position-bound-streaming = Not available while streaming
 bake-window-title = rox - Embed Stored Metadata
 bake-title = Embed Stored Metadata
 bake-intro = Writes stored metadata into the files themselves, so another player reads it too. Nothing is recalculated.
@@ -640,6 +645,35 @@ library-circular-portraits = Circular Portraits
 library-genre-face = Genre Face
     .description = Grouped by genre, what the tile shows: the covers, the covers washed in the genre's color, or a color card under its geometry
 
+## Stations panel
+
+stations-title = Stations
+stations-play = Play
+stations-remove = Remove
+stations-find = Find Stations...
+stations-manage = Manage Stations...
+stations-import = Import Stations...
+stations-import-empty = That file holds no stream URLs
+stations-not-a-stream = Stations play over http or https; that isn't a stream URL
+stations-empty-title = No stations yet
+stations-empty = Find one in the directory, or keep your own list in settings.
+stations-on-air = On air
+stations-clocks = Time on this song, and on this station
+stations-homepage = Open Homepage
+
+## Station directory
+
+directory-window-title = Station Directory
+directory-placeholder = Find stations on radio-browser.info
+directory-search = Search the directory
+directory-add = Add
+directory-add-play = Add and Play
+directory-added = In your stations
+directory-searching = Searching radio-browser.info...
+directory-none = Nothing on radio-browser.info matches "{ $text }"
+directory-failed = radio-browser.info didn't answer: { $reason }
+directory-bitrate = { $kbps } kbps
+
 ## Album grid panel
 
 panel-title-album-grid = Album Grid
@@ -696,6 +730,7 @@ settings-page-ml-models = ML Models
 settings-page-playback = Playback
 settings-page-providers = Providers
 settings-page-shader = Shader
+settings-page-sources = Sources
 settings-page-storage = Storage
 settings-page-workspace = Workspace
 
@@ -967,6 +1002,28 @@ settings-integrations-section-lastfm = Last.fm
 settings-integrations-section-librefm = Libre.fm
 settings-integrations-section-listenbrainz = ListenBrainz
 settings-integrations-section-scrobbling = Scrobbling
+settings-integrations-section-subsonic = Subsonic
+settings-integrations-subsonic-connect = Connect
+settings-integrations-subsonic-credentials = Login
+    .description = The account on the server; the password is kept in accounts.json, never in settings.json
+settings-integrations-subsonic-enable = Use a Subsonic Server
+    .description = Read a library off a Subsonic or OpenSubsonic server and play from it
+settings-integrations-subsonic-password-placeholder = Password
+settings-integrations-subsonic-server = Server
+    .description = The server's address with http:// or https://, and no /rest on the end
+settings-integrations-subsonic-status-failed = Couldn't reach the server: { $error }
+settings-integrations-subsonic-status-ok = Connected to { $server }
+settings-integrations-subsonic-sync-count = { $n ->
+    [one] { $n } track, last synced { $date }
+   *[other] { $n } tracks, last synced { $date }
+}
+settings-integrations-subsonic-sync-failed = Sync failed: { $error }
+settings-integrations-subsonic-sync-never = Never synced
+settings-integrations-subsonic-sync-now = Sync Now
+    .description = Ask the server what it has and bring the library in line with it; tracks it no longer lists are dropped
+settings-integrations-subsonic-syncing = Syncing album { $done } of { $total }
+settings-integrations-subsonic-url-placeholder = https://music.example.com
+settings-integrations-subsonic-user-placeholder = Username
 
 ## Settings: keymap
 
@@ -1092,6 +1149,23 @@ settings-playback-continuation-weighted = Weighted
 settings-playback-keep-playing = Keep Playing
     .description = What plays when the queue runs out. Whatever this picks is appended to the timeline as ordinary context, so it's visible and removable rather than hidden state. With the order above set to Similar it keeps finding tracks that sound like the one playing, whichever of these is chosen
     .keywords = continuation refill autoplay queue
+settings-playback-live-buffer = Live Buffer
+    .description = How far back a station can be rewound. The connection stays up through a pause and keeps filling the buffer, so playing again picks up where you stopped instead of at the live edge. Twelve hours is the practical infinite: nothing you leave on in one sitting rolls past it.
+settings-playback-live-buffer-memory = About { $low } at 128 kbps, { $high } at 320 kbps.
+settings-playback-live-buffer-playing = Playing station: about { $size }.
+settings-playback-capture-album = Capture Album
+    .description = What a saved song's album tag says. Blank writes no album, since a song off the air has no release and station names in the album field pollute every album view. %station% puts the station there; a word like Radio or Singles files them on a shelf of their own. The station and its stream URL always go in the comment.
+settings-playback-capture-album-placeholder = Leave blank
+settings-playback-capture-choose = Choose Folder...
+settings-playback-capture-enable = Save Songs From Streaming Sources
+    .description = Writes every song a stream plays start to finish into the capture folder, in the stream's own format with nothing re-encoded, tagged with the station. The song's cover goes in beside it under the same name, when one can be found. The song boundaries come from the titles the station announces, and those run a few seconds ahead of or behind the audio, so a saved song can carry the tail of the one before it. A song longer than the live buffer is never saved, so a podcast or a mix stays on air.
+settings-playback-capture-folder = Capture Folder
+settings-playback-capture-pattern = Capture Names
+    .description = How a saved song is named under the capture folder. A / makes a folder, so the default files an evening of radio by station instead of piling it up flat. The extension follows the stream.
+settings-playback-capture-pattern-date = %date% is the day the song was saved, as 2026-09-18.
+settings-playback-capture-pattern-preview = Preview: { $name }
+settings-playback-capture-pattern-station = %station% is what the station calls itself, and %album% says the same thing.
+settings-playback-section-capture = Capture
 settings-playback-play-order = Play Order
     .description = How the tracks already queued are arranged while shuffle is on. The transport's shuffle button turns it on and off; this sets what it does once it's on
 settings-playback-rating-scale = Rating Scale
@@ -1101,6 +1175,7 @@ settings-playback-rating-scale-stars = Stars
 settings-playback-restore-last-session = Restore Last Session
     .description = Launch with the play queue as you left it, paused on the track that was playing and where it left off. Queued tracks outside your library folders can't be restored and drop from the order
 settings-playback-section-queue = Queue
+settings-playback-section-radio = Radio
 settings-playback-section-ratings = Ratings
 settings-playback-section-stepping = Stepping
 settings-playback-step = Step Size
@@ -1170,6 +1245,18 @@ settings-shader-signals-block = Signals
     .description = Which shared signal each of the shader's sixteen slots reads
 settings-shader-slots-block = Slots
     .description = Each slot as the shader receives it; slots without a route are hand-set knobs
+
+## Settings: sources
+
+settings-sources-folders-note = The folders rox scans live on the Library page, beside the scan and tagging settings that read them.
+settings-sources-folders-open = Library Page
+settings-sources-section-folders = Local Folders
+settings-sources-section-stations = Radio Stations
+settings-sources-stations-find = Find Stations...
+settings-sources-stations-import = Import Stations...
+settings-sources-stations-name-placeholder = Name (optional)
+settings-sources-stations-none = No stations yet
+settings-sources-stations-url-placeholder = Stream URL
 
 ## Settings: storage
 
@@ -1896,6 +1983,12 @@ keymap-prev-bookmark = Previous Bookmark
     .description = Jump back to the bookmark before the playhead
 keymap-next-bookmark = Next Bookmark
     .description = Jump ahead to the next bookmark
+keymap-cue = Add Marker
+    .description = Drop a session marker at the playing position. Markers last until rox closes
+keymap-cue-prev = Previous Marker
+    .description = Jump back to the marker before the playhead
+keymap-cue-next = Next Marker
+    .description = Jump ahead to the next marker
 keymap-stop-playback = Stop
     .description = Stop playback and release the track
 keymap-toggle-playback = Play / Pause
@@ -2019,6 +2112,7 @@ panel-catalog-group-visualizers = Visualizers
 panel-catalog-group-widgets = Widgets
 panel-catalog-history = History
 panel-catalog-bookmarks = Bookmarks
+panel-catalog-stations = Stations
 panel-catalog-menu = Menu
 panel-catalog-metadata = Metadata
 panel-catalog-mini-toggle = Mini Toggle
@@ -2738,6 +2832,17 @@ waveform-bookmarks = Bookmarks
     .description = The playing track's bookmarks as chevrons along the bottom edge: click one to jump there, right-click to edit it
 waveform-split-channels = Split Channels
     .description = One row per channel, left above right; mono tracks stay a single row
+waveform-live-mode = Live Shape
+    .description = What the strip draws while a radio stream plays: nothing, the stream's own sound, or a shape it draws itself
+waveform-live-trace = Trace
+waveform-live-motion = Motion
+waveform-live-window = Live Window
+    .description = Seconds of a radio stream the rolling trace spans; a wider window is a slower scroll speed
+waveform-live-expression = Motion Expression
+    .description = x runs 0 to 1 across the strip, t is seconds on the panel's clock; sin cos tan abs sqrt exp ln floor min max clamp mix, with + - * / ^ pi and brackets
+waveform-live-expression-error = { $reason }, so the strip is drawing the default shape
+waveform-section-live = Live
+waveform-streaming = STREAMING
 waveform-unavailable = Waveform unavailable for this track
 
 ## VU panel
@@ -2995,6 +3100,11 @@ metadata-field-codec = Codec
 metadata-field-comment = Comment
 metadata-field-copies = Copies
 metadata-field-cover = Cover
+metadata-field-source = Source
+metadata-source-radio = Radio
+metadata-source-subsonic = Subsonic
+metadata-field-station = Station
+metadata-field-homepage = Homepage
 metadata-field-disc = Disc
 metadata-field-file = File
 metadata-field-first-played = First played
@@ -3050,6 +3160,8 @@ metadata-stripes-description = Tint every other row of the table
 ## History panel
 
 history-column-last-played = Last Played
+history-live-plays-file = Plays your own copy of this song
+history-live-plays-station = Plays the station; your library has no copy of this song
 history-descending = Descending
     .description = Run the sort backwards
 history-empty-never = Every track has been played
@@ -3151,6 +3263,7 @@ playlists-empty = No playlists yet, add tracks or use New Playlist
 playlists-export-tooltip = Export Playlist
 playlists-headings = Break each playlist's tracks into album runs; Expanded adds the cover and stats
 playlists-import-tooltip = Import Playlist
+playlists-import = Import Playlist...
 playlists-imported-fallback = Imported
 playlists-new = New Playlist...
 playlists-new-smart = New Smart Playlist...
@@ -3404,6 +3517,8 @@ track-info-opening = opening...
 track-info-output-fallback = Exclusive output was refused by the device, so playback is running through the shared mixer. The device reported: { $reason }
 track-info-output-resample-exclusive = This file is { $source } kHz and the card took { $device } kHz, so every sample is being converted on the way out. The device wouldn't run at the file's own rate.
 track-info-output-resample-mixer = This file is { $source } kHz and the mixer is running at { $device } kHz, so every sample is being converted on the way out. Exclusive mode would hand the card the file's own rate instead.
+track-info-output-resample-exclusive-stream = This stream is { $source } kHz and the card took { $device } kHz, so every sample is being converted on the way out. The device wouldn't run at the stream's own rate.
+track-info-output-resample-mixer-stream = This stream is { $source } kHz and the mixer is running at { $device } kHz, so every sample is being converted on the way out. Exclusive mode would hand the card the stream's own rate instead.
 track-info-overflow-loop = Loop
 track-info-overflow-scroll = Scroll
 track-info-overflow-truncate = Truncate
@@ -3434,6 +3549,16 @@ seek-scrobble-marker = Scrobble Marker
 seek-bookmarks = Bookmarks
     .description = The playing track's bookmarks as chevrons under the line: click one to jump there, right-click to edit it
 seek-show-timings = Show Timings
+seek-dash-length = Dash Length
+    .description = The lead-in dash's length, with a gap the same size after it
+seek-lead-in = Buffer Lead-in
+    .description = How the part of a station's buffer that hasn't filled yet is drawn, the stretch left of the tape
+seek-lead-in-dashed = Dashed
+seek-lead-in-faint = Faint
+seek-lead-in-hidden = Hidden
+seek-lead-in-sweep = Lead-in Sweep
+    .description = A gradient that travels along the part that hasn't filled yet, the way a loading bar's does
+seek-section-live = Live
 seek-thickness = Thickness
     .description = The track line's height
 
@@ -3518,6 +3643,11 @@ theme-toggle-to-light = Switch to the light theme
 transport-favourite-add = Add to favourites
 transport-favourite-nothing = Nothing to favourite
 transport-favourite-remove = Remove from favourites
+transport-live = LIVE
+transport-live-opening = Connecting to the station
+transport-live-reconnecting = The stream dropped; reconnecting
+transport-live-dropped = The stream is gone
+transport-live-jump = Jump to live
 transport-pieces = Pieces
     .description = Drag along a row to reorder and between rows to move; a chip's x and plus hide and show
 

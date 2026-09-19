@@ -238,11 +238,12 @@ fn embedded(path: &Path, kind: ArtKind) -> Option<(Vec<u8>, String)> {
     Some((picture.data().to_vec(), mime))
 }
 
-/// A cover image sitting next to the track, the slot's best-ranked stem
-/// winning. Hands back the file it read, and the identity that file had
-/// going in, so a cache can key on it. A folder holding a cover whose bytes
-/// don't sniff answers [`Cover::Settling`] rather than None, so a caller
-/// can tell a download in flight from an album that has no art.
+/// A cover image sitting next to the track: the one named after the track
+/// itself first, then the slot's best-ranked shared stem. Hands back the
+/// file it read, and the identity that file had going in, so a cache can
+/// key on it. A folder holding a cover whose bytes don't sniff answers
+/// [`Cover::Settling`] rather than None, so a caller can tell a download in
+/// flight from an album that has no art.
 fn folder_art(path: &Path, kind: ArtKind) -> Cover {
     let stems = kind.stems();
     let Some(dir) = path.parent() else {
@@ -251,6 +252,17 @@ fn folder_art(path: &Path, kind: ArtKind) -> Cover {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Cover::None;
     };
+
+    // The track's own name, which outranks every shared stem: a picture
+    // called after one track was put there for that track. A capture off
+    // the air writes one, since a station's evening lands in a single
+    // folder where a shared cover.jpg would be the wrong picture for all
+    // but one song. Front only, because a name matching the track says
+    // nothing about the picture being its back or its disc scan.
+    let own = (kind == ArtKind::Front)
+        .then(|| path.file_stem().and_then(|s| s.to_str()))
+        .flatten();
+
     let mut best: Option<(usize, std::path::PathBuf)> = None;
     for entry in entries.flatten() {
         let candidate = entry.path();
@@ -261,12 +273,17 @@ fn folder_art(path: &Path, kind: ArtKind) -> Cover {
         if !has_art_ext {
             continue;
         }
-        let Some(rank) = candidate
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|stem| stems.iter().position(|n| stem.eq_ignore_ascii_case(n)))
-        else {
+        let Some(stem) = candidate.file_stem().and_then(|s| s.to_str()) else {
             continue;
+        };
+        // Rank 0 is the track's own name; the shared stems start at one.
+        let rank = if own == Some(stem) {
+            0
+        } else {
+            match stems.iter().position(|n| stem.eq_ignore_ascii_case(n)) {
+                Some(rank) => rank + 1,
+                None => continue,
+            }
         };
         if best.as_ref().is_none_or(|(r, _)| rank < *r) {
             best = Some((rank, candidate));
@@ -450,6 +467,20 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// What to call a picture written next to a track: the extension for its
+/// bytes, sniffed off the magic numbers rather than trusted from whatever
+/// handed them over. Only the extensions [`folder_art`] reads back come
+/// out of here, so a cover this names is a cover the player will find
+/// again; a GIF or a BMP answers None and is better not written at all.
+pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    match sniff(bytes)? {
+        "image/jpeg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +583,47 @@ mod tests {
         let (bytes, mime) = art.expect("the picture should resolve");
         assert_eq!(bytes, image);
         assert_eq!(mime, "image/jpeg");
+    }
+
+    /// A picture named after the track beats the folder's shared cover,
+    /// which is what makes a folder of captures off one station show a
+    /// different sleeve per song. The shared cover still answers for the
+    /// tracks that have no picture of their own.
+    #[test]
+    fn a_picture_named_after_the_track_wins() {
+        let dir = std::env::temp_dir().join("rox-art-sidecar-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Untagged, so nothing embedded can answer ahead of the folder.
+        let own = dir.join("Pendulum - Propane Nightmares.mp3");
+        let other = dir.join("Koven - Take It Away.mp3");
+        std::fs::write(&own, b"not really audio").unwrap();
+        std::fs::write(&other, b"not really audio").unwrap();
+        std::fs::write(dir.join("cover.png"), png(b"shared")).unwrap();
+        std::fs::write(
+            dir.join("Pendulum - Propane Nightmares.png"),
+            png(b"its own"),
+        )
+        .unwrap();
+
+        let art = |path: &Path| cover_art(path).expect("a picture").0;
+        assert_eq!(art(&own), png(b"its own"));
+        assert_eq!(art(&other), png(b"shared"));
+
+        // The name only counts for the front slot: a song's own picture
+        // says nothing about being the back of anything.
+        let back = cover_art_of(&own, ArtKind::Back).expect("a picture").0;
+        assert_eq!(back, png(b"shared"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Bytes that sniff as a PNG, so folder art will take them: the
+    /// signature and whatever marks this copy apart.
+    fn png(mark: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend(mark);
+        bytes
     }
 }

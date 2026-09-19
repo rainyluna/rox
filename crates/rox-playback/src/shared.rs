@@ -2,9 +2,132 @@
 //! status display. The callback only ever touches the atomics; the mutex side
 //! is decode-thread and UI-thread only.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+
+use rox_library::locator::Locator;
+
+use crate::http::StationInfo;
+use crate::icy::IcyTitle;
+
+/// Where a stream stands, for the surfaces that have to say something while a
+/// station is doing anything other than playing.
+///
+/// A file has no version of this: it opens in a millisecond and never drops,
+/// so the states below would all be over before a frame rendered. A station
+/// spends real seconds in `Opening`, and a broadcast that goes away mid-song
+/// is routine rather than exceptional, so the difference between "gone" and
+/// "coming back" is something the listener should be able to see rather than
+/// guess at from a stalled clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamState {
+    /// The open is in flight: the request is out and no audio exists yet.
+    Opening,
+    /// Connected and reading.
+    Live,
+    /// The connection went away and a reconnect is in progress.
+    Reconnecting,
+    /// The reconnects ran out. The entry is done, and the queue moves on.
+    Dropped,
+}
+
+/// Where a transport reports its state. Same shape and same reason as
+/// [`TitleSink`](crate::icy::TitleSink): the reconnect loop sits well below
+/// anything that knows which queue entry it belongs to, so the entry is bound
+/// into the closure at the open.
+pub type StreamSink = Arc<dyn Fn(StreamState) + Send + Sync>;
+
+/// A sink that drops everything, for an open with nobody watching: every
+/// local file, and the off-thread analysis passes.
+pub fn no_stream() -> StreamSink {
+    Arc::new(|_| {})
+}
+
+/// Where a live stream is being played from, relative to the broadcast.
+///
+/// A station is taped as it arrives, so what comes out of the speakers is
+/// a cursor into the last few minutes rather than whatever the socket
+/// delivered a moment ago. `behind_secs` is the distance from that cursor
+/// to the live edge, zero meaning live, and `window_secs` is how much tape
+/// there is to move through. Both grow while a pause holds the cursor
+/// still and the connection keeps taping.
+///
+/// Seconds rather than bytes because every surface reading this draws
+/// time, and the byte arithmetic behind it belongs to the transport that
+/// measured the rate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shift {
+    /// How far behind the live edge the cursor sits, in seconds.
+    pub behind_secs: f64,
+    /// How much of the broadcast is held, in seconds. Shorter than
+    /// `cap_secs` until a station has been on long enough to fill the
+    /// buffer, and equal to it from then on.
+    pub window_secs: f64,
+    /// How much the buffer is set to hold, in seconds: the setting's value
+    /// as this session is running it. What a strip drawing the buffer spans,
+    /// with the part past `window_secs` still to arrive.
+    pub cap_secs: f64,
+    /// How many bytes a second of this broadcast comes to, as the tape
+    /// works it out: what playback has measured where it has enough to go
+    /// on, what `icy-br` claimed otherwise, the socket's own average
+    /// failing that. The one number that turns a length of buffer into a
+    /// weight of memory, which is what the setting is really spending.
+    pub bytes_per_sec: f64,
+    /// How far into the song under the cursor, in seconds, off the in-band
+    /// titles the station announced and their place in the tape. None until
+    /// a title has been announced behind the cursor.
+    ///
+    /// This is what a song clock reads on a station, and the reason it
+    /// survives a step backwards: the tape knows where the song the cursor
+    /// landed in began, so landing in the middle of one shows the middle of
+    /// it rather than a fresh zero.
+    pub song_secs: Option<f64>,
+    /// How long that song ran, mark to mark. None for the newest song,
+    /// which hasn't ended, and for one whose start has been trimmed off the
+    /// back of the tape, where what's left isn't the whole of it.
+    pub song_len_secs: Option<f64>,
+}
+
+/// A song boundary in the buffer, as the strip over it draws one.
+///
+/// A broadcast announces its songs in band and nowhere else, so the points
+/// where one gave way to the next are the only structure a station's
+/// timeline has. The tape keeps them as byte offsets; this is the same
+/// thing in the units a strip works in, measured from the live edge back
+/// the way [`Shift::behind_secs`] is, so a mark and the playhead sit on one
+/// axis without the reader converting anything.
+///
+/// One per mark still inside the buffer. The song under the oldest byte
+/// held has no mark here: its start is off the back, so there's no point on
+/// the strip to draw it at.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveMark {
+    /// How far behind the live edge the song began, in seconds.
+    pub behind_secs: f64,
+    pub artist: String,
+    pub title: String,
+}
+
+/// The pool index slot saying no live entry is publishing a shift.
+const NO_SHIFT: u64 = u64::MAX;
+
+/// An optional second as the bits of an f64, with NaN standing for nothing.
+/// Two of [`Shift`]'s four numbers are absent for whole stretches of a
+/// stream, and a sentinel inside the number keeps the pair of atomics from
+/// becoming a pair plus a pair of flags.
+fn secs_bits(secs: Option<f64>) -> u64 {
+    secs.unwrap_or(f64::NAN).to_bits()
+}
+
+/// The same read back. Anything that isn't a real number reads as nothing,
+/// which covers the sentinel and any infinity a divide by a silly rate
+/// could have produced.
+fn secs_of(bits: u64) -> Option<f64> {
+    let secs = f64::from_bits(bits);
+
+    secs.is_finite().then_some(secs)
+}
 
 /// A run of contiguous output starting at `at_frame` on the global output
 /// clock. Maps the callback's consumed-frames counter back to a position in a
@@ -19,8 +142,8 @@ pub struct Segment {
 }
 
 /// One entry in the play queue as the UI sees it: a stable id that stays the
-/// same across reorders and removals, the file it points at, and whether it
-/// was queued explicitly (Play Next, Add to Queue) or came from the playing
+/// same across reorders and removals, where its bytes come from, and whether
+/// it was queued explicitly (Play Next, Add to Queue) or came from the playing
 /// context (the album or library view). The queue widgets show only the
 /// explicit ones; the context plays on in the background. The id is the handle
 /// the UI passes back to remove or move an entry, so an index shift between a
@@ -28,7 +151,7 @@ pub struct Segment {
 #[derive(Clone)]
 pub struct QueueEntry {
     pub id: u64,
-    pub path: PathBuf,
+    pub locator: Locator,
     pub explicit: bool,
     /// The pool index this entry points at, distinct per entry even when two
     /// entries share a path. The UI matches the audible track on this rather
@@ -67,6 +190,15 @@ pub struct TrackInfo {
 pub struct Shared {
     /// False = paused. The callback outputs silence and stops consuming, so
     /// the position freezes sample-accurately.
+    ///
+    /// It means the same thing on a live station as on a file now. The
+    /// connection stays up through a pause and the broadcast keeps being
+    /// taped ([`crate::tape`]), so the flag coming back plays on from the
+    /// byte it stopped at rather than from wherever the station has got to.
+    /// Only a pause left running for half an hour gives the socket up, and
+    /// everything published here survives that too: the entry keeps its
+    /// `TrackInfo` and its title, so nothing reading a paused station sees a
+    /// queue that lost a track.
     pub playing: AtomicBool,
     /// Device frames left in an audition blip, zero when nothing is
     /// auditioning. A step taken while paused arms this: the callback plays
@@ -121,10 +253,54 @@ pub struct Shared {
     /// "playing". Only ever set on the audio backend's error thread and
     /// cleared by the app on reopen.
     pub device_lost: AtomicBool,
+    /// A command is waiting that the listener expects an answer to now:
+    /// pause, a skip, a jump, a play now, a clear, quit. Set by the player
+    /// as it sends one, cleared by the engine as it drains its channel.
+    ///
+    /// It exists for a station that has gone off the air, which is the one
+    /// thing here that waits for seconds at a time. Two readers act on it.
+    /// The feed thread gives up its reconnect schedule rather than serving
+    /// it in full, and the decode thread stops waiting at the live edge for
+    /// a tape nothing is filling, so the entry ends and the queue moves on.
+    /// Neither reads it while the station is healthy: a pause is meant to
+    /// hold a connection now, not end one.
+    ///
+    /// An `Arc` because it's handed down into the transport, which lives
+    /// under symphonia and has no way back to this struct. One per session
+    /// rather than one per entry: it means "a command is waiting", and only
+    /// one station is ever in trouble at a time.
+    pub interrupt: Arc<AtomicBool>,
     /// Position mapping, appended by the decode thread.
     pub segments: Mutex<Vec<Segment>>,
     /// Display info per queue entry, filled in as tracks open.
     pub tracks: Mutex<Vec<Option<TrackInfo>>>,
+    /// The station title per queue entry, for the entries that have one:
+    /// web radio sends its now-playing in band and nowhere else, so this is
+    /// the only thing that ever says what a stream is playing.
+    ///
+    /// Parallel to `tracks` rather than a field inside it because the two
+    /// are written on different clocks. `tracks[i]` is rewritten whole every
+    /// time the entry opens, and a title arrives whenever the station feels
+    /// like it, including during the probe, before the `TrackInfo` that
+    /// would have carried it exists. Keeping them apart means an open can't
+    /// wipe a title and a title can't race an open.
+    pub titles: Mutex<Vec<Option<IcyTitle>>>,
+    /// What each station said about itself when its entry opened: its own
+    /// name, genre, bitrate, homepage and description off the response
+    /// headers. Parallel to `titles` for the same reason, and written once
+    /// per open rather than whenever the station feels like it, since the
+    /// headers go past exactly once on the way into the body.
+    pub station: Mutex<Vec<Option<StationInfo>>>,
+    /// Where each stream stands, for the entries that are one. None means a
+    /// local file, which has no state worth showing: it opens instantly and
+    /// the only thing that can go wrong with it is not opening at all.
+    ///
+    /// Parallel to `station` and written from both sides of the open: the
+    /// engine marks the open starting and finishing, the transport marks the
+    /// drops and reconnects it answers on its own. Two writers on one slot is
+    /// fine because they never overlap; the transport doesn't exist until the
+    /// open that publishes `Live` has returned it.
+    pub stream: Mutex<Vec<Option<StreamState>>>,
     /// The play queue for the UI, rewritten by the decode thread when its
     /// entries change: a new session, an insert, a remove, a move, a
     /// reshuffle. Not on a plain track advance; the playing entry is resolved
@@ -134,6 +310,38 @@ pub struct Shared {
     /// Bumped on every queue rewrite, so the UI can skip cloning the snapshot
     /// on the ticks where nothing changed.
     pub queue_rev: AtomicU64,
+    /// Bumped on every title that actually changed, the same deal `queue_rev`
+    /// offers: poll the atomic on the pump's clock and only take the lock on
+    /// the ticks where a station moved to the next song.
+    pub title_rev: AtomicU64,
+    /// The timeshift the audible live entry is playing at: the pool index
+    /// it belongs to, then the two seconds of [`Shift`] as `f64::to_bits`.
+    /// `u64::MAX` in the index means nothing live is publishing one.
+    ///
+    /// Atomics rather than a slot beside the titles, and deliberately off
+    /// the title revision. Both numbers move on every decoded chunk and
+    /// again on every tick of a pause, and the revision means "this entry
+    /// moved to another song" to everything that polls it: bumping it sixty
+    /// times a second would have the station panel re-read the library and
+    /// the scrobbler re-examine its boundary for a cursor that slid a
+    /// millisecond. Written by the decode thread, read by the pump.
+    pub shift_idx: AtomicU64,
+    pub shift_behind: AtomicU64,
+    pub shift_window: AtomicU64,
+    pub shift_cap: AtomicU64,
+    pub shift_rate: AtomicU64,
+    pub shift_song: AtomicU64,
+    pub shift_song_len: AtomicU64,
+    /// Where the audible station's songs turned over, oldest first, for the
+    /// surface drawing the buffer. Belongs to whichever entry `shift_idx`
+    /// names, the same as the shift itself.
+    ///
+    /// A lock rather than atomics because it's a list of strings, and on the
+    /// pump's side of the fence: the decode thread rewrites it as the
+    /// distances move, and the revision below only moves when the set does,
+    /// so a surface that only cares about song changes can poll the atomic
+    /// and leave the lock alone.
+    pub live_marks: Mutex<Vec<LiveMark>>,
 }
 
 impl Shared {
@@ -152,11 +360,200 @@ impl Shared {
             frames_consumed: AtomicU64::new(0),
             ended: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
+            interrupt: Arc::new(AtomicBool::new(false)),
             segments: Mutex::new(Vec::new()),
             tracks: Mutex::new(vec![None; queue_len]),
+            titles: Mutex::new(vec![None; queue_len]),
+            station: Mutex::new(vec![None; queue_len]),
+            stream: Mutex::new(vec![None; queue_len]),
             queue: Mutex::new(QueueSnapshot::default()),
             queue_rev: AtomicU64::new(0),
+            title_rev: AtomicU64::new(0),
+            shift_idx: AtomicU64::new(NO_SHIFT),
+            shift_behind: AtomicU64::new(0),
+            shift_window: AtomicU64::new(0),
+            shift_cap: AtomicU64::new(0),
+            shift_rate: AtomicU64::new(0),
+            shift_song: AtomicU64::new(secs_bits(None)),
+            shift_song_len: AtomicU64::new(secs_bits(None)),
+            live_marks: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Record the station title for pool entry `idx` and bump the revision,
+    /// which is what the decode thread does from inside the ICY reader.
+    ///
+    /// A repeat is dropped rather than republished. Stations resend the
+    /// current title in every metadata block, several times a minute, and
+    /// the revision has to mean "the song changed" for anything downstream
+    /// to hang a scrobble off it.
+    pub fn publish_title(&self, idx: usize, title: IcyTitle) {
+        let mut titles = self.titles.lock().unwrap();
+        let Some(slot) = titles.get_mut(idx) else {
+            return;
+        };
+        if slot.as_ref() == Some(&title) {
+            return;
+        }
+
+        *slot = Some(title);
+        drop(titles);
+
+        self.title_rev
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The station title published for pool entry `idx`, None for anything
+    /// that isn't a stream or hasn't sent one yet.
+    pub fn live_title(&self, idx: usize) -> Option<IcyTitle> {
+        self.titles.lock().unwrap().get(idx).cloned().flatten()
+    }
+
+    /// Record what the station at pool entry `idx` said about itself, which
+    /// the decode thread does once per open.
+    ///
+    /// The bump rides the title revision rather than one of its own. Both
+    /// mean the same thing to every reader downstream, "what this entry is
+    /// playing has changed under you", and a second atomic to poll would
+    /// buy a distinction nobody acts on.
+    pub fn publish_station(&self, idx: usize, info: StationInfo) {
+        let mut station = self.station.lock().unwrap();
+        let Some(slot) = station.get_mut(idx) else {
+            return;
+        };
+        if slot.as_ref() == Some(&info) {
+            return;
+        }
+
+        *slot = Some(info);
+        drop(station);
+
+        self.title_rev
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// What the station at pool entry `idx` said about itself, None for
+    /// anything that isn't a station or hasn't been opened yet.
+    pub fn station_info(&self, idx: usize) -> Option<StationInfo> {
+        self.station.lock().unwrap().get(idx).cloned().flatten()
+    }
+
+    /// Record where the stream at pool entry `idx` stands, which both the
+    /// engine's open and the transport's reconnect loop do.
+    ///
+    /// On the title revision for the same reason the description is: a state
+    /// change means "what this entry is doing has changed under you", which
+    /// is the one question every reader here polls. One clock, and a station
+    /// that reconnects without changing song still wakes the surfaces that
+    /// have to stop drawing it as playing.
+    pub fn publish_stream(&self, idx: usize, state: StreamState) {
+        let mut stream = self.stream.lock().unwrap();
+        let Some(slot) = stream.get_mut(idx) else {
+            return;
+        };
+        if *slot == Some(state) {
+            return;
+        }
+
+        *slot = Some(state);
+        drop(stream);
+
+        self.title_rev
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Where the stream at pool entry `idx` stands, None for a local file and
+    /// for an entry nothing has opened yet.
+    pub fn stream_state(&self, idx: usize) -> Option<StreamState> {
+        self.stream.lock().unwrap().get(idx).copied().flatten()
+    }
+
+    /// The title revision, bumped on every real change. Cheap to poll each
+    /// tick, the same way [`queue_rev`](Self::queue_rev) is.
+    pub fn title_rev(&self) -> u64 {
+        self.title_rev.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Say where pool entry `idx` is playing from relative to its live
+    /// edge, which the decode thread does as it moves through the tape.
+    ///
+    /// The index is stored last and read first, so a reader that finds the
+    /// entry it cares about is looking at numbers that were written for it
+    /// rather than at one entry's window against another's distance.
+    pub fn publish_shift(&self, idx: usize, shift: Shift) {
+        use std::sync::atomic::Ordering;
+
+        self.shift_behind
+            .store(shift.behind_secs.to_bits(), Ordering::Relaxed);
+        self.shift_window
+            .store(shift.window_secs.to_bits(), Ordering::Relaxed);
+        self.shift_cap
+            .store(shift.cap_secs.to_bits(), Ordering::Relaxed);
+        self.shift_rate
+            .store(shift.bytes_per_sec.to_bits(), Ordering::Relaxed);
+        self.shift_song
+            .store(secs_bits(shift.song_secs), Ordering::Relaxed);
+        self.shift_song_len
+            .store(secs_bits(shift.song_len_secs), Ordering::Relaxed);
+        self.shift_idx.store(idx as u64, Ordering::Release);
+    }
+
+    /// Withdraw the shift, for a station that stopped being the thing
+    /// playing: a skip onto a file, a hang-up, the end of the queue.
+    pub fn clear_shift(&self) {
+        self.shift_idx
+            .store(NO_SHIFT, std::sync::atomic::Ordering::Release);
+
+        // The song boundaries went with it. Emptying a list that was
+        // already empty is the ordinary case, on every pass of a session
+        // playing a file, so the revision only moves when there was
+        // something there to take away.
+        let held = std::mem::take(&mut *self.live_marks.lock().unwrap());
+        if !held.is_empty() {
+            self.title_rev
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Say where the audible station's songs turned over.
+    ///
+    /// `changed` is the set itself having changed, a song announced or one
+    /// dropping off the back of the buffer, as against the distances moving
+    /// because the live edge did. Only the first is worth a revision: the
+    /// second happens every time a chunk lands and means nothing to anyone
+    /// who isn't already redrawing.
+    pub fn publish_live_marks(&self, marks: Vec<LiveMark>, changed: bool) {
+        *self.live_marks.lock().unwrap() = marks;
+
+        if changed {
+            self.title_rev
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// The audible station's song boundaries, oldest first, cloned for
+    /// whoever is drawing them.
+    pub fn live_marks(&self) -> Vec<LiveMark> {
+        self.live_marks.lock().unwrap().clone()
+    }
+
+    /// Where pool entry `idx` is playing from, None when the shift on
+    /// offer belongs to another entry or nothing is taping.
+    pub fn shift(&self, idx: usize) -> Option<Shift> {
+        use std::sync::atomic::Ordering;
+
+        if self.shift_idx.load(Ordering::Acquire) != idx as u64 {
+            return None;
+        }
+
+        Some(Shift {
+            behind_secs: f64::from_bits(self.shift_behind.load(Ordering::Relaxed)),
+            window_secs: f64::from_bits(self.shift_window.load(Ordering::Relaxed)),
+            cap_secs: f64::from_bits(self.shift_cap.load(Ordering::Relaxed)),
+            bytes_per_sec: f64::from_bits(self.shift_rate.load(Ordering::Relaxed)),
+            song_secs: secs_of(self.shift_song.load(Ordering::Relaxed)),
+            song_len_secs: secs_of(self.shift_song_len.load(Ordering::Relaxed)),
+        })
     }
 
     /// The current play queue, cloned for the UI.
@@ -176,7 +573,7 @@ impl Shared {
     ///
     /// Its own read rather than a [`queue_snapshot`](Self::queue_snapshot)
     /// the caller measures, because the continuation trigger (ADR 17) calls
-    /// this on the pump's 16 ms clock and the snapshot clones a `PathBuf` per
+    /// this on the pump's 16 ms clock and the snapshot clones a `Locator` per
     /// entry. Counting under the lock costs a scan of the order and no
     /// allocation at all. None while nothing is queued.
     pub fn upcoming_from(&self, audible: Option<usize>) -> Option<(usize, usize)> {
@@ -192,6 +589,18 @@ impl Shared {
 
     pub fn volume(&self) -> f32 {
         f32::from_bits(self.volume_bits.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Say that a command worth answering now is on its way, which is what
+    /// the player does as it sends one.
+    ///
+    /// Only a stalled reconnect reads it, and only to stop waiting. Sending
+    /// a command nothing is blocked on costs a relaxed store and changes
+    /// nothing, so the caller doesn't have to know whether a station is in
+    /// trouble to decide whether to say this.
+    pub fn interrupt(&self) {
+        self.interrupt
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether the output stream reported a fatal error and stopped. The app
@@ -263,6 +672,7 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
     fn push_segment(shared: &Shared, at_frame: u64, track: usize, track_frame: u64) {
@@ -285,11 +695,11 @@ mod tests {
                 .map(|i| QueueEntry {
                     id: i as u64,
                     // One file queued twice, at the front and in the middle.
-                    path: PathBuf::from(if i == 3 {
+                    locator: Locator::Local(PathBuf::from(if i == 3 {
                         "t0".to_string()
                     } else {
                         format!("t{i}")
-                    }),
+                    })),
                     explicit: false,
                     idx: i,
                     group: None,

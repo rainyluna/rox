@@ -26,6 +26,8 @@ pub mod axis;
 
 pub mod config;
 
+pub mod expr;
+
 pub mod fade;
 
 pub mod grade;
@@ -976,6 +978,17 @@ pub fn value_slider_edit_over<P: 'static>(
     )
 }
 
+/// How a typed readout is read back into a number. A plain function
+/// pointer rather than a closure: every row's answer to this is a rule
+/// about the unit, with nothing of the row in it.
+pub type ParseTyped = fn(&str) -> Option<f32>;
+
+/// The everyday one: a bare number with either decimal mark, since the
+/// readout beside it is written in the locale's own.
+pub fn parse_number(text: &str) -> Option<f32> {
+    text.trim().replace(',', ".").parse::<f32>().ok()
+}
+
 /// The same, with the strip's width said out loud. The settings pages want
 /// [`SliderWidth::Fixed`] and get it from the wrapper above; a dialog builds
 /// its own row and asks for [`SliderWidth::Fill`].
@@ -988,9 +1001,45 @@ pub fn value_slider_edit_sized<P: 'static>(
     edit_text: String,
     over: f32,
     width: SliderWidth,
+    step: f32,
+    to_fraction: impl Fn(f32) -> f32 + Clone + 'static,
+    apply: impl Fn(&mut P, f32, &mut Context<P>) + Clone + 'static,
+    cx: &mut Context<P>,
+) -> Div {
+    value_slider_edit_typed(
+        scrub,
+        edit,
+        fraction,
+        readout,
+        edit_text,
+        over,
+        width,
+        step,
+        parse_number,
+        to_fraction,
+        apply,
+        cx,
+    )
+}
+
+/// [`value_slider_edit_sized`] where the readout isn't a plain number.
+/// `parse` reads the typed text back into the setting's own unit, for a
+/// row whose readout is written in words a number parse would choke on:
+/// `1 h 30 min` on the live buffer. What it returns goes through
+/// `to_fraction` the same way a parsed number does.
+#[allow(clippy::too_many_arguments)]
+pub fn value_slider_edit_typed<P: 'static>(
+    scrub: &ScrubState,
+    edit: &ValueEdit,
+    fraction: f32,
+    readout: String,
+    edit_text: String,
+    over: f32,
+    width: SliderWidth,
     // How far one arrow key moves the strip; [`SLIDER_STEP`] where the
     // caller has no better idea of what one press should be worth.
     step: f32,
+    parse: ParseTyped,
     to_fraction: impl Fn(f32) -> f32 + Clone + 'static,
     apply: impl Fn(&mut P, f32, &mut Context<P>) + Clone + 'static,
     cx: &mut Context<P>,
@@ -1066,8 +1115,12 @@ pub fn value_slider_edit_sized<P: 'static>(
     let id = scrub.id();
     row.child(
         div()
-            .w(READOUT_W)
+            // A floor, not a fixed width: a duration readout ("1 h 30 min")
+            // runs past the number column, and wrapping it onto a second
+            // line reads as a second setting.
+            .min_w(READOUT_W)
             .flex_none()
+            .whitespace_nowrap()
             .text_right()
             .text_color(palette::text_muted())
             // The hover cue is a background, never a text restyle: a hover
@@ -1089,8 +1142,8 @@ pub fn value_slider_edit_sized<P: 'static>(
                             let apply = apply.clone();
                             move |this: &mut P, input, event: &InputEvent, _, cx| match event {
                                 InputEvent::PressEnter { .. } => {
-                                    let text = input.read(cx).value().trim().replace(',', ".");
-                                    if let Ok(value) = text.parse::<f32>() {
+                                    let text = input.read(cx).value().to_string();
+                                    if let Some(value) = parse(&text) {
                                         let ceiling = over.max(1.0);
                                         apply(this, to_fraction(value).clamp(0.0, ceiling), cx);
                                     }

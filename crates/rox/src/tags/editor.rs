@@ -33,7 +33,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::table::{Column, ColumnSort, Table, TableDelegate, TableEvent, TableState};
 use gpui_component::{Root, Sizable, Size};
 
-use rox_library::cue::TrackKey;
+use rox_library::cue::{TrackKey, local};
 use rox_library::rating;
 use rox_library::writer::{self, Change, Edit, Field, UnknownValue};
 
@@ -2439,7 +2439,9 @@ impl TagEditor {
         let Some(row) = self.tracks.get(track) else {
             return;
         };
+        // The tag editor only ever holds files, so its keys are local.
         let key = TrackKey {
+            source: local(),
             path: row.path.clone(),
             sub: row.sub,
         };

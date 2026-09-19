@@ -127,12 +127,15 @@ impl DiscordPresence {
         let is_playing = player.is_playing();
 
         let current_state = now_playing.map(|now| {
-            let meta = self.library.read(cx).meta_for_key(&now.key);
+            // Through the player's accessor, so a station's presence shows
+            // the song it just announced rather than the station row's own
+            // title for the whole evening.
+            let meta = player.live_over(self.library.read(cx).meta_for_key(&now.key));
             let (title, artist, album, codec, bitrate_kbps) = match meta {
                 Some(m) => (
                     if m.title.is_empty() {
                         now.path()
-                            .file_name()
+                            .and_then(|path| path.file_name())
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "Unknown Track".into())
                     } else {
@@ -147,15 +150,18 @@ impl DiscordPresence {
                     m.codec,
                     m.bitrate_kbps,
                 ),
+                // Untagged and unknown to the library: the file name is the
+                // only name there is, and a remote track doesn't even have
+                // that, so it shows as unknown until the source fills it in.
                 None => (
                     now.path()
-                        .file_name()
+                        .and_then(|path| path.file_name())
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "Unknown Track".into()),
                     "Unknown Artist".to_string(),
                     String::new(),
                     now.path()
-                        .extension()
+                        .and_then(|path| path.extension())
                         .map(|e| e.to_string_lossy().to_string())
                         .unwrap_or_default(),
                     0,

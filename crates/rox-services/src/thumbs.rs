@@ -2,7 +2,11 @@
 //! bounded cache of decoded thumbnail textures over the durable store in
 //! [`rox_library::thumbs`]. Renders ask by track path and get a texture,
 //! a pending marker, or a definitive miss; a miss kicks a load on the
-//! background executor, bounded to a few in flight. There is no request
+//! background executor, bounded to a few in flight. A row from a source
+//! with no files under it asks the same way, with the string that stands
+//! in for its path: the store keys a station's favicon and a Subsonic
+//! cover on exactly that, so nothing here has to know which kind of row
+//! it's drawing. There is no request
 //! queue: a visible row re-asks every paint and a finished load repaints
 //! the panels, so freed slots refill with whatever is still on screen.
 //! Work for rows that scrolled away is never picked back up, the
@@ -147,6 +151,33 @@ impl Thumbs {
             stats: Stats::default(),
             _library_changed,
         }
+    }
+
+    /// Mark one path's cached answer for revalidation, so the next paint
+    /// re-reads it through the store. For art that lands after something
+    /// on screen was already told there was none: a station added from the
+    /// directory paints before its favicon has been fetched, and the
+    /// Missing cached then is a definitive answer, so nothing would ever
+    /// re-ask.
+    ///
+    /// The same not-fresh mark [`stale`](Self::stale) puts on the whole
+    /// cache, on one entry. Going through the existing revalidation rather
+    /// than dropping the entry is what keeps it cheap: no generation bump,
+    /// so no read in flight for any other path is orphaned, and the tile
+    /// keeps painting what it has until the re-read lands.
+    ///
+    /// A read already in flight for this very path is the one gap: it
+    /// files what the store said when it started, which may still be the
+    /// answer this was called to replace. In practice the row's read
+    /// finished long before, since the Missing it cached is what made the
+    /// call necessary.
+    pub fn forget(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.get_mut(path) else {
+            return;
+        };
+
+        entry.fresh = false;
+        cx.notify();
     }
 
     /// A snapshot of the cumulative counters, for `debug.thumbs`.

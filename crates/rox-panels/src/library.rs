@@ -4954,6 +4954,8 @@ mod tests {
     /// read; everything else stays at its neutral default.
     fn track(path: &str, album_artist: &str, album: &str, track_no: u16) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),

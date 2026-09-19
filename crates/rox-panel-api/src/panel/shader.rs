@@ -1045,10 +1045,12 @@ pub fn poll_cover(window: &Window, cx: &App) -> u64 {
     let Some((_, player)) = window_feed(window, cx) else {
         return COVERS.read().unwrap().get(&id).map_or(0, |feed| feed.rev);
     };
+    // The cover is read off the file, so a remote track leaves the feed
+    // with no art the same way a track without a cover does.
     let path = player
         .read(cx)
         .now_playing()
-        .map(|now| now.path().to_path_buf());
+        .and_then(|now| now.path().map(|path| path.to_path_buf()));
     note_cover(id, path.as_deref())
 }
 

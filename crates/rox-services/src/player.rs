@@ -17,11 +17,18 @@ use gpui::{App, Context, Entity, Global, SharedString, Subscription, Task};
 use rox_core::QUEUE_CAP;
 use rox_core::settings::{
     GainModeSetting, ReplayGainSave, ReplayGainSettings, Settings, ShuffleMode,
+    clamp_live_buffer_secs,
 };
-use rox_library::cue::{Span, TrackKey};
+use rox_library::cue::{Origin, Span, TrackKey};
 use rox_library::embeddings;
+use rox_library::locator::Locator;
 use rox_library::song;
 use rox_library::store;
+use rox_playback::IcyTitle;
+use rox_playback::LiveMark;
+use rox_playback::Shift;
+use rox_playback::StationInfo;
+use rox_playback::StreamState;
 use rox_playback::continuation::{self, Pick};
 use rox_playback::engine::{self, Cmd, StartQueue, shuffle_head, shuffle_slice};
 use rox_playback::eq::{Eq, EqParams};
@@ -32,6 +39,7 @@ use rox_playback::shared::{QueueEntry, QueueSnapshot, Shared};
 use rox_viz::AudioFeed;
 
 use crate::catalog::Library;
+use crate::sources_registry;
 
 // The clock formatters are with the rest of the readouts in rox-core now.
 // Callers still get them through the player, where the clock is.
@@ -432,6 +440,13 @@ struct Session {
     /// `queue`. Kept so the status readout can say what the playing file is
     /// actually being levelled by rather than what the setting is set to.
     gains: Vec<gain::ReplayGain>,
+    /// Which pool entries are live streams, again in pool order. Off the
+    /// locator rather than the key's source, because live is a property of
+    /// what the row points at: a station is live, and a source could
+    /// perfectly well serve a fixed-length file out of the same source
+    /// string. The surfaces that draw a timeline read this to know there
+    /// isn't one.
+    live: Vec<bool>,
 }
 
 impl Session {
@@ -448,7 +463,7 @@ impl Session {
         rule: gain::GainRule,
         output: output::Request,
     ) -> Result<Session, String> {
-        let shared = Arc::new(Shared::new(queue.paths.len()));
+        let shared = Arc::new(Shared::new(queue.locators.len()));
         // Seed the session with the persisted playback state: volume is
         // stored in the shared atomics before the stream opens, the loop and
         // shuffle modes queue on the channel so the engine picks them up
@@ -472,13 +487,29 @@ impl Session {
         if stop_after {
             let _ = tx.send(Cmd::SetStopAfter(true));
         }
-        // The launch restore's seek and pause queue here too, ahead of the
-        // decode thread: the engine drains commands before it decodes, so
-        // the session comes up already paused at the position and nothing
-        // sounds.
+        // The launch restore's pause and seek. The pause is a store rather
+        // than a queued command, because the engine reads this flag before
+        // it reads the channel: its first open happens at the top of `run`,
+        // and a station opened there would be sitting on a live socket
+        // through a pause that hadn't been delivered yet. With the flag
+        // already down, that open sees a paused session and parks without
+        // connecting. Everything else opens as it always did, silent because
+        // the callback is.
+        //
+        // The seek goes where there's somewhere to land. A stream plays from
+        // wherever the broadcast is now, so the saved seconds name a moment
+        // that has been and gone, and seeking to them spends a flush to
+        // arrive back at the live edge.
         if let Some(secs) = paused_at {
-            let _ = tx.send(Cmd::Seek(secs));
-            let _ = tx.send(Cmd::TogglePause);
+            shared.playing.store(false, Ordering::Relaxed);
+
+            if queue
+                .locators
+                .get(queue.start)
+                .is_some_and(seeks_on_restore)
+            {
+                let _ = tx.send(Cmd::Seek(secs));
+            }
         }
         // The fade settings are sent ahead of the first decode too, so a
         // session that starts on a skip already has them at its first
@@ -498,6 +529,7 @@ impl Session {
         // handle, so every later turn of a knob is a store.
         let _ = tx.send(Cmd::ChainPush(Box::new(Eq::new(eq_params().clone()))));
         let gains = queue.gains.clone();
+        let live = live_flags(&queue.locators);
         let engine = engine::Engine::new(queue, shared.clone(), out.producer, device_rate, rx);
         std::thread::Builder::new()
             .name("decode".into())
@@ -512,8 +544,42 @@ impl Session {
             negotiated: out.negotiated,
             queue: keys,
             gains,
+            live,
         })
     }
+}
+
+/// Which of these locators are live streams, in the order they were handed
+/// over. One pass at insert time rather than a lookup per frame: the seek
+/// strip and the waveform ask on every pump tick, and the answer can only
+/// change when the pool does.
+fn live_flags(locators: &[Locator]) -> Vec<bool> {
+    locators
+        .iter()
+        .map(|l| matches!(l, Locator::Remote(remote) if remote.live))
+        .collect()
+}
+
+/// Whether a restore's saved position is one to seek to, asked of the
+/// locator the session comes up on. A live stream has no position: it plays
+/// from wherever the broadcast is now, and the seconds written at close name
+/// a moment in it that is gone. Everything else takes the seek, a remote file
+/// included, since that's a file that happens to arrive over the wire.
+fn seeks_on_restore(start: &Locator) -> bool {
+    !matches!(start, Locator::Remote(remote) if remote.live)
+}
+
+/// Whether this batch takes the queue's place instead of joining it, which
+/// is the one thing a station does differently from a track. A stream has no
+/// end, so everything queued behind one sits there for as long as you listen,
+/// and someone who put a station on has stopped listening to a list anyway.
+///
+/// Every key has to be a station for the rule to bite. A selection that mixes
+/// one in with files is a list, and a list plays the way lists have always
+/// played; an empty batch replaces nothing, since there's nothing to play in
+/// the queue's place.
+fn replaces_queue(keys: &[TrackKey]) -> bool {
+    !keys.is_empty() && keys.iter().all(|key| key.origin() == Origin::Radio)
 }
 
 /// The library lookup for a batch of keys on their way into the queue, one
@@ -546,9 +612,14 @@ fn resolve_queue_meta(
         spans: Vec::with_capacity(keys.len()),
     };
     for key in keys {
+        // The path guard stays: a remote key's path is the source's own id
+        // and is always valid UTF-8, but a local one comes off the
+        // filesystem and still might not be.
         let row = conn
             .zip(key.path.to_str())
-            .and_then(|(conn, path)| store::queue_meta_for_key(conn, path, key.sub).ok())
+            .and_then(|(conn, path)| {
+                store::queue_meta_for_key(conn, &key.source, path, key.sub).ok()
+            })
             .unwrap_or_default();
         let rg = row.replay_gain;
         meta.groups.push(row.group);
@@ -562,6 +633,51 @@ fn resolve_queue_meta(
         meta.spans.push(row.span);
     }
     meta
+}
+
+/// Where each of these keys plays from, which is what the engine opens. A
+/// local key is its own answer. Anything else has to go back to the row,
+/// since the stream URL and the live flag are stored and the credentials
+/// are not: those come off the registry the app fills at startup.
+///
+/// A remote key whose row has gone (a source pruned it mid-queue) answers
+/// with an empty URL rather than a path, so the open fails instead of
+/// reading some file that happens to sit where the id reads like a path.
+fn resolve_locators(
+    conn: Option<&rox_library::rusqlite::Connection>,
+    keys: &[TrackKey],
+) -> Vec<Locator> {
+    keys.iter()
+        .map(|key| {
+            if key.is_local() {
+                return Locator::Local(key.path.clone());
+            }
+
+            // Through the sub-aware lookup rather than the path one, so a
+            // source that splits one reference into subsongs resolves the
+            // row that's actually queued.
+            let row = conn.zip(key.path.to_str()).and_then(|(conn, path)| {
+                let id = store::queue_meta_for_key(conn, &key.source, path, key.sub)
+                    .ok()?
+                    .id?;
+                store::locators_for(conn, &[id]).ok()?.pop()
+            });
+
+            let mut remote = match row {
+                Some(Locator::Remote(remote)) => remote,
+
+                _ => rox_library::locator::Remote {
+                    url: String::new(),
+                    headers: Vec::new(),
+                    hint: String::new(),
+                    live: false,
+                },
+            };
+
+            remote.headers = sources_registry::headers_for(&key.source);
+            Locator::Remote(remote)
+        })
+        .collect()
 }
 
 /// A snapshot of the playing track for the audio views: which file and
@@ -580,20 +696,180 @@ pub struct NowPlaying {
     /// resolver matches entries on this rather than the path, so a file that
     /// appears in the order more than once resolves to the occurrence playing now.
     pub audible_idx: usize,
+    /// A stream with no end: a station rather than a file. Everything that
+    /// draws a timeline is wrong for one of these, so the seek strip and
+    /// the waveform branch on this rather than on a zero duration, which a
+    /// file can also have for a moment while it opens.
+    pub live: bool,
+    /// Where the station's clock stood when its current song started, for
+    /// the surfaces that count the song rather than the listen. None off a
+    /// station and until the stream announces a title, since an ICY title
+    /// is the only song boundary a broadcast has and before the first one
+    /// there is nothing to count from. Subtract it from `position_secs`,
+    /// or let [`song_clock`] do it.
+    ///
+    /// Read off the buffer's own title marks wherever they reach: the
+    /// listen clock runs forward through a step back through the buffer,
+    /// and the song clock has to follow the playhead into whatever song it
+    /// landed in rather than starting that song again at zero.
+    pub song_start_secs: Option<f64>,
+    /// The song under the playhead began while this listen was running, so
+    /// `song_start_secs` is a real boundary and not just where the stream
+    /// opened. False for the song a mid-song join lands in: a station
+    /// announces what is playing the moment you connect, which says what
+    /// the song is and nothing about how far into it you are. Anything
+    /// timing against the song rather than the listen (a synced lyric
+    /// sheet) has to have this before it trusts the clock.
+    ///
+    /// Also false once the cursor steps back behind the turnover the pump
+    /// recorded, since that lands in an earlier song whose start may have
+    /// rolled off the back of the tape.
+    pub song_from_start: bool,
+    /// Which kind of source it came from, for the surfaces that mark one.
+    pub origin: Origin,
+    /// Where the stream stands, for the entries that are one: opening,
+    /// playing, reconnecting through a drop, or gone. None for a local file,
+    /// which has none of those states to be in.
+    pub stream: Option<StreamState>,
+    /// How far behind the broadcast this is playing, and how much of the
+    /// broadcast is held. None for anything that isn't a live stream, and
+    /// for one whose tape hasn't taken a byte yet.
+    ///
+    /// The distance is what a pause builds up and what [`Player::seek_live`]
+    /// moves through; the window is how far back it can go. Both keep
+    /// growing while a pause holds the cursor still, which is why a surface
+    /// drawing them repaints through a pause.
+    pub shift: Option<Shift>,
 }
 
 impl NowPlaying {
     /// The playing file, for the callers that genuinely want a path (cover
-    /// lookups, a decode window, a filename fallback) rather than an identity.
-    pub fn path(&self) -> &std::path::Path {
-        &self.key.path
+    /// lookups, a decode window, a filename fallback) rather than an
+    /// identity. None when what's playing isn't a file: a remote track's
+    /// path is the source's own id, and handing that out as a path would
+    /// have every one of those callers reach for a file that isn't there.
+    /// Each decides for itself what to do without one.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.key.is_local().then_some(self.key.path.as_path())
+    }
+}
+
+/// Where the song under the playhead began, on the same clock
+/// `position_secs` runs on, so [`song_clock`] stays the one rule and only
+/// its input changes.
+///
+/// The buffer's answer wins wherever it has one. It knows the byte each
+/// title was announced at, so it can say how far into a song the playhead
+/// is wherever the playhead has been moved to: a step back into the middle
+/// of a song reads as the middle of it, and the listen clock carrying on
+/// forward doesn't drag the song clock with it.
+///
+/// `observed` is what the pump saw as the titles went past, which is the
+/// answer for the seconds after a connect, before any title sits behind the
+/// playhead for the buffer to measure from.
+fn song_start_of(position_secs: f64, shift: Option<Shift>, observed: Option<f64>) -> Option<f64> {
+    shift
+        .and_then(|shift| shift.song_secs)
+        .map(|into| position_secs - into)
+        .or(observed)
+}
+
+/// What an elapsed clock over a [`NowPlaying`] reads: time into the song
+/// once the station has named one, time into the listen before that, and
+/// the position itself for everything that isn't a station.
+///
+/// A start later than the position is a real state rather than a bug. The
+/// pump records the start off its own read of the clock, so a seek or a
+/// rejoin can leave the position behind it for a tick; flooring at zero
+/// keeps that out of the readout.
+pub fn song_clock(position_secs: f64, song_start_secs: Option<f64>) -> f64 {
+    match song_start_secs {
+        Some(start) => (position_secs - start).max(0.0),
+        None => position_secs,
+    }
+}
+
+/// When the audible station last moved to a new song, as the pump saw it.
+///
+/// The title is here beside the revision because the revision is global:
+/// any entry publishing moves it, so an unchanged one proves nothing
+/// published while a matching title proves this entry is still on the song
+/// it was. The revision is what keeps the common tick off the title lock.
+struct SongStart {
+    /// The pool entry the song was observed on.
+    idx: usize,
+    /// The title revision at the observation.
+    rev: u64,
+    /// The title that was standing then.
+    title: IcyTitle,
+    /// The station's elapsed at the turnover, the number clocks subtract.
+    at_secs: f64,
+    /// The turnover was one this listen watched happen, rather than the
+    /// title the stream was already carrying when it opened. See
+    /// [`NowPlaying::song_from_start`].
+    from_start: bool,
+}
+
+/// Whether the song under the playhead is one this listen heard begin,
+/// which is what [`NowPlaying::song_from_start`] carries and the only
+/// question a synced lyric sheet on a station has to answer.
+///
+/// Three ways to say no. Nothing live is audible, or the record belongs to
+/// another entry, so there is no station boundary here at all. The record
+/// is the title the stream was already carrying when it opened, which
+/// names the song a mid-song join landed in and says nothing about how far
+/// into it. And the cursor has been stepped back behind the turnover, into
+/// a song whose own start may have rolled off the back of the tape.
+fn song_heard_from_start(last: Option<&SongStart>, live: bool, idx: usize, secs: f64) -> bool {
+    last.is_some_and(|last| live && last.idx == idx && last.from_start && secs >= last.at_secs)
+}
+
+/// Whether a title just read off an entry is a new song rather than the one
+/// the record already stands on. A pause rejoin republishes the title it
+/// hung up on, and this is the question that keeps the resumed listener's
+/// clock where they left it.
+fn starts_new_song(last: Option<&SongStart>, idx: usize, title: &IcyTitle) -> bool {
+    match last {
+        Some(last) => last.idx != idx || &last.title != title,
+        None => true,
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        // Nothing is more waited-on than this: the session going away means
+        // something is waiting on the decode thread to end, and a station
+        // stuck in its reconnect schedule is the one thing that would make it
+        // take seconds.
+        self.shared.interrupt();
         let _ = self.tx.send(Cmd::Quit);
     }
+}
+
+/// Whether a command is one the listener is standing there waiting for the
+/// answer to, which is the question the engine's interrupt flag exists to
+/// carry: pause, a move through the queue, a play now, a queue edit they just
+/// made, and the session ending.
+///
+/// It matters for exactly one situation. A station that has dropped leaves
+/// the decode thread inside a read, waiting out a reconnect backoff, and
+/// nothing queued behind it is read until that returns. Saying so lets the
+/// retries be abandoned instead of served in full. Everything else here
+/// (volume, the loop mode, a gain rule, a crossfade setting) either lands on
+/// the next pass or isn't something anyone watches for, and none of it is
+/// worth cutting a station's recovery short for.
+fn answers_now(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::TogglePause
+            | Cmd::SeekLive(_)
+            | Cmd::Next
+            | Cmd::Prev
+            | Cmd::Jump { .. }
+            | Cmd::RemoveMany { .. }
+            | Cmd::Quit
+            | Cmd::Insert { and_play: true, .. }
+    )
 }
 
 /// How finely a crossfade's progress is reported. The transport draws the
@@ -747,6 +1023,11 @@ pub struct PlayerView {
     /// once per visible step. None the rest of the time, which is a
     /// comparison that costs nothing on a settled session.
     pub fade: Option<FadeView>,
+    /// The station-title revision. A stream moving to the next song changes
+    /// nothing else here, so without it a panel gated on this view sits
+    /// still through a turnover and shows the new song whenever something
+    /// unrelated happens to repaint. Zero with no session.
+    pub title_rev: u64,
 }
 
 /// What output actually ended up doing, for the Audio page to state instead
@@ -961,6 +1242,12 @@ pub struct Player {
     /// transport's press has to remember what it turned off. Session-local:
     /// the persisted pick is the mode itself.
     last_continuation: continuation::Mode,
+    /// Where the audible station's current song started, kept by the pump.
+    /// A station's position counts the whole listen, which is the right
+    /// number for the Stations panel and the wrong one for the transport,
+    /// so the clock is derived from the two rather than stored twice.
+    /// None whenever nothing live is audible. See [`Self::track_song_start`].
+    song_start: Option<SongStart>,
 }
 
 impl Player {
@@ -995,6 +1282,7 @@ impl Player {
             continuing: false,
             continued_rev: None,
             last_continuation,
+            song_start: None,
         }
     }
 
@@ -1018,6 +1306,13 @@ impl Player {
         resolve_queue_meta(self.meta_conn.as_ref(), keys)
     }
 
+    /// Where these keys play from, on the same connection the queue
+    /// metadata comes off. Always called right after [`queue_meta_for`],
+    /// which is what opens the connection.
+    fn locators_for(&self, keys: &[TrackKey]) -> Vec<Locator> {
+        resolve_locators(self.meta_conn.as_ref(), keys)
+    }
+
     /// The audio feed the audio views read from.
     pub fn feed(&self) -> Arc<AudioFeed> {
         self.feed.clone()
@@ -1037,17 +1332,76 @@ impl Player {
                 .and_then(|t| t.as_ref())
                 .and_then(|t| t.duration_secs)
         };
+        let origin = key.origin();
+        let live = session.live.get(track).copied().unwrap_or(false);
+        let shift = live.then(|| session.shared.shift(track)).flatten();
+        // What the pump saw belongs to the station it was observed on, so a
+        // skip to another entry leaves it behind rather than counting the
+        // new one from a stranger's boundary.
+        let observed = self
+            .song_start
+            .as_ref()
+            .filter(|start| live && start.idx == track)
+            .map(|start| start.at_secs);
+        let song_start_secs = song_start_of(secs, shift, observed);
+        let song_from_start = song_heard_from_start(self.song_start.as_ref(), live, track, secs);
+
         Some(NowPlaying {
             key,
             position_secs: secs,
             duration_secs,
             audible_idx: track,
+            live,
+            song_start_secs,
+            song_from_start,
+            origin,
+            stream: session.shared.stream_state(track),
+            shift,
         })
+    }
+
+    /// Where the audible station's songs turned over, oldest first, each as
+    /// a distance back from the live edge. Empty for a file, and for a
+    /// station that hasn't announced anything since the buffer opened.
+    ///
+    /// The set the buffer holds rather than the station's whole evening:
+    /// a song whose start has rolled off the back has no place on a strip
+    /// spanning the buffer, so it isn't here either.
+    pub fn live_marks(&self) -> Vec<LiveMark> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let Some((track, _)) = session.shared.position(session.device_rate) else {
+            return Vec::new();
+        };
+
+        // The shift's own index guard, reused: the marks belong to whichever
+        // entry is publishing a shift, so a station pre-rolled behind a file
+        // doesn't hand its songs to the file's strip.
+        match session.shared.shift(track).is_some() {
+            true => session.shared.live_marks(),
+            false => Vec::new(),
+        }
     }
 
     /// Absolute seek within the playing track, for the waveform strip.
     pub fn seek_to(&self, secs: f64) {
         self.send(Cmd::Seek(secs.max(0.0)));
+    }
+
+    /// Play the audible station from `behind_secs` back in its own buffer,
+    /// zero being the live edge. Anything past what the buffer holds lands
+    /// at the oldest thing in it.
+    ///
+    /// Nothing happens for a file or for a station that isn't the thing
+    /// playing: a timeline you can scrub is [`Player::seek_to`]'s business.
+    pub fn seek_live(&self, behind_secs: f64) {
+        self.send(Cmd::SeekLive(behind_secs.max(0.0)));
+    }
+
+    /// Jump to the live edge, which is what the LIVE button does.
+    pub fn go_live(&self) {
+        self.seek_live(0.0);
     }
 
     /// Replace whatever is playing with a fresh queue starting at its first
@@ -1119,6 +1473,92 @@ impl Player {
         Some(self.session.as_ref()?.shared.queue_rev())
     }
 
+    /// The station-title revision, the same deal [`queue_rev`](Self::queue_rev)
+    /// offers: poll the atomic on the pump's clock and only go take the
+    /// title on the ticks where a stream moved to the next song.
+    pub fn title_rev(&self) -> Option<u64> {
+        Some(self.session.as_ref()?.shared.title_rev())
+    }
+
+    /// What the playing stream says is on. Web radio sends its now-playing
+    /// in band and nowhere else, so for a station this is the only answer
+    /// there is; everything else answers None and its library tags stand.
+    pub fn live_title(&self) -> Option<IcyTitle> {
+        let session = self.session.as_ref()?;
+        let (track, _) = session.shared.position(session.device_rate)?;
+
+        session.shared.live_title(track)
+    }
+
+    /// What the playing station said about itself when the stream opened:
+    /// its own name, genre, bitrate, homepage and content type off the
+    /// response headers. None for everything that isn't a station, and for
+    /// a station whose server sent none of it.
+    ///
+    /// The row in the library knows what the user typed and a directory
+    /// filled in; this is what the stream itself claims, which is the only
+    /// description a typed-in URL ever gets.
+    pub fn station_info(&self) -> Option<StationInfo> {
+        let session = self.session.as_ref()?;
+        let (track, _) = session.shared.position(session.device_rate)?;
+
+        session.shared.station_info(track)
+    }
+
+    /// Where the playing stream stands: opening, live, reconnecting through a
+    /// drop, or given up on. None for a local file, which has none of those
+    /// states, and none for a stream nothing has opened yet.
+    ///
+    /// It moves the title revision, so a surface already polling that for
+    /// song changes picks this up on the same tick without a second clock.
+    pub fn stream_state(&self) -> Option<StreamState> {
+        let session = self.session.as_ref()?;
+        let (track, _) = session.shared.position(session.device_rate)?;
+
+        session.shared.stream_state(track)
+    }
+
+    /// How long the playing station has been on the song it's on, for a
+    /// caller that wants the number without the snapshot. None off a
+    /// station and until the stream names a song, where the honest answer
+    /// is the whole listen and [`NowPlaying::position_secs`] already has it.
+    pub fn song_elapsed(&self) -> Option<f64> {
+        let now = self.now_playing()?;
+
+        now.song_start_secs
+            .map(|start| song_clock(now.position_secs, Some(start)))
+    }
+
+    /// The tags every surface that names the playing track draws from: the
+    /// library row, with a station's current song laid over it so the song
+    /// reads as the title and the station's own name as the album.
+    ///
+    /// One accessor because there are five of these surfaces (the readout,
+    /// the window title, the queue's playing strip, the OS media card and
+    /// Discord) and a station announces its songs in band, where none of
+    /// them would think to look. Five copies of that lookup would be five
+    /// places to forget it.
+    pub fn now_meta(&self, library: &Library) -> Option<store::TrackMeta> {
+        let key = self.now_playing()?.key;
+
+        self.live_over(library.meta_for_key(&key))
+    }
+
+    /// [`now_meta`](Self::now_meta) for a caller that already holds the
+    /// row. The track info readout caches its library lookup across frames
+    /// and a query per frame is exactly what that cache is there to avoid,
+    /// so it keeps the cache and comes here for the overlay.
+    ///
+    /// Answers the row untouched when nothing live is playing, which is
+    /// every local and every server-backed track.
+    pub fn live_over(&self, row: Option<store::TrackMeta>) -> Option<store::TrackMeta> {
+        let Some(title) = self.live_title() else {
+            return row;
+        };
+
+        Some(crate::radio::live_tags(row, &title))
+    }
+
     /// The explicit up-next queue: what Play Next and Add to Queue put ahead
     /// of the playing track, apart from the context (the album or library) that
     /// plays on around it. Empty during plain context playback, which
@@ -1143,17 +1583,29 @@ impl Player {
         self.queued().len()
     }
 
-    /// The key a queue entry names. The engine's pool holds bare paths, so
-    /// two cue tracks of one image are indistinguishable down there; this
+    /// The key a queue entry names. The engine's pool holds bare locators,
+    /// so two cue tracks of one image are indistinguishable down there; this
     /// mirror, indexed by the entry's pool index, tells them apart.
     /// Anything drawing a queue row's title or resolving it back to a library
-    /// row has to come through here rather than read `entry.path`.
+    /// row has to come through here rather than read `entry.locator`.
     ///
-    /// An index the mirror doesn't hold falls back to the entry's own path as
-    /// a plain file, which is what every entry was before cue tracks existed.
+    /// An index the mirror doesn't hold falls back to the entry's own
+    /// locator as a plain local file, which is what every entry was before
+    /// cue tracks existed. A remote entry that far out of step names its URL
+    /// under an empty source: the mirror is the only thing that knew which
+    /// source it came from, and an empty one matches no row rather than
+    /// claiming to be a file.
     pub fn key_for(&self, entry: &QueueEntry) -> TrackKey {
         self.key_at(entry.idx)
-            .unwrap_or_else(|| TrackKey::from(entry.path.clone()))
+            .unwrap_or_else(|| match &entry.locator {
+                Locator::Local(path) => TrackKey::from(path.clone()),
+
+                Locator::Remote(remote) => TrackKey {
+                    source: rox_library::cue::source_id(""),
+                    path: PathBuf::from(&remote.url),
+                    sub: 0,
+                },
+            })
     }
 
     /// The key at a pool index, None while no session holds one.
@@ -1214,9 +1666,38 @@ impl Player {
     /// playing track and jump to the first, so the rest of the queue plays on
     /// behind them. With nothing loaded this just starts them. The drop's Play
     /// now zone routes here; an OS file open replaces the session instead.
+    ///
+    /// Radio is the exception at both ends. A station never finishes, so
+    /// anything left queued behind one waits forever: putting a station on
+    /// empties the queue and the station plays by itself. Leaving a station
+    /// for anything else takes the station out too, rather than leaving it
+    /// sitting in the timeline for Prev to walk back into. Play Next and Add
+    /// to Queue go untouched, since queueing a station is a thing you asked
+    /// for.
     pub fn play_now(&mut self, keys: Vec<TrackKey>, cx: &mut Context<Self>) {
+        // Nothing to play means nothing changes. `insert` would bail on its
+        // own, but the station rules below read as a move off what's on and
+        // an empty batch is no such thing.
+        if keys.is_empty() {
+            return;
+        }
+
+        // Asked before the splice: once the jump lands, what's playing is the
+        // new track and the station that was on is just another entry. The
+        // answer holds whatever replaces it, another station included, since
+        // this is about the station you left rather than what you left it for.
+        let leaving = self.playing_station();
+
+        if replaces_queue(&keys) {
+            self.clear_queue();
+        }
+
         let after = self.playing_after();
         self.insert(after, keys, true, cx);
+
+        if let Some(id) = leaving {
+            self.drop_when_left(id, cx);
+        }
     }
 
     /// Queue tracks at the end of the explicit queue, after anything already
@@ -1265,6 +1746,18 @@ impl Player {
             Some(i) => snap.entries.get(i).map(|e| e.id),
             None => snap.entries.get(snap.cursor).map(|e| e.id),
         }
+    }
+
+    /// The playing entry's id when what you hear is a station, None for
+    /// everything else. Both halves of the leave-on-replace question in one
+    /// look: whether there's a station to take out, and which entry it is.
+    fn playing_station(&self) -> Option<u64> {
+        let now = self.now_playing()?;
+        if now.origin != Origin::Radio {
+            return None;
+        }
+
+        self.playing_after()
     }
 
     /// The entry Add to Queue appends after: the last explicit entry in the
@@ -1361,22 +1854,32 @@ impl Player {
             None => meta.groups,
         };
         self.pool_ids.extend(meta.ids);
+        // Resolved before the session borrow, which wants &mut self too.
+        let locators = self.locators_for(&keys);
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let paths: Vec<PathBuf> = keys.iter().map(|key| key.path.clone()).collect();
         session.queue.extend(keys);
         session.gains.extend(meta.gains.iter().copied());
-        let _ = session.tx.send(Cmd::Insert {
+        session.live.extend(live_flags(&locators));
+        // Built before it's sent so the interrupt question is asked of the
+        // command itself, the same way [`send`](Self::send) asks it. A play
+        // now is the one shape of insert someone is waiting on.
+        let cmd = Cmd::Insert {
             after,
-            paths,
+            locators,
             groups,
             gains: meta.gains,
             spans: meta.spans,
             explicit,
             and_play,
             start_secs,
-        });
+        };
+        if answers_now(&cmd) {
+            session.shared.interrupt();
+        }
+
+        let _ = session.tx.send(cmd);
         cx.notify();
     }
 
@@ -1401,6 +1904,37 @@ impl Player {
     pub fn clear_queue(&self) {
         let ids: Vec<u64> = self.queued().iter().map(|e| e.id).collect();
         self.remove_many_from_queue(ids);
+    }
+
+    /// Drop `id` from the timeline once the engine has moved off it, which is
+    /// how a station leaves when something else is played now.
+    ///
+    /// It can't be one command behind the insert. The engine refuses to
+    /// remove the entry you can hear, and it drains everything waiting before
+    /// it acts on any of it, so a remove sent right after the jump arrives
+    /// while the station is still what's audible and is ignored. Watching the
+    /// playing entry change is the only handle there is from up here.
+    ///
+    /// Bounded by the same patience the queue wait uses. A jump that never
+    /// lands means the station is still playing, and then it keeping its
+    /// place is the honest outcome rather than something to force.
+    fn drop_when_left(&self, id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for _ in 0..QUEUE_WAIT_TRIES {
+                cx.background_executor().timer(QUEUE_WAIT_STEP).await;
+
+                let Ok(playing) = this.update(cx, |this, _| this.playing_entry()) else {
+                    return;
+                };
+                if playing == Some(id) {
+                    continue;
+                }
+
+                this.update(cx, |this, _| this.remove_from_queue(id)).ok();
+                return;
+            }
+        })
+        .detach();
     }
 
     /// Play a queued entry now without consuming the rest of the queue: the
@@ -1455,6 +1989,7 @@ impl Player {
         // frame at the load position instead of blank bars. A cue track's
         // clock runs from its own zero, so the window to decode is that far
         // into the image rather than that far into the file.
+        let locators = self.locators_for(&queue);
         let prime = paused_at.map(|secs| {
             let offset = spans
                 .get(start)
@@ -1462,9 +1997,8 @@ impl Player {
                 .flatten()
                 .map(|span| span.start_ms as f64 / 1000.0)
                 .unwrap_or(0.0);
-            (queue[start].path.clone(), offset + secs.max(0.0))
+            (locators[start].clone(), offset + secs.max(0.0))
         });
-        let paths: Vec<PathBuf> = queue.iter().map(|key| key.path.clone()).collect();
         // A fresh context is a fresh session for continuation too: nothing
         // has been played, nothing has been asked for, and whoever started
         // playback names the scope after this returns. A rebuild (a device
@@ -1484,6 +2018,8 @@ impl Player {
         // its own tail when the mode calls for it.
         self.reseeded_at = None;
         self.skip_reseed = SkipReseed::Idle;
+        // Whatever was on the air belonged to the pool going out.
+        self.song_start = None;
         self.session = None;
         // A fresh context takes the current shuffle mode; a restore preserves
         // the saved order and passes None so the engine leaves it untouched.
@@ -1494,12 +2030,17 @@ impl Player {
         };
         match Session::start(
             StartQueue {
-                paths,
+                locators,
                 start,
                 explicit,
                 groups,
                 gains,
                 spans,
+                // Read here rather than sent as a command: the engine's first
+                // open happens before it reads the channel, so a session that
+                // starts on a station would otherwise tape a default window
+                // for its first entry.
+                live_buffer_secs: clamp_live_buffer_secs(self.settings.live_buffer_secs),
             },
             queue,
             self.effective_volume(),
@@ -1527,8 +2068,8 @@ impl Player {
                 self.session = Some(session);
                 self.error = None;
                 self.start_pump(cx);
-                if let Some((path, secs)) = prime {
-                    self.prime_feed(path, secs, rate, cx);
+                if let Some((locator, secs)) = prime {
+                    self.prime_feed(locator, secs, rate, cx);
                 }
                 // A fresh context under the similarity mode owes its tail an
                 // ordering: the engine seeded it with the plain shuffle flag,
@@ -1578,7 +2119,7 @@ impl Player {
     fn start_pump(&mut self, cx: &mut Context<Self>) {
         let mut was_playing = self.is_playing();
         let mut seen_rev = self.queue_rev();
-        let mut seen_pos = self.position_key();
+        let mut seen_pos = self.paused_key();
         self.pump = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(PUMP_INTERVAL).await;
@@ -1617,6 +2158,9 @@ impl Player {
                     // reason: this is the only thing watching what's audible
                     // often enough to notice one going past.
                     this.reseed_on_boundary(cx);
+                    // A station's songs turn over on the same clock too, and
+                    // nothing else is watching the title revision.
+                    this.track_song_start();
                     let playing = this.is_playing();
                     let rev = this.queue_rev();
                     // A seek while paused moves the clock without touching any
@@ -1626,7 +2170,7 @@ impl Player {
                     // resolved position while paused; playing ticks notify
                     // anyway, so the check skips them and a settled pause still
                     // costs nothing when nothing moved.
-                    let pos = if playing { None } else { this.position_key() };
+                    let pos = if playing { None } else { this.paused_key() };
                     if playing || playing != was_playing || rev != seen_rev || pos != seen_pos {
                         cx.notify();
                     }
@@ -1640,6 +2184,72 @@ impl Player {
                 }
             }
         }));
+    }
+
+    /// Watch the audible station for the moment it moves to the next song
+    /// and keep where its clock stood when it did. A broadcast announces a
+    /// song and nothing else, so an ICY title arriving is the whole
+    /// definition of a boundary here, and the transport subtracts the start
+    /// to show the song instead of the listen.
+    ///
+    /// Gated on the title revision, which is what lets this sit on a 16 ms
+    /// clock: same entry and same revision means nobody published, and the
+    /// title lock goes untaken. The revision is global, so a bump from
+    /// another entry still lands here, and the title compare is what sends
+    /// it away again. A pause rejoin republishes the song it hung up on,
+    /// [`Shared::publish_title`] drops the repeat, and the revision doesn't
+    /// move at all: a resumed listener keeps the clock they paused on.
+    fn track_song_start(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            self.song_start = None;
+            return;
+        };
+
+        // Nothing live is audible: a file counts from its own zero and has
+        // no title coming to move anything.
+        let audible = session
+            .shared
+            .position(session.device_rate)
+            .filter(|(track, _)| session.live.get(*track).copied().unwrap_or(false));
+        let Some((idx, secs)) = audible else {
+            self.song_start = None;
+            return;
+        };
+
+        // The overwhelming majority of ticks end here.
+        let rev = session.shared.title_rev();
+        if self
+            .song_start
+            .as_ref()
+            .is_some_and(|start| start.idx == idx && start.rev == rev)
+        {
+            return;
+        }
+
+        // A station that hasn't said anything yet has no song to start from.
+        let Some(title) = session.shared.live_title(idx) else {
+            self.song_start = None;
+            return;
+        };
+
+        if starts_new_song(self.song_start.as_ref(), idx, &title) {
+            // A record already standing means this station has been on the
+            // air with us and just changed song, which is a boundary we
+            // watched. An empty record means the entry only now became
+            // audible, so its first title is whatever was already playing.
+            let from_start = self.song_start.is_some();
+            self.song_start = Some(SongStart {
+                idx,
+                rev,
+                title,
+                at_secs: secs,
+                from_start,
+            });
+        } else if let Some(start) = self.song_start.as_mut() {
+            // Still the same song on a revision some other entry moved. Take
+            // the revision so the next tick is the cheap one again.
+            start.rev = rev;
+        }
     }
 
     /// The continuation trigger (ADR 17): when the audible cursor comes
@@ -2360,6 +2970,50 @@ impl Player {
         cx.notify();
     }
 
+    /// How much of a live stream is kept behind the playhead, in seconds.
+    pub fn live_buffer_secs(&self) -> u32 {
+        clamp_live_buffer_secs(self.settings.live_buffer_secs)
+    }
+
+    /// Set it, and hand it to the station that's on air right now.
+    ///
+    /// The tape used to be sized at the connect and never again, so moving
+    /// this while listening changed nothing you could hear until the next
+    /// station. That's a strange answer to give someone who is dragging the
+    /// slider precisely because they want more of what they're listening
+    /// to, so the engine re-caps the open tape in place: growing raises the
+    /// ceiling and the window fills into it, shrinking gives the memory back
+    /// on the spot.
+    ///
+    /// The file write waits for the drag to settle, the same debounce the
+    /// volume and the crossfade sit behind. `Settings::update` reads and
+    /// rewrites five files, which is nothing once and far too much sixty
+    /// times a second.
+    pub fn set_live_buffer_secs(&mut self, secs: u32, cx: &mut Context<Self>) {
+        let secs = clamp_live_buffer_secs(secs);
+        if self.settings.live_buffer_secs == secs {
+            return;
+        }
+        self.settings.live_buffer_secs = secs;
+        self.send(Cmd::SetLiveBuffer(secs));
+        self.persist_playback_soon(cx);
+        cx.notify();
+    }
+
+    /// How many bytes a second the playing station is taping, as the tape
+    /// measures it. None off a live stream.
+    ///
+    /// The tape's own answer rather than the `icy-br` header, because it
+    /// already prefers what playback measured and falls back to that header
+    /// itself. What it's for is turning the buffer setting into the weight
+    /// of memory it actually costs on the station being listened to.
+    pub fn live_bytes_per_sec(&self) -> Option<f64> {
+        let session = self.session.as_ref()?;
+        let (track, _) = session.shared.position(session.device_rate)?;
+
+        Some(session.shared.shift(track)?.bytes_per_sec)
+    }
+
     /// How tagged loudness is levelled right now (ADR 19).
     pub fn replay_gain(&self) -> ReplayGainSettings {
         self.settings.replay_gain
@@ -2583,6 +3237,25 @@ impl Player {
         Some((track, secs.to_bits()))
     }
 
+    /// The same for a paused session, with how far behind the broadcast a
+    /// paused station has drifted folded in.
+    ///
+    /// A pause on a station is the one state where nothing moves except the
+    /// thing worth watching: the position is frozen and the timeshift is
+    /// growing by a second a second. Quantised to a quarter, so a paused
+    /// session repaints four times a second rather than sixty.
+    fn paused_key(&self) -> Option<(usize, u64, u64)> {
+        let session = self.session.as_ref()?;
+        let (track, secs) = self.position_key()?;
+        let behind = session
+            .shared
+            .shift(track)
+            .map(|shift| (shift.behind_secs * 4.0) as u64)
+            .unwrap_or(0);
+
+        Some((track, secs, behind))
+    }
+
     /// Take whatever the tap holds, never wait for more; the samples move
     /// on to the audio views' feed. Read as chunks straight off the ring's
     /// two slices: this runs 60 times a second for the whole session, so
@@ -2606,14 +3279,22 @@ impl Player {
     /// a paused load instead of blank bars. Skips the push if audio started
     /// flowing in the meantime (a quick resume, or another session), so it
     /// never splices a stale window into a live stream.
-    fn prime_feed(&self, path: PathBuf, secs: f64, rate: u32, cx: &mut Context<Self>) {
+    ///
+    /// A remote track returns here without decoding anything: the window would
+    /// cost a second connection to the server to decorate a paused load, so
+    /// the bars stay blank until playback starts feeding the tap.
+    fn prime_feed(&self, locator: Locator, secs: f64, rate: u32, cx: &mut Context<Self>) {
+        if locator.path().is_none() {
+            return;
+        }
+
         let feed = self.feed.clone();
         let before = feed.written();
         cx.spawn(async move |this, cx| {
             let window = cx
                 .background_executor()
                 .spawn(async move {
-                    engine::decode_window(&path, secs, rate, rox_viz::analysis::MAX_FFT_SIZE)
+                    engine::decode_window(&locator, secs, rate, rox_viz::analysis::MAX_FFT_SIZE)
                 })
                 .await;
             let Ok(samples) = window else { return };
@@ -2631,6 +3312,10 @@ impl Player {
 
     fn send(&self, cmd: Cmd) {
         if let Some(session) = &self.session {
+            if answers_now(&cmd) {
+                session.shared.interrupt();
+            }
+
             let _ = session.tx.send(cmd);
         }
     }
@@ -2838,7 +3523,8 @@ impl Player {
     /// hold the value, so only the file write waits for the last tick. Same
     /// pattern as the settings window's persist_appearance_soon.
     ///
-    /// The volume, the fade, and the leveling knobs share the debounce:
+    /// The volume, the fade, the leveling knobs, and the live buffer share
+    /// the debounce:
     /// only the file whose contents actually moved gets written, so
     /// covering all of them costs nothing and none can outrun another's
     /// pending write.
@@ -2853,7 +3539,7 @@ impl Player {
             // the last edit in a burst writes. Read the values at write
             // time, not capture time, so a mute toggled during the wait
             // persists as is.
-            let Ok((latest, volume, muted, crossfade, restore, step, replay_gain)) =
+            let Ok((latest, volume, muted, crossfade, restore, step, replay_gain, live_buffer)) =
                 this.update(cx, |this, _| {
                     (
                         this.persist_gen,
@@ -2863,6 +3549,7 @@ impl Player {
                         this.settings.crossfade_restore_secs,
                         (this.settings.step_ms, this.settings.step_preview_ms),
                         this.settings.replay_gain,
+                        this.settings.live_buffer_secs,
                     )
                 })
             else {
@@ -2876,6 +3563,7 @@ impl Player {
                     s.crossfade_restore_secs = restore;
                     (s.step_ms, s.step_preview_ms) = step;
                     s.replay_gain = replay_gain;
+                    s.live_buffer_secs = live_buffer;
                 });
             }
         })
@@ -3354,6 +4042,7 @@ impl Player {
             volume: self.volume(),
             error: self.error(),
             fade: self.crossfade(),
+            title_rev: self.title_rev().unwrap_or(0),
         }
     }
 }
@@ -4116,14 +4805,17 @@ mod tests {
 
         let keys = [
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 1,
             },
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 2,
             },
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from(image),
                 sub: 3,
             },
@@ -4172,6 +4864,7 @@ mod tests {
         let keys = [
             TrackKey::from(PathBuf::from("/m/a.flac")),
             TrackKey {
+                source: rox_library::cue::local(),
                 path: PathBuf::from("/m/disc.flac"),
                 sub: 4,
             },
@@ -4186,6 +4879,8 @@ mod tests {
     /// A row on one album, for the group compares above.
     fn album_row(path: &str, album: &str) -> rox_library::TrackRow {
         rox_library::TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),
@@ -4222,6 +4917,8 @@ mod tests {
     /// and span, and the sheet's album on every row.
     fn cue_row(path: &str, sub: u16, start_ms: u32, end_ms: Option<u32>) -> rox_library::TrackRow {
         rox_library::TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             sub,
             track_no: sub,
             cue: Some(rox_library::CueSlice {
@@ -4230,5 +4927,180 @@ mod tests {
             }),
             ..album_row(path, "Album")
         }
+    }
+
+    fn title(artist: &str, song: &str) -> IcyTitle {
+        IcyTitle {
+            artist: artist.into(),
+            title: song.into(),
+        }
+    }
+
+    /// The three readings of an elapsed clock: a station mid-song, a
+    /// station that hasn't named one, and the tick where the position
+    /// hasn't caught up with the start yet.
+    #[test]
+    fn the_song_clock_counts_the_song_not_the_listen() {
+        assert_eq!(song_clock(930.0, Some(870.0)), 60.0);
+        assert_eq!(song_clock(930.0, None), 930.0);
+        assert_eq!(song_clock(869.5, Some(870.0)), 0.0);
+    }
+
+    /// A step back through the buffer lands in the middle of a song, and
+    /// the clock has to read the middle of it. The listen clock keeps
+    /// running forward through a seek, so the start it counts from is
+    /// whatever the buffer's title marks say, not where the pump happened
+    /// to watch the song turn over.
+    #[test]
+    fn a_seek_into_a_song_reads_the_song_off_the_buffer() {
+        let shift = |song_secs| {
+            Some(Shift {
+                behind_secs: 300.0,
+                window_secs: 600.0,
+                cap_secs: 600.0,
+                bytes_per_sec: 16_000.0,
+                song_secs,
+                song_len_secs: None,
+            })
+        };
+
+        // Forty-five seconds into the song, on a listen that has run for
+        // fifteen and a half minutes.
+        let start = song_start_of(930.0, shift(Some(45.0)), Some(870.0));
+        assert_eq!(song_clock(930.0, start), 45.0);
+
+        // Nothing announced behind the playhead yet: what the pump saw is
+        // all there is, and it still answers.
+        let start = song_start_of(930.0, shift(None), Some(870.0));
+        assert_eq!(song_clock(930.0, start), 60.0);
+
+        // Neither, which is a file or a station that has said nothing.
+        assert_eq!(song_start_of(930.0, None, None), None);
+    }
+
+    /// What the pump asks on a title it just read. The rejoin case is the
+    /// one with teeth: a pause that comes back to the same song must not
+    /// restart its clock.
+    #[test]
+    fn a_republished_title_does_not_restart_the_song() {
+        let standing = SongStart {
+            idx: 3,
+            rev: 7,
+            title: title("Boards of Canada", "Roygbiv"),
+            at_secs: 870.0,
+            from_start: true,
+        };
+
+        assert!(starts_new_song(None, 3, &standing.title));
+        assert!(!starts_new_song(
+            Some(&standing),
+            3,
+            &title("Boards of Canada", "Roygbiv")
+        ));
+        assert!(starts_new_song(
+            Some(&standing),
+            3,
+            &title("Boards of Canada", "Olson")
+        ));
+
+        // A different entry is a different stream, so the same song text
+        // over there starts a clock of its own.
+        assert!(starts_new_song(
+            Some(&standing),
+            4,
+            &title("Boards of Canada", "Roygbiv")
+        ));
+    }
+
+    /// The rule a station's synced lyrics hang off: only a song we heard
+    /// begin can be timed against.
+    #[test]
+    fn only_a_watched_turnover_counts_as_a_song_start() {
+        let record = |from_start| SongStart {
+            idx: 3,
+            rev: 7,
+            title: title("Boards of Canada", "Roygbiv"),
+            at_secs: 870.0,
+            from_start,
+        };
+
+        // The turnover we watched, with the playhead still in that song.
+        assert!(song_heard_from_start(Some(&record(true)), true, 3, 900.0));
+
+        // The title the stream opened carrying: a mid-song join, so the
+        // clock says nothing about where in the song we are.
+        assert!(!song_heard_from_start(Some(&record(false)), true, 3, 900.0));
+
+        // Stepped back behind the turnover, into the song before it.
+        assert!(!song_heard_from_start(Some(&record(true)), true, 3, 800.0));
+
+        // Another entry's boundary, and no station playing at all.
+        assert!(!song_heard_from_start(Some(&record(true)), true, 4, 900.0));
+        assert!(!song_heard_from_start(Some(&record(true)), false, 3, 900.0));
+        assert!(!song_heard_from_start(None, true, 3, 900.0));
+    }
+
+    /// A station key as the library files one: the stream URL under the
+    /// radio source.
+    fn station(url: &str) -> TrackKey {
+        TrackKey {
+            source: rox_library::cue::source_id(rox_library::stations::SOURCE),
+            path: PathBuf::from(url),
+            sub: 0,
+        }
+    }
+
+    /// A remote locator, live or not, since the difference is the whole
+    /// question a restore asks about one.
+    fn remote(url: &str, live: bool) -> Locator {
+        Locator::Remote(rox_library::locator::Remote {
+            url: url.into(),
+            headers: Vec::new(),
+            hint: String::new(),
+            live,
+        })
+    }
+
+    /// What a paused restore does with the position it saved. A station has
+    /// nowhere to put it, and a file served off a server is still a file.
+    #[test]
+    fn a_restore_seeks_to_everything_but_a_stream() {
+        assert!(seeks_on_restore(&Locator::Local(PathBuf::from(
+            "/m/a.flac"
+        ))));
+        assert!(seeks_on_restore(&remote(
+            "https://srv/rest/stream?id=1",
+            false
+        )));
+        assert!(!seeks_on_restore(&remote(
+            "https://stream.example/live",
+            true
+        )));
+    }
+
+    /// Which batches take the queue's place. Only a batch that is stations
+    /// the whole way through: a station with files around it is a list, and
+    /// a list plays the way lists have always played.
+    #[test]
+    fn only_an_all_station_batch_replaces_the_queue() {
+        let live = station("https://stream.example/live");
+        let jazz = station("https://stream.example/jazz");
+        let file = TrackKey::from(PathBuf::from("/m/a.flac"));
+        let served = TrackKey {
+            source: rox_library::cue::source_id("subsonic:home"),
+            path: PathBuf::from("tr-1042"),
+            sub: 0,
+        };
+
+        assert!(replaces_queue(std::slice::from_ref(&live)));
+        assert!(replaces_queue(&[live.clone(), jazz]));
+
+        // Nothing to play in the queue's place, so nothing is replaced.
+        assert!(!replaces_queue(&[]));
+
+        assert!(!replaces_queue(std::slice::from_ref(&file)));
+        assert!(!replaces_queue(&[served]));
+        assert!(!replaces_queue(&[live.clone(), file.clone()]));
+        assert!(!replaces_queue(&[file, live]));
     }
 }

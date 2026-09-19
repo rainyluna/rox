@@ -53,6 +53,7 @@ use rox_design::assets::icons;
 use rox_design::palette::{self, Palette, ROLES, Role, Side, Sides};
 use rox_design::tokens;
 use rox_dock::{DockAreaState, DockEvent, PanelView, StackPanel, TabPanel};
+use rox_library::stations::{self, Station};
 use rox_library::store::{BpmCoverage, GainCoverage, Stats, Storage};
 use rox_net::lastfm::{AuthPhase, has_builtin_keys};
 use rox_net::providers;
@@ -69,6 +70,7 @@ use rox_playback::continuation;
 use rox_playback::engine;
 use rox_playback::output;
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
+use rox_services::capture;
 use rox_services::catalog::{Library, LibraryEvent};
 use rox_services::discord_presence::DiscordPresence;
 use rox_services::lastfm::Scrobbler;
@@ -103,6 +105,11 @@ const PERIODS_MS: &[f64] = &[2.5, 5.0, 10.0, 20.0, 40.0];
 /// to see at 100 ms.
 const RG_POLL: Duration = Duration::from_millis(250);
 
+/// How often the Subsonic row re-reads a running sync. Slower again than
+/// the leveling poll: the count moves once per album, and an album is a
+/// request to somebody else's server.
+const SUBSONIC_SYNC_POLL: Duration = Duration::from_millis(500);
+
 /// The open settings window, if any: opening again focuses it instead
 /// of stacking a second editor over the same file.
 struct OpenSettings(WindowHandle<Root>);
@@ -125,8 +132,14 @@ pub fn open(
 ) {
     if let Some(open) = cx.try_global::<OpenSettings>() {
         let handle = open.0;
+        // The refresh is for the page a caller may have asked for: the
+        // window reads that request on its next draw, and activation
+        // alone doesn't promise one.
         if handle
-            .update(cx, |_, window, _| window.activate_window())
+            .update(cx, |_, window, _| {
+                window.activate_window();
+                window.refresh();
+            })
             .is_ok()
         {
             return;
@@ -168,6 +181,7 @@ enum Page {
     Playback,
     Providers,
     Shader,
+    Sources,
     Storage,
     Workspace,
     Development,
@@ -203,6 +217,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Playback, "settings-page-playback", icons::PLAY),
     (Page::Providers, "settings-page-providers", icons::DOWNLOAD),
     (Page::Shader, "settings-page-shader", icons::BLEND),
+    (Page::Sources, "settings-page-sources", icons::MUSIC),
     (Page::Storage, "settings-page-storage", icons::DATABASE),
     (
         Page::Workspace,
@@ -400,6 +415,10 @@ struct SettingsWindow {
     /// for the all-pages results stack, every page filtered through
     /// [`Query`] under its own breadcrumb.
     search: Entity<SearchBox>,
+    /// The button beside the box: on, the query filters the open page
+    /// alone and the page stays where it is, so a hunt for "seek" on
+    /// Keymap doesn't pull the scrobble threshold in from Integrations.
+    search_scoped: bool,
     /// The working copy of the user palette: what the swatches show and
     /// what edits write through [`palette::set`]. A copy of the active
     /// theme's side; `editor_mode` tracks which.
@@ -494,6 +513,10 @@ struct SettingsWindow {
     nav_scroll: ScrollHandle,
     /// The shared catalog, the Library page's subject.
     library: Entity<Library>,
+    /// The whole bundle of shared entities, kept alongside the pieces
+    /// pulled out of it because the windows this page opens (the station
+    /// directory) take the bundle itself.
+    state: AppState,
     /// The app-wide signal pool, for the screen shader's route editor: the
     /// routes it edits are the app's, and so are the signals they read.
     signals: Arc<rox_viz::signal::SignalHub>,
@@ -522,6 +545,11 @@ struct SettingsWindow {
     /// page's Stepping section.
     step_scrub: ScrubState,
     step_preview_scrub: ScrubState,
+    /// The live buffer slider's scrub, the Playback page's Radio section.
+    /// No working copy beside it: the player owns the number and hands it
+    /// to the station on air, so the row reads it back off the player the
+    /// way the crossfade row does.
+    live_buffer_scrub: ScrubState,
     /// The two ReplayGain dB sliders' scrubs, the Leveling section.
     preamp_scrub: ScrubState,
     fallback_scrub: ScrubState,
@@ -571,6 +599,45 @@ struct SettingsWindow {
     /// renders without re-reading the file.
     broadcast_enabled: bool,
     broadcast_bitrate: u32,
+    /// The capture switch and the folder it writes into, copied from
+    /// settings so the Sources page renders without re-reading the file.
+    capture_enabled: bool,
+    capture_folder: PathBuf,
+    /// The pattern a saved song is named by, written through per
+    /// keystroke like the fields above it.
+    capture_pattern: Entity<InputState>,
+    capture_album: Entity<InputState>,
+    /// The Subsonic server's fields, seeded from accounts.json and written
+    /// through per keystroke like the icecast pair. Nothing reaches the
+    /// server on a keystroke: Connect and Sync Now are both deliberate.
+    subsonic_url: Entity<InputState>,
+    subsonic_user: Entity<InputState>,
+    subsonic_password: Entity<InputState>,
+    /// The switch, copied from the file so the section renders without
+    /// re-reading it.
+    subsonic_enabled: bool,
+    /// What the last Connect or Sync in this window said, already
+    /// localized. None until one has run.
+    subsonic_status: Option<SharedString>,
+    /// Rows the library holds under this server, and when it last synced.
+    /// Read once at open and again after a sync, never per frame.
+    subsonic_rows: usize,
+    subsonic_last_sync: i64,
+    /// Whether a sync is in flight. The button reads as busy while it is,
+    /// and a poll keeps the album count on the status line moving.
+    subsonic_syncing: bool,
+    /// The radio stations the library holds, re-read at open and on every
+    /// catalog write rather than per frame. The Sources page lists them
+    /// and is where they're added, imported and removed.
+    stations: Vec<Station>,
+    /// The two fields of the station add row. The URL is the identity, so
+    /// it's the only one that has to be filled in.
+    station_url: Entity<InputState>,
+    station_name: Entity<InputState>,
+    /// Why the last add or import did nothing, shown under the add row. A
+    /// pasted line that isn't a stream is the common case, and failing
+    /// silently reads as the button being broken.
+    station_notice: Option<SharedString>,
     /// The ffmpeg path input; writes through like the credentials, and the
     /// probe is keyed by value, so a pasted path shows Convert everywhere
     /// without a restart.
@@ -816,7 +883,10 @@ struct SettingsWindow {
     _picker_changes: Vec<Subscription>,
     _lastfm_changes: Vec<Subscription>,
     _broadcast_changes: Vec<Subscription>,
+    _subsonic_changes: Vec<Subscription>,
     _ffmpeg_changed: Subscription,
+    _capture_pattern_changed: Subscription,
+    _capture_album_changed: Subscription,
     _acoustid_key_changed: Subscription,
     /// The connect flow's phases arrive through here, so the page's status
     /// line updates with them.
@@ -926,6 +996,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let player = state.player.entity_id();
+        // The bundle taken whole before the pieces below move out of it.
+        // Cloning shares the handles, and the windows this window opens
+        // want the bundle rather than a field of it.
+        let app_state = state.clone();
         // Claimed here so the window has the keyboard from the moment it
         // opens, the workspace window's move.
         let focus = cx.focus_handle();
@@ -994,6 +1068,10 @@ impl SettingsWindow {
                 if this.page == Page::Storage {
                     this.refresh_storage(cx);
                 }
+                // Stations are rows in the same catalog, so a write from
+                // anywhere else (the panel's import, a sync) moves this
+                // list too.
+                this.stations = read_stations(&library, cx);
                 cx.notify();
             },
         );
@@ -1140,6 +1218,82 @@ impl SettingsWindow {
                 }
             }));
         }
+        // The Subsonic fields write through the same way, into
+        // accounts.json rather than the settings file, since a server
+        // password is a real credential. Nothing dials on a keystroke:
+        // Connect and Sync Now are both a round trip to someone's server,
+        // so both wait to be asked.
+        let subsonic_url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!(
+                    "settings-integrations-subsonic-url-placeholder"
+                ))
+                .default_value(settings.accounts.subsonic.url.clone())
+        });
+        let subsonic_user = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!(
+                    "settings-integrations-subsonic-user-placeholder"
+                ))
+                .default_value(settings.accounts.subsonic.user.clone())
+        });
+        let subsonic_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!(
+                    "settings-integrations-subsonic-password-placeholder"
+                ))
+                .masked(true)
+                .default_value(settings.accounts.subsonic.password.clone())
+        });
+        let mut _subsonic_changes = Vec::with_capacity(3);
+        for (input, write) in [
+            (
+                &subsonic_url,
+                (|s: &mut Settings, value: String| {
+                    s.accounts.subsonic.url = value.trim().to_string()
+                }) as fn(&mut Settings, String),
+            ),
+            (&subsonic_user, |s, value| {
+                s.accounts.subsonic.user = value.trim().to_string()
+            }),
+            // The password is stored exactly as typed. Trimming it the way
+            // the two above are would quietly break a login on a password
+            // that really does end in a space.
+            (&subsonic_password, |s, value| {
+                s.accounts.subsonic.password = value
+            }),
+        ] {
+            _subsonic_changes.push(cx.subscribe(input, {
+                move |this: &mut Self, input, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        let value = input.read(cx).value().to_string();
+                        Settings::update(move |s| write(s, value));
+
+                        // Whatever the last Connect said was about the old
+                        // server, so it stops standing for this one.
+                        this.subsonic_status = None;
+                        cx.notify();
+                    }
+                }
+            }));
+        }
+        // One count on the way in, so the sync row has a number before
+        // anything has been asked of the server.
+        let subsonic_rows = subsonic_row_count(&library, cx);
+
+        // The station add row. Nothing writes through on a keystroke here:
+        // a station lands in the library on the Add press, so a half-typed
+        // URL never becomes a row.
+        let station_url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!("settings-sources-stations-url-placeholder"))
+        });
+        let station_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!("settings-sources-stations-name-placeholder"))
+        });
+        let stations = read_stations(&library, cx);
+
         // The ffmpeg path takes the same per-keystroke write-through, and
         // since the probe caches per value, a path that resolves flips the
         // Convert surfaces on with no restart.
@@ -1156,6 +1310,38 @@ impl SettingsWindow {
                 cx.notify();
             }
         });
+        // The capture pattern writes through the same way. Nothing
+        // re-applies on it: the service reads the pattern when a song
+        // finishes, so the next one saved is already named by whatever is
+        // in the box.
+        let capture_pattern = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(settings::DEFAULT_CAPTURE_PATTERN)
+                .default_value(settings.capture.pattern.clone())
+        });
+        let _capture_pattern_changed =
+            cx.subscribe(&capture_pattern, |_, input, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let value = input.read(cx).value().trim().to_string();
+                    Settings::update(move |s| s.capture.pattern = value);
+                    cx.notify();
+                }
+            });
+        // The album a capture is tagged with, same write-through. Blank is
+        // the default and means no album tag at all.
+        let capture_album = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!("settings-playback-capture-album-placeholder"))
+                .default_value(settings.capture.album.clone())
+        });
+        let _capture_album_changed =
+            cx.subscribe(&capture_album, |_, input, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let value = input.read(cx).value().trim().to_string();
+                    Settings::update(move |s| s.capture.album = value);
+                    cx.notify();
+                }
+            });
         // The AcoustID key takes the same write-through, into the
         // working copy as well as the file, so a toggle that saves the
         // whole providers struct after doesn't put the old key back.
@@ -1221,6 +1407,7 @@ impl SettingsWindow {
         SettingsWindow {
             page: Page::Appearance,
             search,
+            search_scoped: false,
             base,
             editor_mode,
             keep_theme: settings.look.bundle.appearance.keep_theme,
@@ -1263,6 +1450,7 @@ impl SettingsWindow {
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             library,
+            state: app_state,
             signals: state.signals,
             workspace,
             workspace_window,
@@ -1272,6 +1460,7 @@ impl SettingsWindow {
             crossfade_scrub: ScrubState::default(),
             step_scrub: ScrubState::default(),
             step_preview_scrub: ScrubState::default(),
+            live_buffer_scrub: ScrubState::default(),
             preamp_scrub: ScrubState::default(),
             fallback_scrub: ScrubState::default(),
             output_exclusive,
@@ -1296,6 +1485,22 @@ impl SettingsWindow {
             broadcast_name,
             broadcast_enabled: settings.broadcast.enabled,
             broadcast_bitrate: settings.broadcast.bitrate,
+            capture_enabled: settings.capture.enabled,
+            capture_folder: settings.capture.folder.clone(),
+            capture_pattern,
+            capture_album,
+            subsonic_url,
+            subsonic_user,
+            subsonic_password,
+            subsonic_enabled: settings.accounts.subsonic.enabled,
+            subsonic_status: None,
+            subsonic_rows,
+            subsonic_last_sync: settings.accounts.subsonic.last_sync,
+            subsonic_syncing: rox_services::sources::syncing(),
+            stations,
+            station_url,
+            station_name,
+            station_notice: None,
             ffmpeg_path,
             ffmpeg_test: None,
             threshold_scrub: ScrubState::default(),
@@ -1388,7 +1593,10 @@ impl SettingsWindow {
             _picker_changes,
             _lastfm_changes,
             _broadcast_changes,
+            _subsonic_changes,
             _ffmpeg_changed,
+            _capture_pattern_changed,
+            _capture_album_changed,
             _acoustid_key_changed,
             _scrobbler_changed,
             _listenbrainz_changed,
@@ -4960,6 +5168,41 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    /// The live buffer row's description: what the buffer is, then what
+    /// the length it's set to actually weighs.
+    ///
+    /// The weight is the only reason the top of the range is where it is,
+    /// and a number of seconds says nothing about it. Two reference rates
+    /// bracket what stations broadcast at, so the line holds whatever the
+    /// listener is about to tune into. A station already playing gets a
+    /// third clause at its own measured rate, which is the one figure on
+    /// the row that's about this listener's own memory rather than radio
+    /// in general.
+    fn live_buffer_description(&self, cx: &mut Context<Self>) -> SharedString {
+        let player = self.playback.read(cx);
+        let secs = player.live_buffer_secs() as f64;
+        let weight = |bytes_per_sec: f64| live_buffer_weight(bytes_per_sec, secs);
+        let mut text = format!(
+            "{} {}",
+            rox_i18n::t!("settings-playback-live-buffer.description"),
+            rox_i18n::t!(
+                "settings-playback-live-buffer-memory",
+                low = weight(128_000.0 / 8.0),
+                high = weight(320_000.0 / 8.0),
+            )
+        );
+
+        if let Some(rate) = player.live_bytes_per_sec().filter(|rate| *rate > 0.0) {
+            text.push(' ');
+            text.push_str(&rox_i18n::t!(
+                "settings-playback-live-buffer-playing",
+                size = weight(rate),
+            ));
+        }
+
+        text.into()
+    }
+
     /// The Playback page: how the queue arranges and extends itself, what a
     /// launch brings back, and how tracks get rated along the way. Split off
     /// the Application page so the music behavior reads together instead of
@@ -4983,6 +5226,37 @@ impl SettingsWindow {
                     )
                 },
             ))
+            .section(Section::new(
+                q,
+                icons::RADIO,
+                rox_i18n::t!("settings-playback-section-radio"),
+                None,
+                |rows| {
+                    rows.row_dyn(
+                        &["live", "buffer", "radio", "rewind", "timeshift"],
+                        rox_i18n::t!("settings-playback-live-buffer"),
+                        Some(self.live_buffer_description(cx)),
+                        settings_ui::scalar(
+                            &self.live_buffer_scrub,
+                            &self.value_edit,
+                            self.playback.read(cx).live_buffer_secs() as f32,
+                            settings_ui::span_secs(
+                                settings::LIVE_BUFFER_SECS_MIN as f32,
+                                settings::LIVE_BUFFER_SECS_MAX as f32,
+                            )
+                            .log(),
+                            |this: &mut Self, secs, cx| {
+                                this.playback.update(cx, |player, cx| {
+                                    player.set_live_buffer_secs(secs.round() as u32, cx)
+                                });
+                                cx.notify();
+                            },
+                            cx,
+                        ),
+                    )
+                },
+            ))
+            .section(self.capture_section(q, cx))
             .section(Section::new(
                 q,
                 icons::PLAY,
@@ -5825,6 +6099,712 @@ impl SettingsWindow {
                 })
             },
         )
+    }
+
+    /// The Subsonic section: a server rox reads a library off, rather than
+    /// one it sends listens to. It renders on the Sources page, with the
+    /// folders and the stations, since what it is to rox is another place
+    /// tracks come from. The credentials it holds are what kept it beside
+    /// the other accounts for a while.
+    ///
+    /// The switch gates the rest the way the icecast one does. A URL, a
+    /// login, a connection test and a sync button are four rows of setup
+    /// for something most people never turn on.
+    fn subsonic_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        Section::new(
+            q,
+            icons::DATABASE,
+            rox_i18n::t!("settings-integrations-section-subsonic"),
+            None,
+            |rows| {
+                rows.keyed(
+                    "settings-integrations-subsonic-enable",
+                    &[
+                        "subsonic",
+                        "opensubsonic",
+                        "navidrome",
+                        "airsonic",
+                        "gonic",
+                        "server",
+                        "library",
+                    ],
+                    panel::toggle(self.subsonic_enabled, Self::set_subsonic_enabled, cx),
+                )
+                .when(self.subsonic_enabled, |rows| {
+                    rows.keyed(
+                        "settings-integrations-subsonic-server",
+                        &["subsonic", "url", "host", "server", "address"],
+                        Input::new(&self.subsonic_url).w(px(260.)),
+                    )
+                    .keyed(
+                        "settings-integrations-subsonic-credentials",
+                        &["subsonic", "user", "password", "login", "credentials"],
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(tokens::SPACE_SM)
+                            .child(Input::new(&self.subsonic_user).w(px(120.)))
+                            .child(
+                                Input::new(&self.subsonic_password)
+                                    .mask_toggle()
+                                    .w(px(140.)),
+                            ),
+                    )
+                    .custom(&["subsonic", "connect", "test", "ping"], || {
+                        self.subsonic_connect_row(cx).into_any_element()
+                    })
+                    .custom(&["subsonic", "sync", "catalog", "refresh"], || {
+                        self.subsonic_sync_row(cx).into_any_element()
+                    })
+                })
+            },
+        )
+    }
+
+    /// The connect strip, shaped like the scrobble destinations': what the
+    /// last attempt said stands as the label, the button is the control.
+    /// Connect with no URL typed would only ever fail, so it stays inert
+    /// until there's a server to reach.
+    fn subsonic_connect_row(&self, cx: &mut Context<Self>) -> Div {
+        let status = self
+            .subsonic_status
+            .clone()
+            .unwrap_or_else(|| rox_i18n::t!("settings-integrations-scrobble-status-not-connected"));
+        let empty = self.subsonic_url.read(cx).value().trim().is_empty();
+
+        panel::setting_row(
+            status,
+            None,
+            small_button(
+                rox_i18n::t!("settings-integrations-subsonic-connect"),
+                icons::LINK,
+                empty,
+                cx.listener(|this, _, _, cx| this.subsonic_connect(cx)),
+            ),
+        )
+    }
+
+    /// The sync strip: where the library stands against this server on the
+    /// left, the button that moves it on the right.
+    fn subsonic_sync_row(&self, cx: &mut Context<Self>) -> Div {
+        let state: SharedString = match rox_services::sources::progress() {
+            Some((done, total)) => rox_i18n::t!(
+                "settings-integrations-subsonic-syncing",
+                done = done as i64,
+                total = total as i64
+            ),
+
+            None if self.subsonic_last_sync == 0 => {
+                rox_i18n::t!("settings-integrations-subsonic-sync-never")
+            }
+
+            None => rox_i18n::t!(
+                "settings-integrations-subsonic-sync-count",
+                n = self.subsonic_rows as i64,
+                date = rox_core::fmt::fmt_date(self.subsonic_last_sync)
+            ),
+        };
+
+        panel::setting_row(
+            state,
+            Some(rox_i18n::t!(
+                "settings-integrations-subsonic-sync-now.description"
+            )),
+            small_button(
+                rox_i18n::t!("settings-integrations-subsonic-sync-now"),
+                icons::REFRESH_CW,
+                self.subsonic_syncing,
+                cx.listener(|this, _, _, cx| this.subsonic_sync(cx)),
+            ),
+        )
+    }
+
+    /// The Subsonic switch. The header table follows it, so a server
+    /// pointed somewhere else and turned back on can authorize a stream
+    /// without a restart.
+    fn set_subsonic_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.subsonic_enabled = on;
+        Settings::update(move |s| s.accounts.subsonic.enabled = on);
+        rox_services::sources::install_registry();
+        cx.notify();
+    }
+
+    /// Ping the server and keep what it answered for the status line. Off
+    /// the UI thread, since it's a round trip to somebody's machine.
+    fn subsonic_connect(&mut self, cx: &mut Context<Self>) {
+        let ping = rox_services::sources::ping(cx);
+
+        cx.spawn(async move |this, cx| {
+            let answer = ping.await;
+
+            this.update(cx, |this, cx| {
+                this.subsonic_status = Some(match answer {
+                    // A plain Subsonic server reports no name, so its
+                    // protocol version is the most it can be called.
+                    Ok(info) if info.server_type.is_empty() => rox_i18n::t!(
+                        "settings-integrations-subsonic-status-ok",
+                        server = info.version
+                    ),
+
+                    Ok(info) => rox_i18n::t!(
+                        "settings-integrations-subsonic-status-ok",
+                        server = format!("{} {}", info.server_type, info.server_version)
+                    ),
+
+                    Err(e) => {
+                        rox_i18n::t!("settings-integrations-subsonic-status-failed", error = e)
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    /// Ask the server for its catalog and reconcile the library against
+    /// it. Two tasks: one waits on the sync, the other keeps the line's
+    /// album count moving while it walks.
+    fn subsonic_sync(&mut self, cx: &mut Context<Self>) {
+        if self.subsonic_syncing {
+            return;
+        }
+
+        self.subsonic_syncing = true;
+        self.subsonic_status = None;
+
+        let sync = rox_services::sources::sync(self.library.clone(), cx);
+
+        cx.spawn(async move |this, cx| {
+            let outcome = sync.await;
+
+            this.update(cx, |this, cx| {
+                this.subsonic_syncing = false;
+                this.subsonic_last_sync = Settings::load().accounts.subsonic.last_sync;
+                this.subsonic_rows = subsonic_row_count(&this.library, cx);
+
+                if let Err(e) = outcome {
+                    this.subsonic_status = Some(rox_i18n::t!(
+                        "settings-integrations-subsonic-sync-failed",
+                        error = e
+                    ));
+                }
+
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        // A big library is walked album by album, so without this the line
+        // would sit still for minutes and read as hung.
+        cx.spawn(async move |this, cx| {
+            while rox_services::sources::syncing() {
+                cx.background_executor().timer(SUBSONIC_SYNC_POLL).await;
+
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    /// The Sources page: everywhere rox gets music from, in the order a
+    /// library grows. Folders on this machine first, then a server it
+    /// reads someone else's library off, then the streams that have no
+    /// library at all.
+    ///
+    /// The page exists because a source is configured once and listed
+    /// forever, and the listing panels were carrying both jobs. A station
+    /// is added here and played there.
+    fn sources_page(&self, q: &Query, cx: &mut Context<Self>) -> PageBody {
+        PageBody::new()
+            .section(self.folders_section(q, cx))
+            .section(self.subsonic_section(q, cx))
+            .section(self.stations_section(q, cx))
+    }
+
+    /// Saving songs off a stream. Two controls and one warning, because the
+    /// warning is the part someone has to read before turning it on: a
+    /// station flips its title a few seconds either side of the audio
+    /// switching, so what lands on disk carries a little of the song
+    /// before it or the one after. It lives on the Playback page beside
+    /// the live buffer because the two are one knob from the listener's
+    /// side: a song longer than the buffer is never saved.
+    fn capture_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        Section::new(
+            q,
+            icons::DOWNLOAD,
+            rox_i18n::t!("settings-playback-section-capture"),
+            None,
+            |rows| {
+                rows.keyed(
+                    "settings-playback-capture-enable",
+                    &[
+                        "capture", "record", "save", "rip", "radio", "station", "stream",
+                    ],
+                    panel::toggle(self.capture_enabled, Self::set_capture_enabled, cx),
+                )
+                .when(self.capture_enabled, |rows| {
+                    let folder = self.capture_folder.clone();
+
+                    // The vocabulary is the renamer's, so a pattern
+                    // learned there reads the same here, plus the two
+                    // things only a broadcast has. %skip% is left out for
+                    // the same reason the rename dialog leaves it out: it
+                    // swallows text while matching and renders nothing.
+                    let placeholders = SharedString::from(
+                        rox_core::pattern::PLACEHOLDERS
+                            .iter()
+                            .filter(|p| **p != "%skip%")
+                            .copied()
+                            .chain(["%station%", "%date%"])
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    );
+                    let sample =
+                        capture::Sample::playing(self.playback.read(cx)).unwrap_or_default();
+                    let preview =
+                        capture::preview(self.capture_pattern.read(cx).value().trim(), &sample);
+                    let pattern_input = self.capture_pattern.clone();
+                    let album_input = self.capture_album.clone();
+
+                    rows.row_dyn(
+                        &[
+                            "capture",
+                            "folder",
+                            "where",
+                            "destination",
+                            "save",
+                            "reveal",
+                        ],
+                        rox_i18n::t!("settings-playback-capture-folder"),
+                        Some(self.capture_folder.display().to_string().into()),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(tokens::SPACE_SM)
+                            .child(small_button(
+                                rox_i18n::t!("settings-playback-capture-choose"),
+                                icons::FOLDER,
+                                false,
+                                cx.listener(|this, _, window, cx| {
+                                    this.pick_capture_folder(window, cx)
+                                }),
+                            ))
+                            // Reveal creates the folder if the first capture
+                            // hasn't yet, so there's always something to open.
+                            .child(small_button(
+                                rox_i18n::t!("settings-common-reveal"),
+                                icons::FOLDER,
+                                false,
+                                move |_, _, cx| {
+                                    if let Err(e) = std::fs::create_dir_all(&folder) {
+                                        log::warn!("capture: creating the folder failed: {e}");
+                                        return;
+                                    }
+                                    cx.reveal_path(&folder);
+                                },
+                            )),
+                    )
+                    .custom(
+                        &[
+                            "capture",
+                            "pattern",
+                            "name",
+                            "naming",
+                            "folder",
+                            "structure",
+                        ],
+                        move || {
+                            panel::setting_block(
+                                rox_i18n::t!("settings-playback-capture-pattern"),
+                                Some(rox_i18n::t!(
+                                    "settings-playback-capture-pattern.description"
+                                )),
+                                None,
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(tokens::SPACE_XS)
+                                    .child(Input::new(&pattern_input).small())
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(palette::text_muted())
+                                            .child(placeholders),
+                                    )
+                                    .child(div().text_xs().text_color(palette::text_muted()).child(
+                                        SharedString::from(format!(
+                                            "{} {}",
+                                            rox_i18n::t!(
+                                                "settings-playback-capture-pattern-station"
+                                            ),
+                                            rox_i18n::t!("settings-playback-capture-pattern-date"),
+                                        )),
+                                    ))
+                                    .child(match preview {
+                                        Ok(name) => div()
+                                            .text_xs()
+                                            .text_color(palette::text_bright())
+                                            .child(rox_i18n::t!(
+                                                "settings-playback-capture-pattern-preview",
+                                                name = name
+                                            )),
+
+                                        Err(e) => div()
+                                            .text_xs()
+                                            .text_color(palette::tone_warn())
+                                            .child(SharedString::from(e)),
+                                    }),
+                            )
+                            .into_any_element()
+                        },
+                    )
+                    .custom(
+                        &["capture", "album", "tag", "station", "singles", "radio"],
+                        move || {
+                            panel::setting_block(
+                                rox_i18n::t!("settings-playback-capture-album"),
+                                Some(rox_i18n::t!("settings-playback-capture-album.description")),
+                                None,
+                                Input::new(&album_input).small(),
+                            )
+                            .into_any_element()
+                        },
+                    )
+                })
+            },
+        )
+    }
+
+    /// The capture switch. The tee in the transport reads the file, so
+    /// this writes it and then tells the service to look again.
+    fn set_capture_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.capture_enabled = on;
+        Settings::update(move |s| s.capture.enabled = on);
+        rox_services::capture::apply();
+        cx.notify();
+    }
+
+    /// Browse for the folder captures land in.
+    fn pick_capture_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = rx.await else {
+                return;
+            };
+            let Some(folder) = paths.pop() else {
+                return;
+            };
+
+            this.update(cx, |this, cx| {
+                this.capture_folder = folder.clone();
+                Settings::update(move |s| s.capture.folder = folder.clone());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Local folders, as a line and the way over to them. The table itself
+    /// stays on the Library page: it's woven into the watch limit, the
+    /// scan badge and the genre rules that read the same roots, and two
+    /// tables editing one set of folders is worse than one table a click
+    /// away.
+    fn folders_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let open = small_button(
+            rox_i18n::t!("settings-sources-folders-open"),
+            icons::LIST_MUSIC,
+            false,
+            cx.listener(|this, _, window, cx| this.open_page(Page::Library, window, cx)),
+        )
+        .into_any_element();
+        let note = div()
+            .text_xs()
+            .text_color(palette::text_muted())
+            .child(rox_i18n::t!("settings-sources-folders-note"));
+
+        Section::new(
+            q,
+            icons::FOLDER,
+            rox_i18n::t!("settings-sources-section-folders"),
+            Some(open),
+            |rows| {
+                rows.custom(
+                    &["scan", "music", "folder", "local", "disk", "library"],
+                    || note.into_any_element(),
+                )
+            },
+        )
+    }
+
+    /// The stations section: what the library holds, a row to add one by
+    /// URL, and the two ways in that aren't typing. The stations panel
+    /// lists and plays; everything that changes the list is here.
+    fn stations_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let controls = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(tokens::SPACE_XS)
+            .child(small_button(
+                rox_i18n::t!("settings-sources-stations-find"),
+                icons::SEARCH,
+                false,
+                cx.listener(|this, _, _, cx| {
+                    rox_panel_api::openers::station_directory(this.state.clone(), cx);
+                }),
+            ))
+            .child(small_button(
+                rox_i18n::t!("settings-sources-stations-import"),
+                icons::DOWNLOAD,
+                false,
+                cx.listener(|this, _, window, cx| this.import_stations(window, cx)),
+            ))
+            .into_any_element();
+
+        // The list, then the add row at its foot, where the eye lands
+        // after reading it. The folder table above takes the same shape.
+        let mut table = div().flex().flex_col();
+        if self.stations.is_empty() {
+            table = table.child(
+                div()
+                    .py(tokens::SPACE_XS)
+                    .text_color(palette::text_muted())
+                    .child(rox_i18n::t!("settings-sources-stations-none")),
+            );
+        }
+        for station in &self.stations {
+            table = table.child(self.station_row(station, cx));
+        }
+
+        let table = div()
+            .flex()
+            .flex_col()
+            .gap(tokens::SPACE_SM)
+            .child(table)
+            .child(self.station_add_row(cx))
+            .when_some(self.station_notice.clone(), |d, notice| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(palette::tone_warn())
+                        .child(notice),
+                )
+            });
+
+        Section::new(
+            q,
+            icons::RADIO,
+            rox_i18n::t!("settings-sources-section-stations"),
+            Some(controls),
+            |rows| {
+                rows.custom(
+                    &[
+                        "radio",
+                        "station",
+                        "stream",
+                        "url",
+                        "pls",
+                        "m3u",
+                        "shoutcast",
+                    ],
+                    || table.into_any_element(),
+                )
+            },
+        )
+    }
+
+    /// One station: its name over its stream, and the remove that drops
+    /// it. Unnamed stations show the URL on both lines, which is all they
+    /// have and still better than a blank row.
+    fn station_row(&self, station: &Station, cx: &mut Context<Self>) -> Stateful<Div> {
+        let url: SharedString = station.url.clone().into();
+        let name = station.name.trim();
+        let title: SharedString = if name.is_empty() {
+            url.clone()
+        } else {
+            name.to_string().into()
+        };
+        let remove = icon_button(icons::CLOSE, false, {
+            let url = station.url.clone();
+            cx.listener(move |this, _, _, cx| this.remove_station(&url, cx))
+        });
+
+        div()
+            // Named after the stream, so the row's remove button is its own
+            // rather than every other row's. See
+            // `rox_panel_kit::ui::control_focus`.
+            .id(ElementId::Name(url.clone()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(tokens::SPACE_MD)
+            .py(tokens::SPACE_XS)
+            .border_b_1()
+            .border_color(palette::border())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(title))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .child(url),
+                    ),
+            )
+            .child(remove)
+    }
+
+    /// The add row under the list: the stream, an optional name, and the
+    /// button. The URL is the identity, so it's the only field that has to
+    /// be filled in.
+    fn station_add_row(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(tokens::SPACE_SM)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.station_url)),
+            )
+            .child(div().w(px(160.)).child(Input::new(&self.station_name)))
+            .child(icon_button(
+                icons::PLUS,
+                false,
+                cx.listener(|this, _, window, cx| this.add_station(window, cx)),
+            ))
+    }
+
+    /// Write stations, then have the library rebuild its projection so the
+    /// new rows show up everywhere else too, not only in this list.
+    fn write_stations(&mut self, stations: &[Station], cx: &mut Context<Self>) -> bool {
+        let path = self.library.read(cx).db_path();
+        let Ok(mut conn) = rox_library::store::open(&path) else {
+            return false;
+        };
+
+        if let Err(e) = stations::put(&mut conn, stations) {
+            log::warn!("stations: writing {} rows failed: {e}", stations.len());
+            return false;
+        }
+
+        self.library
+            .update(cx, |library, cx| library.reload_projection(cx));
+        self.stations = read_stations(&self.library, cx);
+        cx.notify();
+        true
+    }
+
+    /// Add whatever is in the two fields. An empty URL does nothing, and a
+    /// line that isn't a stream says so rather than landing as a row that
+    /// can never play.
+    fn add_station(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.station_url.read(cx).value().trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+
+        // What counts as a stream is the import reader's rule, so typing a
+        // URL in and importing a file holding it agree on which lines rox
+        // will take.
+        let Some(mut station) = stations::import(&url).pop() else {
+            self.station_notice = Some(rox_i18n::t!("stations-not-a-stream"));
+            cx.notify();
+            return;
+        };
+
+        station.name = self.station_name.read(cx).value().trim().to_string();
+
+        if self.write_stations(&[station], cx) {
+            self.station_notice = None;
+            self.station_url
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.station_name
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+    }
+
+    /// Import a `.pls` or `.m3u` of stream URLs, which is how most people
+    /// already have their stations.
+    fn import_stations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return;
+            };
+
+            let found = stations::import(&text);
+            this.update(cx, |this, cx| {
+                // A playlist of local files is a real thing to pick by
+                // mistake, and it imports as nothing. Say so.
+                if found.is_empty() {
+                    this.station_notice = Some(rox_i18n::t!("stations-import-empty"));
+                    cx.notify();
+                    return;
+                }
+
+                if this.write_stations(&found, cx) {
+                    this.station_notice = None;
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Drop one station, then rebuild the projection the way a write does:
+    /// the row has to leave the library everywhere, not just this list.
+    fn remove_station(&mut self, url: &str, cx: &mut Context<Self>) {
+        let path = self.library.read(cx).db_path();
+        let Ok(mut conn) = rox_library::store::open(&path) else {
+            return;
+        };
+
+        if let Err(e) = stations::remove(&mut conn, url) {
+            log::warn!("stations: removing a station failed: {e}");
+            return;
+        }
+
+        self.library
+            .update(cx, |library, cx| library.reload_projection(cx));
+        self.stations = read_stations(&self.library, cx);
+        cx.notify();
     }
 
     /// The broadcast switch. Applying reads the file the field edits were
@@ -8455,23 +9435,44 @@ impl SettingsWindow {
         .detach();
     }
 
-    /// Open a page and leave search: what a sidebar click and a
-    /// result breadcrumb both do, so arriving anywhere reads the same.
-    /// Entering Storage measures the files fresh, so the numbers are
-    /// current without a per-frame stat.
+    /// Open a page: what a sidebar click and a result breadcrumb both
+    /// do, so arriving anywhere reads the same. A window-wide search
+    /// ends here, since landing on a page is leaving the results stack;
+    /// a page-bound one carries over, since the sidebar is how a bound
+    /// search picks the page it runs on. Entering Storage measures the
+    /// files fresh, so the numbers are current without a per-frame stat.
     fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
-        self.search
-            .update(cx, |search, cx| search.set_value("", window, cx));
+        if !self.search_scoped {
+            self.search
+                .update(cx, |search, cx| search.set_value("", window, cx));
+        }
         if page == Page::Storage {
             self.refresh_storage(cx);
         }
         cx.notify();
     }
 
+    /// Open the page a panel asked for, if one did. The request is a nav
+    /// key rather than a [`Page`], since the panels are a crate below this
+    /// one and the enum isn't theirs to name. A key that isn't in the
+    /// sidebar leaves the window where it was.
+    fn sync_requested_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = rox_panel_api::panel_settings::requested_app_page(cx) else {
+            return;
+        };
+
+        let Some(&(page, ..)) = PAGES.iter().find(|&&(_, label, _)| label == key) else {
+            return;
+        };
+
+        self.open_page(page, window, cx);
+    }
+
     /// One page filtered through the query: the single-page view passes
-    /// the inactive query and gets the whole page, search passes the
-    /// live one and takes the survivors.
+    /// the inactive query and gets the whole page, or the live one under
+    /// a page-bound search; the results stack passes the live one to
+    /// every page and takes the survivors.
     fn build_page(
         &mut self,
         page: Page,
@@ -8492,6 +9493,7 @@ impl SettingsWindow {
             Page::Playback => self.playback_page(q, cx),
             Page::Providers => self.providers_page(q, cx),
             Page::Shader => self.shader_page(q, window, cx),
+            Page::Sources => self.sources_page(q, cx),
             Page::Storage => self.storage_page(q, cx),
             Page::Workspace => self.workspace_page(q, cx),
             Page::Development => self.development_page(q, cx),
@@ -8511,14 +9513,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if pages.iter().all(|(_, _, _, body)| body.hits() == 0) {
-            return div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(palette::text_muted())
-                .child(rox_i18n::t!("settings-search-no-matches", text = text))
-                .into_any_element();
+            return Self::no_matches(text);
         }
         div()
             .flex()
@@ -8552,13 +9547,51 @@ impl SettingsWindow {
                                     )
                                     .child(rule())
                                     .child(svg().path(icon).size(px(14.)).flex_none())
-                                    .child(label)
+                                    .child(rox_i18n::t!(label))
                                     .child(rule()),
                             )
                             .child(body.element())
                     }),
             )
             .into_any_element()
+    }
+
+    /// What stands in for the page when a query kept nothing, at
+    /// either scope.
+    fn no_matches(text: &str) -> AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(palette::text_muted())
+            .child(rox_i18n::t!("settings-search-no-matches", text = text))
+            .into_any_element()
+    }
+
+    /// The button that binds the search to the open page, riding inside
+    /// the search box at its tail: the transport panels' flat icon
+    /// control at the menubar's glyph size. Inside the box because the
+    /// sidebar is 160px wide and a neighbour would eat the query's room.
+    /// The glyph goes accent while bound, the open-picker caret's cue.
+    fn scope_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let color = if self.search_scoped {
+            palette::accent()
+        } else {
+            palette::text_muted()
+        };
+        panel::icon_control_sized(
+            icons::FUNNEL,
+            px(12.),
+            color,
+            panel::Tip::keyed("search-scope", rox_i18n::t!("settings-search-scope")),
+            |this, cx| {
+                this.search_scoped = !this.search_scoped;
+                cx.notify();
+            },
+            cx,
+        )
+        .flex_none()
     }
 
     /// A sidebar footer row: hands something to the system (the raw
@@ -9036,10 +10069,57 @@ fn seed_root_stats(library: &Entity<Library>, cx: &App) -> Vec<(PathBuf, Stats)>
         .collect()
 }
 
+/// How many rows the library holds under the configured Subsonic server.
+/// Zero when no server is set up, or when its rows have never synced. Its
+/// own connection rather than the catalog's, since the catalog's belongs
+/// to the UI thread and this is one count on the way into a window. A
+/// database that isn't there is left alone for [`StorageInfo::measure`]'s
+/// reason: opening one creates it.
+fn subsonic_row_count(library: &Entity<Library>, cx: &App) -> usize {
+    let Some(source) = rox_services::sources::server().map(|server| server.source_id()) else {
+        return 0;
+    };
+
+    let db = library.read(cx).db_path();
+    if !db.exists() {
+        return 0;
+    }
+
+    rox_library::store::open(&db)
+        .ok()
+        .map(|conn| rox_services::sources::row_count(&conn, &source))
+        .unwrap_or(0)
+}
+
+/// Every radio station the library holds. Its own connection, opened per
+/// read rather than held, for the reason the row count above gives: this
+/// runs at the pace someone edits a list, and a held connection would sit
+/// through every scan in between. A database that isn't there yet reads as
+/// no stations.
+fn read_stations(library: &Entity<Library>, cx: &App) -> Vec<Station> {
+    let db = library.read(cx).db_path();
+    if !db.exists() {
+        return Vec::new();
+    }
+
+    rox_library::store::open(&db)
+        .ok()
+        .and_then(|conn| stations::all(&conn).ok())
+        .unwrap_or_default()
+}
+
 /// Bytes as a short human size, the shared formatter the metadata
 /// panel's size row reads too.
 fn human_size(bytes: u64) -> String {
     rox_core::fmt::fmt_bytes(bytes)
+}
+
+/// What `secs` of a stream running at `bytes_per_sec` weighs in memory,
+/// which is what the live buffer setting is really spending. A bitrate in
+/// kbps is kilobits over the wire, so the eight is the only arithmetic in
+/// it and the rest is the app's own size formatter.
+fn live_buffer_weight(bytes_per_sec: f64, secs: f64) -> String {
+    human_size((bytes_per_sec * secs).max(0.0) as u64)
 }
 
 /// A SQLite database's weight on disk: the file plus its -wal and -shm
@@ -9201,6 +10281,11 @@ impl Render for SettingsWindow {
         // the list this brings in.
         self.sync_post_shader();
 
+        // A panel can name the page it wants on the way in, and it gets
+        // read here rather than at open so a window that was already up
+        // jumps too.
+        self.sync_requested_page(window, cx);
+
         // The Shader page builds from `&self`, so the shader route
         // editor's sliders and folds are matched to the list here, before
         // any page renders. Search builds every page each keystroke, which
@@ -9209,11 +10294,14 @@ impl Render for SettingsWindow {
             .sync(self.post_shader_routes.len());
 
         // A live query builds every page and stacks the survivors; the
-        // sidebar dims the pages that kept nothing. No query builds just
-        // the picked page through the same path, with the inactive query
-        // keeping everything.
+        // sidebar dims the pages that kept nothing. Bound to the open
+        // page it builds that page alone and leaves the sidebar be, since
+        // the rest was never searched. No query builds just the picked
+        // page through the same path, with the inactive query keeping
+        // everything.
         let text = self.search.read(cx).query().trim().to_string();
         let q = Query::parse(&text);
+        let scoped = self.search_scoped;
         // The AI toggle takes the MCP and ML Models pages out of the list
         // entirely, search included: a page that isn't on offer shouldn't
         // surface its rows either.
@@ -9222,7 +10310,7 @@ impl Render for SettingsWindow {
             .copied()
             .filter(|&(page, ..)| self.ai_enabled || !matches!(page, Page::Mcp | Page::MlModels))
             .collect();
-        let results: Option<Vec<_>> = q.active().then(|| {
+        let results: Option<Vec<_>> = (q.active() && !scoped).then(|| {
             pages
                 .iter()
                 .map(|&(page, label, icon)| {
@@ -9235,6 +10323,13 @@ impl Render for SettingsWindow {
                 })
                 .collect()
         });
+        // The scope button rides inside the search box, so both are built
+        // out here: the button needs this window's context to listen
+        // against, and the box's builder only carries the box's own.
+        let scope = self.scope_button(cx).into_any_element();
+        let search = self
+            .search
+            .update(cx, |search, cx| search.element_with_suffix(Some(scope), cx));
 
         panel::window_body(player, || {
             let sidebar = sidebar()
@@ -9249,7 +10344,7 @@ impl Render for SettingsWindow {
                                 window.blur();
                             }
                         }))
-                        .child(self.search.update(cx, |search, cx| search.element(cx))),
+                        .child(search),
                 )
                 .child(settings_ui::nav_scroll(
                     "settings-nav",
@@ -9316,20 +10411,33 @@ impl Render for SettingsWindow {
                     cx,
                 ));
 
+            // A bound query that kept nothing on the page says so the
+            // way the results stack does.
             let page = match results {
                 Some(results) => self.search_results(&text, results, cx),
-                None => self
-                    .build_page(self.page, &q, columns, window, cx)
-                    .element(),
+                None => {
+                    let body = self.build_page(self.page, &q, columns, window, cx);
+                    if q.active() && body.hits() == 0 {
+                        Self::no_matches(&text)
+                    } else {
+                        body.element()
+                    }
+                }
             };
 
             div()
                 .size_full()
                 .track_focus(&self.focus)
                 // The settings shortcut everywhere: focus goes to the
-                // search box, the Apple way in.
+                // search box, the Apple way in. L answers too, since that
+                // is Focus Search in a workspace window and reaching for
+                // it here and landing on nothing is the surprise.
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "f" && event.keystroke.modifiers.secondary() {
+                    if !event.keystroke.modifiers.secondary() {
+                        return;
+                    }
+
+                    if matches!(event.keystroke.key.as_str(), "f" | "l") {
                         window.focus(&this.search.read(cx).focus_handle(cx));
                     }
                 }))
@@ -9387,8 +10495,22 @@ impl Render for SettingsWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGES, Page};
+    use super::{PAGES, Page, live_buffer_weight};
     use rox_design::assets::icons;
+
+    /// What the live buffer row prints under its slider. The setting is a
+    /// length of time and the cost is a weight of memory, so the line has
+    /// to do that conversion out loud: ten minutes of a 128 kbps stream is
+    /// 9.6 MB, and of a 320 kbps one it's two and a half times that.
+    #[test]
+    fn the_buffer_weighs_its_seconds_at_the_streams_rate() {
+        let at = |kbps: f64| kbps * 1000.0 / 8.0;
+
+        assert_eq!(live_buffer_weight(at(128.0), 600.0), "9.6 MB");
+        assert_eq!(live_buffer_weight(at(320.0), 600.0), "24.0 MB");
+        assert_eq!(live_buffer_weight(at(128.0), 30.0), "480 KB");
+        assert_eq!(live_buffer_weight(at(320.0), 43200.0), "1.7 GB");
+    }
 
     /// The key each page uses in the sidebar. Exhaustive: a new variant
     /// doesn't compile until it's named here, and the checks below then
@@ -9406,6 +10528,7 @@ mod tests {
             Page::Playback => "settings-page-playback",
             Page::Providers => "settings-page-providers",
             Page::Shader => "settings-page-shader",
+            Page::Sources => "settings-page-sources",
             Page::Storage => "settings-page-storage",
             Page::Workspace => "settings-page-workspace",
             Page::Development => "settings-page-development",
@@ -9424,6 +10547,7 @@ mod tests {
         Page::Playback,
         Page::Providers,
         Page::Shader,
+        Page::Sources,
         Page::Storage,
         Page::Workspace,
         Page::Development,
@@ -9454,6 +10578,20 @@ mod tests {
         let mut want = labels.clone();
         want.sort();
         assert_eq!(labels, want, "the sidebar is out of alphabetical order");
+    }
+
+    /// A panel opening this window on one of its pages dispatches the
+    /// action by name, since the type is declared up in the workspace and
+    /// the panels are two crates below it. The name is a string on that
+    /// side, so it's held to the real one here.
+    #[test]
+    fn the_panels_name_the_action_that_opens_this_window() {
+        use gpui::Action as _;
+
+        assert_eq!(
+            crate::workspace::OpenSettings.name(),
+            rox_panel_api::panel_settings::SETTINGS_ACTION
+        );
     }
 
     /// The shader has its own page, under the icon the panel

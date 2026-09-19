@@ -35,6 +35,7 @@ pub mod shader;
 pub mod spacer;
 pub mod spectrogram;
 pub mod spectrum;
+pub mod stations;
 pub mod stats_widget;
 pub mod status;
 pub mod theme_toggle;

@@ -84,9 +84,9 @@ extensions rather than core code ([scope](../01-product/03-scope.md)). The struc
 above already has the seams that matter, so honoring the constraint costs two calls,
 not a redesign:
 
-- **Track identity is source-qualified.** The library keys tracks by (source, id), and
-  local files are the first source. This is the part that's cheap in the initial schema
-  and a painful migration to retrofit, and it keeps a unified multi-source library
+- **Track identity is source-qualified.** The library keys tracks by (source, path, sub),
+  and local files are the first source. This is the part that's cheap in the initial
+  schema and a painful migration to retrofit, and it keeps a unified multi-source library
   possible.
 - **Playback is already a contract.** Commands in, state out, PCM tap out. A source
   that can provide rox decodable audio (Tidal streams, yt-dlp, librespot's decoded
@@ -95,8 +95,11 @@ not a redesign:
   fallback tap so visualizers still work when the audio plays on this machine. The
   visualizer subsystem drains the same ring either way.
 
-The extension host mechanism (WASM in the style of Zed, or a subprocess model) is
-undecided.
+What a source is, and how the first ones arrive, is
+[ADR 29](decisions/29-adr-source-contract.md): a library provider plus a playback provider
+behind one trait, with the first two written in-process. The extension host mechanism (WASM
+in the style of Zed, or a subprocess model) is still open, and gets decided later on what
+those two sources show about the trait.
 
 ## Decisions (ADRs)
 
@@ -133,3 +136,4 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [26 - Last.fm sessions](decisions/26-adr-lastfm-sessions.md) | One session per api key, so builds stop invalidating each other | Decided |
 | [27 - i18n](decisions/27-adr-i18n.md) | Fluent messages and ICU4X formatting behind one locale static, en-CA as source | Decided |
 | [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Decided |
+| [29 - Source contract](decisions/29-adr-source-contract.md) | In-process sources behind one trait, host deferred | Proposed |

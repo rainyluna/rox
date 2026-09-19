@@ -31,18 +31,20 @@
 //! sides out of sync with nothing on screen to say so. The mirror only
 //! pushes: nothing here reads Last.fm's loved list back.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
 
 use rox_library::cue::TrackKey;
 use rox_library::store::TrackMeta;
+use rox_playback::IcyTitle;
 
 use rox_core::settings::{Lastfm, LastfmSession, Settings, clamp_threshold};
 
 use crate::catalog::{Library, LibraryEvent};
 use crate::player::Player;
+use crate::radio::{Radio, TitleChanged, live_tags};
 
 // The signing, the call that sends it, and the identity it signs with all
 // are in rox-net now; the scrobbler uses them through the same paths it
@@ -134,6 +136,85 @@ fn started_event(
     })
 }
 
+/// The listen a watch files: its identity, the row behind it, and the tag
+/// snapshot the event row keeps beside them. Its own function because two
+/// things file one now: the threshold crossing on a track with a length,
+/// and a station's turnover on a stream without one.
+fn listened_event(watch: &Watch) -> Listened {
+    Listened {
+        key: watch.key.clone(),
+        track_id: watch.id,
+        title: watch.tag(|m| &m.title),
+        artist: watch.tag(|m| &m.artist),
+        album: watch.tag(|m| &m.album),
+        genre: watch.tag(|m| &m.genre),
+        started: watch.started,
+        duration_secs: watch.duration,
+    }
+}
+
+/// The crossing a watch announces to every scrobble destination, the same
+/// snapshot minus the fields only history keeps.
+fn crossed_event(watch: &Watch) -> Crossed {
+    Crossed {
+        key: watch.key.clone(),
+        title: watch.tag(|m| &m.title),
+        artist: watch.tag(|m| &m.artist),
+        album: watch.tag(|m| &m.album),
+        started: watch.started,
+        duration_secs: watch.duration,
+    }
+}
+
+/// How many of a station's songs are remembered as filed. About an hour of
+/// radio, which is as much of a broadcast as the buffer will ever hold, so
+/// anything that rolls off this list is older than anything a listener can
+/// step back to.
+const FILED_SONGS: usize = 16;
+
+/// Whether a turnover files the song that just ended. Only a stream's
+/// watch closes this way: a file has a length and crosses the ordinary
+/// rules on its own clock, so closing it here would file it twice. The
+/// floor is the same thirty seconds the rest of the rules draw, which keeps
+/// a jingle or a station ID between songs from counting as one.
+fn closes_on_turnover(watch: &Watch) -> bool {
+    watch.duration.is_none() && watch.played >= MIN_TRACK_SECS
+}
+
+/// Whether this station song has already been filed, which on a buffered
+/// stream is a real question rather than a paranoid one.
+///
+/// The turnover fires as the playhead passes a title mark in the buffer,
+/// and a listener stepping back into the previous song and playing forward
+/// passes two of them again. Without this the songs either side of where
+/// they stepped back get a second listen apiece, which is a history panel
+/// showing an evening that didn't happen.
+///
+/// Remembered by title against the station rather than timed against the
+/// buffer's own window. [`FILED_SONGS`] covers about an hour of radio,
+/// which is the longest buffer anyone can set, and a station that plays the
+/// same song twice inside one is a station repeating itself rather than a
+/// listener rewinding.
+fn already_filed(filed: &VecDeque<(TrackKey, IcyTitle)>, key: &TrackKey, title: &IcyTitle) -> bool {
+    filed
+        .iter()
+        .any(|(station, song)| station == key && song == title)
+}
+
+/// Note a station song as filed, dropping the oldest once the memory is
+/// full.
+fn remember_filed(filed: &mut VecDeque<(TrackKey, IcyTitle)>, song: (TrackKey, IcyTitle)) {
+    if already_filed(filed, &song.0, &song.1) {
+        return;
+    }
+
+    if filed.len() >= FILED_SONGS {
+        filed.pop_front();
+    }
+
+    filed.push_back(song);
+}
+
 /// The wall clock as unix seconds, the scrobble timestamp's unit.
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -182,12 +263,21 @@ struct Watch {
     crossed: bool,
     /// The Last.fm scrobble itself went out.
     scrobbled: bool,
+    /// The station title this watch was armed on, None for a file. Kept so
+    /// closing it can say which song was filed, since the tags it holds
+    /// have been folded into the station's row by then.
+    live_title: Option<IcyTitle>,
     /// Where the scrobble rule crossed, 0 to 1: stamped once so the
     /// marker stays put after the fact instead of trailing later seeks.
     scrobble_at: Option<f32>,
 }
 
 impl Watch {
+    /// One tag off the library's row, empty for a track it holds none for.
+    fn tag(&self, pick: fn(&TrackMeta) -> &String) -> String {
+        self.meta.as_ref().map(pick).cloned().unwrap_or_default()
+    }
+
     /// Project where the scrobble crossing falls, 0 to 1: the current
     /// position plus the listening still owed against the threshold.
     /// Seeked past the end it returns None: this play can't reach the
@@ -288,6 +378,11 @@ pub struct Scrobbler {
     threshold: f32,
     phase: AuthPhase,
     watch: Option<Watch>,
+    /// Station songs already filed, newest last. The buffer lets a listener
+    /// cross the same title mark more than once, and each crossing is a
+    /// turnover; this is what keeps the second one from filing a listen
+    /// that never happened. See [`already_filed`].
+    filed: VecDeque<(TrackKey, IcyTitle)>,
     /// The favourite track ids as the mirror last saw them, the diff's
     /// other side. None until there's a set worth trusting: a snapshot
     /// taken before the library loaded would read an empty catalog as
@@ -299,8 +394,15 @@ pub struct Scrobbler {
     /// Why the last push gave up, for the settings page. A love that fails
     /// silently is two sides out of sync with nothing on screen to say so.
     love_error: Option<SharedString>,
+    /// The live-title service over the same player, built by the app and
+    /// shared through `AppState`. The scrobbler was where it lived when
+    /// the turnover was the only thing anyone acted on; the backdrop's
+    /// art lookup wants the same one, and two of them over one player
+    /// would each announce every song.
+    radio: Entity<Radio>,
     _player_changed: Subscription,
     _library_changed: Subscription,
+    _radio_changed: Subscription,
 }
 
 impl EventEmitter<Listened> for Scrobbler {}
@@ -308,7 +410,12 @@ impl EventEmitter<Started> for Scrobbler {}
 impl EventEmitter<Crossed> for Scrobbler {}
 
 impl Scrobbler {
-    pub fn new(player: &Entity<Player>, library: &Entity<Library>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        player: &Entity<Player>,
+        library: &Entity<Library>,
+        radio: &Entity<Radio>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The player's pump notifies every tick while a session runs, so
         // observing it is the scrobbler's whole clock.
         let _player_changed = cx.observe(player, |this: &mut Self, player, cx| {
@@ -330,6 +437,13 @@ impl Scrobbler {
                 _ => {}
             },
         );
+        // The turnover signal a station play needs, on the same player.
+        // A stream's watch has no duration and no track boundary, so this
+        // is the only thing that can tell the scrobbler a song ended.
+        let _radio_changed = cx.subscribe(radio, |this: &mut Self, _, event: &TitleChanged, cx| {
+            this.on_turnover(&event.key, &event.title, cx);
+        });
+
         let settings = Settings::load();
         Scrobbler {
             library: library.clone(),
@@ -338,13 +452,22 @@ impl Scrobbler {
             threshold: settings.scrobble_threshold,
             phase: AuthPhase::Idle,
             watch: None,
+            filed: VecDeque::new(),
             favourites: None,
             loves: LoveQueue::default(),
             sending: false,
             love_error: None,
+            radio: radio.clone(),
             _player_changed,
             _library_changed,
+            _radio_changed,
         }
+    }
+
+    /// The live-title service this scrobbler watches, the same one the app
+    /// shares; `AppState::radio` is the ordinary way to it.
+    pub fn radio(&self) -> &Entity<Radio> {
+        &self.radio
     }
 
     /// The live config, the settings window's and the panels' read.
@@ -851,7 +974,13 @@ impl Scrobbler {
             .map(|watch| watch.key != now.key)
             .unwrap_or(true);
         if changed {
-            self.begin_watch(now.key.clone(), now.duration_secs, now.position_secs, cx);
+            self.begin_watch(
+                now.key.clone(),
+                now.duration_secs,
+                now.position_secs,
+                None,
+                cx,
+            );
         } else {
             let watch = self.watch.as_mut().expect("watch exists when unchanged");
             if now.duration_secs.is_some() {
@@ -863,7 +992,13 @@ impl Scrobbler {
             } else if delta < -5.0 && watch.listened && now.position_secs < 5.0 {
                 // Back to the top after a counted listen (a loop restart
                 // or a replay) counts as a fresh play.
-                self.begin_watch(now.key.clone(), now.duration_secs, now.position_secs, cx);
+                self.begin_watch(
+                    now.key.clone(),
+                    now.duration_secs,
+                    now.position_secs,
+                    None,
+                    cx,
+                );
                 return;
             }
             watch.last_pos = now.position_secs;
@@ -895,32 +1030,8 @@ impl Scrobbler {
         if let Some(watch) = self.watch.as_mut() {
             if listens && !watch.listened {
                 watch.listened = true;
-                cx.emit(Listened {
-                    key: watch.key.clone(),
-                    track_id: watch.id,
-                    title: watch
-                        .meta
-                        .as_ref()
-                        .map(|m| m.title.clone())
-                        .unwrap_or_default(),
-                    artist: watch
-                        .meta
-                        .as_ref()
-                        .map(|m| m.artist.clone())
-                        .unwrap_or_default(),
-                    album: watch
-                        .meta
-                        .as_ref()
-                        .map(|m| m.album.clone())
-                        .unwrap_or_default(),
-                    genre: watch
-                        .meta
-                        .as_ref()
-                        .map(|m| m.genre.clone())
-                        .unwrap_or_default(),
-                    started: watch.started,
-                    duration_secs: watch.duration,
-                });
+                let event = listened_event(watch);
+                cx.emit(event);
             }
             // Pin the marker at the crossing, armed or not: where the
             // threshold fell is a fact of the play, not of the account.
@@ -938,17 +1049,8 @@ impl Scrobbler {
             if scrobbles && !watch.crossed {
                 watch.crossed = true;
                 if scrobbling {
-                    let tag = |pick: fn(&TrackMeta) -> &String| {
-                        watch.meta.as_ref().map(pick).cloned().unwrap_or_default()
-                    };
-                    cx.emit(Crossed {
-                        key: watch.key.clone(),
-                        title: tag(|m| &m.title),
-                        artist: tag(|m| &m.artist),
-                        album: tag(|m| &m.album),
-                        started: watch.started,
-                        duration_secs: watch.duration,
-                    });
+                    let event = crossed_event(watch);
+                    cx.emit(event);
                 }
             }
         }
@@ -998,17 +1100,30 @@ impl Scrobbler {
     /// Point the watch at a track that just came up. The listened clock
     /// starts empty no matter where the position is, so a track opened
     /// mid-way still has to play its share.
+    ///
+    /// `live` is a station's in-band title, present only on a turnover. The
+    /// row it resolves is still the station's, since that's the thing in
+    /// the library that's playing; what the stream said replaces the tags
+    /// on top of it.
     fn begin_watch(
         &mut self,
         key: TrackKey,
         duration: Option<f64>,
         position: f64,
+        live: Option<&IcyTitle>,
         cx: &mut Context<Self>,
     ) {
+        let refiled = live.is_some_and(|title| already_filed(&self.filed, &key, title));
         let resolved = self.library.read(cx).resolve_key(&key);
         let (id, meta) = match resolved {
             Some((id, meta)) => (Some(id), Some(meta)),
             None => (None, None),
+        };
+
+        let meta = match live {
+            Some(title) => Some(live_tags(meta, title)),
+
+            None => meta,
         };
         // The start signal goes out here rather than at the caller, so a
         // track that loops back to the top announces itself as a fresh
@@ -1034,11 +1149,91 @@ impl Scrobbler {
             played: 0.0,
             last_pos: position,
             now_playing_sent: false,
-            listened: false,
-            crossed: false,
-            scrobbled: false,
+            // A song the buffer has already carried past once is armed as
+            // filed, so hearing it again through a step backwards doesn't
+            // file it twice. See [`Scrobbler::filed`].
+            listened: refiled,
+            crossed: refiled,
+            scrobbled: refiled,
             scrobble_at: None,
+            live_title: live.cloned(),
         });
+    }
+
+    /// A station moved to the next song. Everything else in rox learns a
+    /// track ended because the engine opened the next one; a stream never
+    /// does that, so the title change is the whole boundary. It closes the
+    /// song that just finished and opens a watch on the one that started.
+    ///
+    /// Guarded on the key so a turnover published a tick after a skip away
+    /// from the station doesn't land on whatever is playing now.
+    fn on_turnover(&mut self, key: &TrackKey, title: &IcyTitle, cx: &mut Context<Self>) {
+        let Some(watch) = self.watch.as_ref() else {
+            return;
+        };
+        if &watch.key != key {
+            return;
+        }
+
+        let position = watch.last_pos;
+        self.close_stream_watch(cx);
+        self.begin_watch(key.clone(), None, position, Some(title), cx);
+    }
+
+    /// File the song a stream just finished. The threshold rules divide by
+    /// a duration a station doesn't have, so a stream's watch never crosses
+    /// them on its own; the turnover is where it counts instead, and a song
+    /// that really ended is a better fact than a threshold ever was.
+    ///
+    /// The floor is the same thirty seconds everything else here draws: a
+    /// station announcing a jingle or a station ID between songs shouldn't
+    /// file a listen.
+    fn close_stream_watch(&mut self, cx: &mut Context<Self>) {
+        let scrobbling = self.scrobbling;
+        let armed = self.armed();
+
+        let Some(watch) = self.watch.as_mut() else {
+            return;
+        };
+
+        if !closes_on_turnover(watch) {
+            return;
+        }
+
+        let listen = (!watch.listened).then(|| {
+            watch.listened = true;
+            listened_event(watch)
+        });
+        let crossed = (!watch.crossed && scrobbling).then(|| {
+            watch.crossed = true;
+            crossed_event(watch)
+        });
+        let scrobble = armed && !watch.scrobbled;
+        if scrobble {
+            watch.scrobbled = true;
+        }
+
+        // What went out is what mustn't go out again if the listener steps
+        // back over this song in the buffer and plays it forward.
+        let filed = listen.is_some() || crossed.is_some() || scrobble;
+        let song = watch
+            .live_title
+            .clone()
+            .map(|title| (watch.key.clone(), title));
+
+        if let Some(listen) = listen {
+            cx.emit(listen);
+        }
+        if let Some(crossed) = crossed {
+            cx.emit(crossed);
+        }
+        if scrobble {
+            self.submit("track.scrobble", cx);
+        }
+
+        if let Some(song) = song.filter(|_| filed) {
+            remember_filed(&mut self.filed, song);
+        }
     }
 
     /// Send the watched track to the API: the params the two track
@@ -1127,7 +1322,44 @@ mod tests {
             crossed: false,
             scrobbled: false,
             scrobble_at: None,
+            live_title: None,
         }
+    }
+
+    /// Stepping back through the buffer crosses title marks that have
+    /// already been crossed, and each crossing is a turnover. The song
+    /// filed on the way past the first time must not be filed again on the
+    /// way past the second.
+    #[test]
+    fn a_song_filed_once_is_not_filed_again_on_the_way_back_through() {
+        let station = TrackKey::from(std::path::PathBuf::from("http://example.invalid/live"));
+        let other = TrackKey::from(std::path::PathBuf::from("http://example.invalid/other"));
+        let song = |name: &str| IcyTitle {
+            artist: "Boards of Canada".into(),
+            title: name.into(),
+        };
+
+        let mut filed = VecDeque::new();
+        remember_filed(&mut filed, (station.clone(), song("Roygbiv")));
+
+        assert!(already_filed(&filed, &station, &song("Roygbiv")));
+        assert!(!already_filed(&filed, &station, &song("Olson")));
+        assert!(
+            !already_filed(&filed, &other, &song("Roygbiv")),
+            "another station's song is its own"
+        );
+
+        // Filing the same one twice doesn't spend two slots.
+        remember_filed(&mut filed, (station.clone(), song("Roygbiv")));
+        assert_eq!(filed.len(), 1);
+
+        // And the memory rolls, so a song older than any buffer stops
+        // standing in the way of a station that really did play it again.
+        for n in 0..FILED_SONGS {
+            remember_filed(&mut filed, (station.clone(), song(&format!("track {n}"))));
+        }
+        assert_eq!(filed.len(), FILED_SONGS);
+        assert!(!already_filed(&filed, &station, &song("Roygbiv")));
     }
 
     #[test]
@@ -1268,5 +1500,76 @@ mod tests {
         // A file the library doesn't hold has no artist or title to send,
         // so nothing goes out about it.
         assert!(started_event(&key, None, Some(151.0)).is_none());
+    }
+
+    /// A station's row as the library holds it: the station's name in the
+    /// title, no length, and nothing else worth naming.
+    fn station_row(name: &str) -> TrackMeta {
+        TrackMeta {
+            title: name.into(),
+            artist: String::new(),
+            album: String::new(),
+            track_no: 0,
+            album_artist: String::new(),
+            year: 0,
+            genre: "Jazz".into(),
+            duration_ms: 0,
+            codec: String::new(),
+            bitrate_kbps: 0,
+            sample_rate_hz: 0,
+            bit_depth: 0,
+            rating: 0,
+        }
+    }
+
+    fn stream_watch(played: f64) -> Watch {
+        let mut watch = watch(0.0, played, played);
+        watch.duration = None;
+        watch
+    }
+
+    /// A stream's watch never crosses the threshold rules, which divide by
+    /// a length it doesn't have. The turnover files it instead, and only
+    /// once the song ran long enough to be one.
+    #[test]
+    fn a_turnover_files_a_stream_that_played_long_enough() {
+        assert!(closes_on_turnover(&stream_watch(60.0)));
+
+        // A jingle or a station ID between songs is not a listen.
+        assert!(!closes_on_turnover(&stream_watch(10.0)));
+
+        // A file with a real length is left to its own clock; closing it
+        // here would file it a second time.
+        assert!(!closes_on_turnover(&watch(200.0, 60.0, 60.0)));
+    }
+
+    /// What the turnover files: the song the stream named, against the
+    /// station's own library row. The row id doesn't move, because the
+    /// station is the thing in the library that played.
+    #[test]
+    fn a_turnover_files_the_song_against_the_stations_row() {
+        let mut watch = stream_watch(60.0);
+        watch.id = Some(42);
+        watch.meta = Some(live_tags(
+            Some(station_row("Jazz Forever")),
+            &IcyTitle {
+                artist: "Miles Davis".into(),
+                title: "So What".into(),
+            },
+        ));
+
+        let listen = listened_event(&watch);
+        assert_eq!(listen.track_id, Some(42), "the station's row played");
+        assert_eq!(listen.title, "So What");
+        assert_eq!(listen.artist, "Miles Davis");
+        assert_eq!(listen.album, "Jazz Forever", "the station stands in");
+        assert_eq!(listen.genre, "Jazz", "off the row, not the stream");
+        assert_eq!(listen.duration_secs, None, "a stream still has no length");
+
+        // The crossing every scrobble destination sends on carries the
+        // same song.
+        let crossed = crossed_event(&watch);
+        assert_eq!(crossed.title, "So What");
+        assert_eq!(crossed.artist, "Miles Davis");
     }
 }

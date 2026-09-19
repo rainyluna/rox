@@ -347,6 +347,8 @@ mod tests {
         bit_depth: u8,
     ) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             title_sort: String::new(),
             artist_sort: String::new(),
             album_artist_sort: String::new(),

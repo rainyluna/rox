@@ -11,10 +11,24 @@
 //! file, and a save writes it back where it came from: the embedded tag
 //! through the writer's atomic layer, or the `.lrc` sidecar or app lyrics
 //! store as a plain file. Lyrics aren't in the library projection, so a
-//! save just re-reads the file.
+//! save just re-reads the file. While that window is open it hands its
+//! unsaved draft back here on every keystroke, so nudging a sheet's offset
+//! moves the words in the panel as the arrow is pressed.
+//!
+//! Not every track is a file, and the two that aren't still get all of
+//! this. What a sheet is filed under is a [`Subject`] rather than a path:
+//! a Subsonic song under the id its server keeps handing back, and a radio
+//! station's song under the artist and title it announced in band, since
+//! the station's own row names the station for the whole broadcast.
+//!
+//! A station's words are timed against the song and not the listen, and
+//! only when we heard the song begin. Tuning in lands in the middle of
+//! whatever is on and the announcement that names it says nothing about
+//! how far in, so that first song reads as a plain unsynced sheet however
+//! the provider timed it. From the next turnover on the clock is real and
+//! the sheet follows.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,7 +43,9 @@ use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, Sizable};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::TrackKey;
-use rox_library::lyrics::{self, Lyrics, active_line, weave_rests};
+use rox_library::lyrics::{self, Lyrics, Subject, active_line, weave_rests};
+use rox_services::lyrics::LyricsTarget;
+use rox_services::player::song_clock;
 use rox_viz::curve;
 use serde::{Deserialize, Serialize};
 
@@ -254,19 +270,47 @@ impl Default for LyricsConfig {
     }
 }
 
+/// The lyrics target with what it was built from beside it. Building one
+/// resolves the catalog and the render asks every frame, so the answer is
+/// kept until the thing it was built from moves: the shown track, or the
+/// song a station is announcing. A library update drops it too, which is
+/// when the tags underneath could have changed.
+struct TargetCache {
+    key: TrackKey,
+    /// The station-title revision the song was taken at, and what tells a
+    /// held answer from a stale one without taking the title lock.
+    rev: u64,
+    /// None for a station between announcements, which has no song under
+    /// it to find words for.
+    built: Option<LyricsTarget>,
+}
+
 pub struct LyricsPanel {
     state: AppState,
     config: LyricsConfig,
-    /// The loaded lyrics keyed by the track they belong to; None inside
-    /// means that track has none. The flag is that track's "no lyrics"
-    /// mark, read with the sheet so the empty face can tell a marked
-    /// track from one nothing was ever found for without a stat per
-    /// frame. Cleared on a library update or a save, so the next render
-    /// re-reads.
-    loaded: Option<(PathBuf, Option<Arc<Lyrics>>, bool)>,
-    /// The track a load is running for, so a render can tell "already
+    /// The loaded lyrics keyed by the subject they belong to; None inside
+    /// means that subject has none. The flag is its "no lyrics" mark, read
+    /// with the sheet so the empty face can tell a marked track from one
+    /// nothing was ever found for without a stat per frame. Cleared on a
+    /// library update or a save, so the next render re-reads.
+    ///
+    /// The subject is what keeps a station honest. A stream holds one URL
+    /// for hours and turns its song over underneath, so a key built off
+    /// the track would pin the first song's words up for the rest of the
+    /// broadcast; the announced song is part of the subject, so the next
+    /// song is a different key and reads as the miss it is.
+    loaded: Option<(Subject, Option<Arc<Lyrics>>, bool)>,
+    /// The subject a load is running for, so a render can tell "already
     /// fetching" from "needs a fetch".
-    pending: Option<PathBuf>,
+    pending: Option<Subject>,
+    /// The edit window's unsaved draft, shown in place of whatever is
+    /// stored for as long as that window is open. This is what puts an
+    /// offset nudge on screen the moment the arrow is pressed instead of
+    /// at the save.
+    preview: Option<(Subject, Arc<Lyrics>)>,
+    /// The cached lyrics target, so a render never re-resolves the
+    /// catalog.
+    target: Option<TargetCache>,
     /// Discards stale load results when the track changes mid-read.
     generation: u64,
     /// The cached source resolve, so the pump's per-frame notifies never
@@ -318,9 +362,12 @@ pub struct LyricsPanel {
     /// The empty face's measured size, so it can flow its line and search
     /// button inline once the panel is too short to stack them.
     empty_size: Size<Pixels>,
-    /// The track auto-search has already fired for, so it runs once per
-    /// track no matter how many frames the empty face paints.
-    auto_tried: Option<PathBuf>,
+    /// The subject auto-search has already fired for, so it runs once per
+    /// track no matter how many frames the empty face paints. A subject
+    /// rather than a track for the same reason the sheet cache is one: a
+    /// station would otherwise look its first song up and then sit there
+    /// wordless for every song after it.
+    auto_tried: Option<Subject>,
     focus: FocusHandle,
     tab_panel: Option<WeakEntity<TabPanel>>,
     _player_changed: Subscription,
@@ -354,6 +401,7 @@ impl LyricsPanel {
                 }
                 this.resolved.invalidate();
                 this.loaded = None;
+                this.target = None;
                 cx.notify();
             },
         );
@@ -365,6 +413,8 @@ impl LyricsPanel {
             config,
             loaded: None,
             pending: None,
+            preview: None,
+            target: None,
             generation: 0,
             resolved: ResolvedTrack::default(),
             display: None,
@@ -394,28 +444,102 @@ impl LyricsPanel {
         }
     }
 
-    /// Make sure the lyrics for `path` are cached or on their way: read
-    /// the file off the UI thread and swap the result in when done.
-    fn ensure_loaded(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if self.loaded.as_ref().map(|(p, ..)| p.as_path()) == Some(path)
-            || self.pending.as_deref() == Some(path)
+    /// The station-title revision the shown track sits at: the number that
+    /// moves when a stream announces its next song. Zero unless the shown
+    /// track is the live one playing, so a file and a selection both key
+    /// on nothing but themselves.
+    fn live_rev(&self, key: &TrackKey, cx: &App) -> u64 {
+        let player = self.state.player.read(cx);
+        match player.now_playing() {
+            Some(now) if now.live && now.key == *key => player.title_rev().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// What the panel files and looks a sheet up under, with the provider
+    /// query beside it. Cached against the track and the announced song,
+    /// since building one resolves the catalog and the render asks every
+    /// frame.
+    ///
+    /// None for a station that hasn't named a song yet, the one track with
+    /// nothing to go on: its row says what the station is called and there
+    /// is no song under it to find words for.
+    fn target(&mut self, key: &TrackKey, cx: &App) -> Option<&LyricsTarget> {
+        // The revision is an atomic; the title behind it is a lock and a
+        // pair of string clones, so only a frame where a station actually
+        // moved on goes and takes one. That is what the player publishes a
+        // revision for.
+        let rev = self.live_rev(key, cx);
+        if self.target.as_ref().map(|cache| (&cache.key, cache.rev)) != Some((key, rev)) {
+            let song = (rev > 0)
+                .then(|| self.state.player.read(cx).live_title())
+                .flatten();
+            let built =
+                rox_services::lyrics::target_for(&self.state.library, key, song.as_ref(), cx);
+            self.target = Some(TargetCache {
+                key: key.clone(),
+                rev,
+                built,
+            });
+        }
+
+        self.target.as_ref().and_then(|cache| cache.built.as_ref())
+    }
+
+    /// Whether a timed sheet can be followed against this track. A file
+    /// plays from its own zero, so always.
+    ///
+    /// A station only once we heard the song begin. Tuning in lands in the
+    /// middle of whatever is on and the announcement naming it says
+    /// nothing about how far in, so following the stamps would light lines
+    /// a minute or two off the words. Those same words still read fine as
+    /// an unsynced sheet, which is where the plain face takes them.
+    fn can_sync(&self, key: &TrackKey, cx: &App) -> bool {
+        match self.state.player.read(cx).now_playing() {
+            Some(now) if now.live && now.key == *key => now.song_from_start,
+            // Nothing timing against this track, so there is no clock here
+            // to be wrong about.
+            _ => true,
+        }
+    }
+
+    /// The shown track's tags with a station's announced song laid over
+    /// them. A stream's library row names the station and never moves, so
+    /// anything that reads a title or an artist off the row has to come
+    /// through here or it reads the station's name where the song belongs.
+    fn live_meta(&self, key: &TrackKey, cx: &App) -> Option<rox_library::store::TrackMeta> {
+        let row = self.state.library.read(cx).meta_for_key(key);
+        let player = self.state.player.read(cx);
+        match player.now_playing() {
+            Some(now) if now.key == *key => player.live_over(row),
+            _ => row,
+        }
+    }
+
+    /// Make sure the lyrics for `subject` are cached or on their way: read
+    /// them off the UI thread and swap the result in when done. A file
+    /// checks its sidecars, the store and its tag; anything else has only
+    /// the store, and reads it the same way.
+    fn ensure_loaded(&mut self, subject: &Subject, cx: &mut Context<Self>) {
+        if self.loaded.as_ref().map(|(s, ..)| s) == Some(subject)
+            || self.pending.as_ref() == Some(subject)
         {
             return;
         }
-        self.pending = Some(path.to_path_buf());
+        self.pending = Some(subject.clone());
         self.generation += 1;
         let generation = self.generation;
-        let path = path.to_path_buf();
+        let subject = subject.clone();
         cx.spawn(async move |this, cx| {
             let (loaded, marked) = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
+                    let subject = subject.clone();
                     async move {
                         let dir = lyrics_dir();
                         (
-                            lyrics::load(&path, Some(&dir)).map(Arc::new),
-                            lyrics::marked_none(&path, Some(&dir)),
+                            lyrics::load(&subject, Some(&dir)).map(Arc::new),
+                            lyrics::marked_none(&subject, Some(&dir)),
                         )
                     }
                 })
@@ -427,13 +551,10 @@ impl LyricsPanel {
                 this.pending = None;
                 // A different track's sheet reads from the top, not from
                 // wherever the previous track's scroll was.
-                if this.loaded.as_ref().map(|(p, ..)| p.as_path()) != Some(path.as_path()) {
-                    let base = this.scroll.0.borrow().base_handle.clone();
-                    base.set_offset(Default::default());
-                    this.text_scroll.set_offset(Default::default());
-                    this.glide_to = None;
+                if this.loaded.as_ref().map(|(s, ..)| s) != Some(&subject) {
+                    this.rewind();
                 }
-                this.loaded = Some((path, loaded, marked));
+                this.loaded = Some((subject, loaded, marked));
                 cx.notify();
             })
             .ok();
@@ -441,22 +562,38 @@ impl LyricsPanel {
         .detach();
     }
 
-    /// The lyrics loaded for `path`, or None while still loading or when
-    /// the track has none.
-    fn lyrics_for(&self, path: &Path) -> Option<&Arc<Lyrics>> {
+    /// Send both faces back to the top and drop the follow glide, for a
+    /// sheet that has been swapped out from under them.
+    fn rewind(&mut self) {
+        let base = self.scroll.0.borrow().base_handle.clone();
+        base.set_offset(Default::default());
+        self.text_scroll.set_offset(Default::default());
+        self.glide_to = None;
+    }
+
+    /// The lyrics to show for `subject`: the edit window's unsaved draft
+    /// while one is open on it, otherwise what was loaded. None while a
+    /// load is still out or when the subject has no words.
+    fn lyrics_for(&self, subject: &Subject) -> Option<&Arc<Lyrics>> {
+        if let Some((at, draft)) = &self.preview
+            && at == subject
+        {
+            return Some(draft);
+        }
+
         self.loaded
             .as_ref()
-            .filter(|(p, ..)| p == path)
+            .filter(|(s, ..)| s == subject)
             .and_then(|(_, lyrics, _)| lyrics.as_ref())
     }
 
-    /// Whether `path` is marked as having no lyrics, from the last load
+    /// Whether `subject` is marked as having no lyrics, from the last load
     /// rather than a fresh look at the store, so the empty face costs no
     /// IO however many frames it paints. False while a load is still out.
-    fn marked_for(&self, path: &Path) -> bool {
+    fn marked_for(&self, subject: &Subject) -> bool {
         self.loaded
             .as_ref()
-            .is_some_and(|(p, _, marked)| p == path && *marked)
+            .is_some_and(|(s, _, marked)| s == subject && *marked)
     }
 
     /// The version of `raw` the synced face steps through: the same sheet with the
@@ -541,9 +678,13 @@ impl LyricsPanel {
         let Some(key) = self.resolved.get(self.config.source, &self.state, cx) else {
             return;
         };
-        // The editor writes the file's own sheet, so it takes the path:
-        // lyrics storage is per file, cue tracks of one image share one.
-        rox_panel_api::openers::lyrics_edit(self.state.clone(), key.path, cx);
+        // The editor works on the subject, not the track: lyrics storage
+        // is per file for a file, and cue tracks of one image share one.
+        // A station with nothing announced has no song to edit yet.
+        let Some(target) = self.target(&key, cx).cloned() else {
+            return;
+        };
+        rox_panel_api::openers::lyrics_edit(self.state.clone(), target, cx);
     }
 
     /// The timestamp `steps` sung lines away from the active one: forward
@@ -588,7 +729,10 @@ impl LyricsPanel {
             .read(cx)
             .now_playing()
             .filter(|now| now.key == *key)
-            .map(|now| now.position_secs)
+            // A station's own clock counts the listen, which is the
+            // evening rather than the song, and a sheet is timed from the
+            // song's top. For a file the two are the same number.
+            .map(|now| song_clock(now.position_secs, now.song_start_secs))
     }
 
     /// Whether a pump tick is worth a repaint. Only a synced sheet under a
@@ -602,16 +746,20 @@ impl LyricsPanel {
             // sheet was up.
             return self.loaded.is_some() || self.pending.is_some();
         };
-        let path = key.path.as_path();
-        // A different track needs a load and a fresh face; let the render
+        // A stream's turnover reads as a different subject down here, which
+        // is what wakes the panel for the next song's words.
+        let Some(subject) = self.target(&key, cx).map(|t| t.subject.clone()) else {
+            return self.loaded.is_some() || self.pending.is_some();
+        };
+        // A different subject needs a load and a fresh face; let the render
         // kick the fetch. Once it is loading, wait for the load's own notify.
-        if self.loaded.as_ref().map(|(p, ..)| p.as_path()) != Some(path) {
-            return self.pending.as_deref() != Some(path);
+        if self.loaded.as_ref().map(|(s, ..)| s) != Some(&subject) {
+            return self.pending.as_ref() != Some(&subject);
         }
-        let Some(lyrics) = self.lyrics_for(path).cloned() else {
+        let Some(lyrics) = self.lyrics_for(&subject).cloned() else {
             return false;
         };
-        if !lyrics.synced {
+        if !lyrics.synced || !self.can_sync(&key, cx) {
             return false;
         }
         // Over the woven sheet, so the compared index matches the one the
@@ -631,7 +779,10 @@ impl LyricsPanel {
         let Some(key) = self.resolved.get(self.config.source, &self.state, cx) else {
             return;
         };
-        rox_panel_api::openers::lyrics_matcher(self.state.clone(), key.path, cx);
+        let Some(target) = self.target(&key, cx).cloned() else {
+            return;
+        };
+        rox_panel_api::openers::lyrics_matcher(self.state.clone(), target, cx);
     }
 
     /// Say the shown track has no lyrics: out of the sidecar, the store,
@@ -653,36 +804,35 @@ impl LyricsPanel {
     /// the way out, so a failed delete never leaves the track marked with
     /// words still in it.
     fn set_none(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .resolved
-            .get(self.config.source, &self.state, cx)
-            .map(|key| key.path)
-        else {
+        let Some(key) = self.resolved.get(self.config.source, &self.state, cx) else {
             return;
         };
-        // Auto-search runs once per track path, so lifting the mark has to
-        // hand this track back to it or the switch reads as one-way.
-        if !on && self.auto_tried.as_deref() == Some(path.as_path()) {
+        let Some(subject) = self.target(&key, cx).map(|t| t.subject.clone()) else {
+            return;
+        };
+        // Auto-search runs once per subject, so lifting the mark has to
+        // hand this one back to it or the switch reads as one-way.
+        if !on && self.auto_tried.as_ref() == Some(&subject) {
             self.auto_tried = None;
         }
         cx.spawn(async move |_, cx| {
             let done = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
+                    let subject = subject.clone();
                     async move {
                         let dir = lyrics_dir();
                         if on {
-                            lyrics::wipe(&path, Some(&dir))?;
+                            lyrics::wipe(&subject, Some(&dir))?;
                         }
-                        lyrics::set_marked_none(&path, &dir, on)
+                        lyrics::set_marked_none(&subject, &dir, on)
                     }
                 })
                 .await;
             if done.is_ok() {
                 // Every panel on this track re-reads, the same poke a save
                 // from the edit or match window sends.
-                cx.update(|cx| rox_panel_api::openers::lyrics_saved(&path, cx))
+                cx.update(|cx| rox_panel_api::openers::lyrics_saved(&subject, cx))
                     .ok();
             }
         })
@@ -693,11 +843,49 @@ impl LyricsPanel {
     /// outside the panel (the edit or match window, in this panel or any
     /// other) shows on the next render. Lyrics aren't in the projection,
     /// so the lyrics reload broadcast is the panel's only signal to re-read.
-    pub fn reload(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if self.loaded.as_ref().is_some_and(|(p, ..)| p == path) {
+    pub fn reload(&mut self, subject: &Subject, cx: &mut Context<Self>) {
+        if self.loaded.as_ref().is_some_and(|(s, ..)| s == subject) {
             self.loaded = None;
         }
         cx.notify();
+    }
+
+    /// Take the edit window's unsaved draft for `subject`, or None when
+    /// that window closed or moved to another track. The draft outranks
+    /// what is stored for as long as it stands, so an offset nudge shows
+    /// here on the press rather than at the save.
+    ///
+    /// The faces go back to the top when a draft arrives or leaves, the
+    /// same as for any other sheet swap: a stamp pass can change how many
+    /// lines there are, and the row the scroll was parked on is not the
+    /// row it lands on.
+    pub fn set_preview(&mut self, subject: &Subject, text: Option<&str>, cx: &mut Context<Self>) {
+        let held = self.preview.as_ref().map(|(at, _)| at.clone());
+        if held.as_ref() != Some(subject) && text.is_none() {
+            return;
+        }
+        let draft = text.map(|text| (subject.clone(), Arc::new(sheet(text.to_string()))));
+        // A draft arriving or leaving swaps the sheet under the faces; a
+        // keystroke inside one that is already up leaves the scroll where
+        // it was, or typing would fight the reader for it. Only for the
+        // subject this panel is on, so an editor open on another track
+        // never jerks it.
+        let swapped = draft.as_ref().map(|(at, _)| at) != held.as_ref();
+        if swapped && self.showing() == Some(subject) {
+            self.rewind();
+        }
+        self.preview = draft;
+        cx.notify();
+    }
+
+    /// The subject this panel is on, off the target cache the render
+    /// fills. None before the first render and for a station between
+    /// announcements.
+    fn showing(&self) -> Option<&Subject> {
+        self.target
+            .as_ref()
+            .and_then(|cache| cache.built.as_ref())
+            .map(|target| &target.subject)
     }
 }
 
@@ -1066,7 +1254,10 @@ impl Panel for LyricsPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        self.resolved.get(self.config.source, &self.state, cx)?;
+        // A station between announcements has no song to edit, so the
+        // pencil stays off rather than opening on nothing.
+        let key = self.resolved.get(self.config.source, &self.state, cx)?;
+        self.target(&key, cx)?;
         let weak = cx.entity().downgrade();
         Some(settings_ui::icon_button(
             icons::PENCIL,
@@ -1163,8 +1354,17 @@ impl Panel for LyricsPanel {
         // as one switch and only ever one of them applies: a marked track
         // loads as empty, so a sheet showing means it isn't marked, and
         // the wipe is the thing that marks it.
-        let menu = match self.resolved.get(self.config.source, &self.state, cx) {
-            Some(key) if self.lyrics_for(&key.path).is_some() => {
+        //
+        // A station between announcements gets neither: there is no song
+        // under it yet to wipe or to mark, so the switch would be a
+        // control that does nothing.
+        let subject = self
+            .resolved
+            .get(self.config.source, &self.state, cx)
+            .and_then(|key| self.target(&key, cx))
+            .map(|target| target.subject.clone());
+        let menu = match subject {
+            Some(subject) if self.lyrics_for(&subject).is_some() => {
                 let weak = cx.entity().downgrade();
                 menu.item(
                     PopupMenuItem::new(rox_i18n::t!("lyrics-wipe-lyrics"))
@@ -1175,8 +1375,8 @@ impl Panel for LyricsPanel {
                         }),
                 )
             }
-            Some(key) => {
-                let marked = lyrics::marked_none(&key.path, Some(&lyrics_dir()));
+            Some(subject) => {
+                let marked = lyrics::marked_none(&subject, Some(&lyrics_dir()));
                 let weak = cx.entity().downgrade();
                 menu.item(
                     PopupMenuItem::new(rox_i18n::t!("lyrics-no-lyrics-track"))
@@ -1262,17 +1462,28 @@ impl LyricsPanel {
             };
         };
 
-        self.ensure_loaded(&key.path, cx);
-        let Some(lyrics) = self.lyrics_for(&key.path).cloned() else {
+        // The subject rides along with the key through the whole face: a
+        // stream's song turns over under one URL, and everything below
+        // that would otherwise keep showing the song before it. A station
+        // that hasn't announced anything has no subject at all, and reads
+        // as the wordless track it is.
+        let Some(subject) = self.target(&key, cx).map(|t| t.subject.clone()) else {
+            return self.empty_face(&key, None, cx);
+        };
+
+        self.ensure_loaded(&subject, cx);
+        let Some(lyrics) = self.lyrics_for(&subject).cloned() else {
             // Still loading, or the track has none.
-            return if self.pending.as_deref() == Some(key.path.as_path()) {
+            return if self.pending.as_ref() == Some(&subject) {
                 loading()
             } else {
-                self.empty_face(&key, cx)
+                self.empty_face(&key, Some(&subject), cx)
             };
         };
 
-        if lyrics.synced {
+        // A station's first song can't be followed: see [`can_sync`]. Its
+        // words still read, stamps and all stripped off by the parse.
+        if lyrics.synced && self.can_sync(&key, cx) {
             self.synced_face(&key, &lyrics, window, cx)
         } else {
             self.plain_face(&key, &lyrics, cx)
@@ -1290,15 +1501,25 @@ impl LyricsPanel {
     /// turns into the way back out: the mark is what stops the lookups, so
     /// offering the lookup under it would read as a face arguing with
     /// itself. Lifting the mark hands the track to auto-search anyway.
-    fn empty_face(&mut self, key: &TrackKey, cx: &mut Context<Self>) -> Div {
-        self.maybe_auto_search(key, cx);
+    fn empty_face(
+        &mut self,
+        key: &TrackKey,
+        subject: Option<&Subject>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if let Some(subject) = subject {
+            self.maybe_auto_search(subject, cx);
+        }
         let align = self.config.align;
         // Unmeasured (height 0) stacks; only a measured, short panel flows
         // the line and button inline, so the first frame never flickers.
         let inline =
             self.empty_size.height > px(0.) && self.empty_size.height < px(EMPTY_INLINE_MAX_H);
-        let marked = self.marked_for(&key.path);
-        let show_button = self.config.search_button && providers::lyrics_online();
+        let marked = subject.is_some_and(|subject| self.marked_for(subject));
+        // Nothing to file a sheet under yet, which is a station between
+        // announcements: the button would open a window on no song.
+        let show_button =
+            self.config.search_button && providers::lyrics_online() && subject.is_some();
         let button = show_button.then(|| {
             if marked {
                 settings_ui::small_button(
@@ -1387,7 +1608,7 @@ impl LyricsPanel {
     /// artist when the tags have one, the file stem standing in for a
     /// missing title.
     fn track_name(&self, key: &TrackKey, cx: &App) -> SharedString {
-        let meta = self.state.library.read(cx).meta_for_key(key);
+        let meta = self.live_meta(key, cx);
         let (title, artist) = meta.map(|m| (m.title, m.artist)).unwrap_or_default();
         let title = if title.is_empty() {
             key.path
@@ -1408,48 +1629,56 @@ impl LyricsPanel {
     /// background the first time its empty face paints, and save the top
     /// match when it clears [`AUTO_SAVE_CONFIDENCE`]. A weak match is left
     /// alone for the manual search, which shows every candidate. Runs once
-    /// per track path so a repaint never re-queries.
+    /// per track so a repaint never re-queries.
+    ///
+    /// A station's song is the same lookup under the song it announced, so
+    /// every song of a broadcast gets its own look instead of the first
+    /// one taking the station's only turn, and what comes back is filed in
+    /// the store under that song. It is there the next time the song comes
+    /// round, on that station or any other.
     ///
     /// A track marked as having no lyrics is skipped: the mark is there
     /// precisely because a lookup got it wrong, and this search is what
     /// would otherwise put the wrong sheet back every session.
-    fn maybe_auto_search(&mut self, key: &TrackKey, cx: &mut Context<Self>) {
+    fn maybe_auto_search(&mut self, subject: &Subject, cx: &mut Context<Self>) {
         if !self.config.auto_search || !providers::lyrics_online() {
             return;
         }
-        let path = key.path.as_path();
-        if self.auto_tried.as_deref() == Some(path) {
+        if self.auto_tried.as_ref() == Some(subject) {
             return;
         }
-        self.auto_tried = Some(path.to_path_buf());
-        if lyrics::marked_none(path, Some(&lyrics_dir())) {
+        self.auto_tried = Some(subject.clone());
+        if lyrics::marked_none(subject, Some(&lyrics_dir())) {
             return;
         }
-        let query = rox_services::lyrics::query_for(&self.state.library, key, cx);
+        let Some(query) = self.target.as_ref().and_then(|cache| cache.built.as_ref()) else {
+            return;
+        };
+        let query = query.query.clone();
         if query.artist.is_empty() || query.title.is_empty() {
             return;
         }
-        let path = path.to_path_buf();
+        let subject = subject.clone();
         cx.spawn(async move |this, cx| {
             let saved = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
+                    let subject = subject.clone();
                     async move {
                         let found = providers::search_lyrics(&query).ok()?;
                         let best = found.into_iter().next()?;
                         if best.confidence < AUTO_SAVE_CONFIDENCE {
                             return None;
                         }
-                        let target = rox_services::lyrics::save_target(&path);
-                        lyrics::save(&path, &target, &best.text, Some(&lyrics_dir())).ok()?;
-                        Some(())
+                        let target = rox_services::lyrics::save_target(&subject);
+                        lyrics::save(&subject, &target, &best.text, Some(&lyrics_dir())).ok()
                     }
                 })
                 .await;
-            if saved.is_some() {
-                this.update(cx, |this, cx| this.reload(&path, cx)).ok();
+            if saved.is_none() {
+                return;
             }
+            this.update(cx, |this, cx| this.reload(&subject, cx)).ok();
         })
         .detach();
     }
@@ -1859,6 +2088,23 @@ fn falloff(dim: f32, edge: DimEdge, active: Option<usize>, ix: usize) -> f32 {
         return 1.0;
     }
     curve::falloff(dim, ix.abs_diff(active) as u32)
+}
+
+/// A sheet held in memory rather than read from anywhere: the same parse
+/// [`lyrics::load`] runs, over the edit window's unsaved draft.
+///
+/// The source names where an edit would save back, and nothing saves from
+/// a draft the editor still owns, so [`lyrics::Source::Tag`] here is the
+/// field going unread rather than a destination anything will use.
+fn sheet(text: String) -> Lyrics {
+    let (lines, synced) = lyrics::parse(&text);
+
+    Lyrics {
+        source: lyrics::Source::Tag,
+        text,
+        lines,
+        synced,
+    }
 }
 
 /// A quiet centered line in place of the sheet.

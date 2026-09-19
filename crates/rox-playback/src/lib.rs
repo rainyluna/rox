@@ -14,11 +14,36 @@ pub mod engine;
 pub mod eq;
 pub mod fingerprint;
 pub mod gain;
+pub mod http;
+pub mod icy;
 pub mod latency;
 pub mod opus;
 pub mod output;
 pub mod resample;
 pub mod shared;
+pub mod tape;
+
+// A station's now-playing is a playback type, not an HTTP one: whoever reads
+// it off the shared state is showing a track, not parsing a stream. Named here
+// so nobody has to reach into the transport's internals for it.
+pub use icy::IcyTitle;
+
+// What a station said about itself at the open, for the same reason: the
+// surfaces reading it are drawing a station, not parsing a response.
+pub use http::StationInfo;
+
+// Where a stream stands. Read by anything that draws a station, so it sits at
+// the root beside the other two rather than inside the shared state module.
+pub use shared::StreamState;
+
+// How far a live stream is being played behind its own broadcast, for the
+// same reason: the transport drawing it is drawing a station, not reading
+// engine state.
+pub use shared::Shift;
+
+// And the song boundaries inside one, for the same surfaces: where a
+// station's songs turned over is the only structure its timeline has.
+pub use shared::LiveMark;
 
 // Embedders hold the output stream and the tap consumer, so the types those
 // come in need to be nameable without taking on the deps directly.

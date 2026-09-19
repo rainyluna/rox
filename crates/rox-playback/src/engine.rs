@@ -12,15 +12,41 @@
 //! already had to happen: the Ogg reader signals the end padding but never the
 //! pre-skip, so [`crate::opus`] reads it out of the OpusHead and drops it
 //! before the buffer ever reaches here.
+//!
+//! Pause is one shape here now, files and stations alike: the flag flips, the
+//! callback stops consuming, the ring keeps what it holds and the decode loop
+//! parks on a full ring. A station stays connected through it. The socket is
+//! drained by a thread of its own into a tape ([`crate::tape`]), so the bytes
+//! that arrive during a pause are kept rather than thrown away, and Play
+//! carries on from the byte the pause stopped at instead of rejoining the
+//! broadcast wherever it has got to. That's the timeshift, and it's what
+//! [`Cmd::SeekLive`] steps back and forth through: the cursor moves inside
+//! the tape and the decoder is rebuilt over it, which is a flush like any
+//! other seek. Two rules come with it. A seek never crosses a gap, the mark a
+//! reconnect leaves, because two connections' bytes don't decode as one
+//! stream. And a pause that outlasts the tape leaves the cursor off the back
+//! of it, which snaps to the oldest byte held and re-syncs there.
+//!
+//! Hanging up survives for the two cases a tape can't answer. A paused
+//! restore at launch must not dial at all ([`Engine::open_start`]): the
+//! session comes up on a station nobody has pressed Play on yet, and opening
+//! it would put a live socket under a pause from the app's first second. And
+//! a station left paused past [`LIVE_IDLE_HANGUP_SECS`] hangs up, because a
+//! tab forgotten overnight shouldn't pull bytes until morning; the resume
+//! rejoins at the live edge the way it always did. `hang_up` and `rejoin` are
+//! the pair, and `hung_up` holding a value with no open source is the whole
+//! state between them.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::Duration as StdDuration;
 use std::time::Instant;
 
 use rox_library::cue::Span;
+use rox_library::locator::Locator;
 use rox_library::peaks::{PeakBin, PeakLanes};
 use rtrb::Producer;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -33,13 +59,27 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 use crate::chain::{Chain, Node};
 use crate::gain;
+use crate::http::StationInfo;
+use crate::icy::TitleSink;
 use crate::latency;
 use crate::resample::Resampler;
-use crate::shared::{QueueEntry, QueueSnapshot, Segment, Shared, TrackInfo};
+use crate::shared::{
+    QueueEntry, QueueSnapshot, Segment, Shared, StreamSink, StreamState, TrackInfo,
+};
+use crate::tape::Tape;
 
 pub enum Cmd {
     TogglePause,
     Seek(f64),
+    /// Play a live stream from this many seconds behind its live edge, zero
+    /// being live. The cursor moves inside the tape the station is being
+    /// recorded into and the decoder is rebuilt over it, so this costs the
+    /// same flush a scrub costs and nothing over the wire.
+    ///
+    /// Held to what the tape holds, and to the live side of any gap it would
+    /// have crossed. Ignored for anything that isn't the audible live entry:
+    /// a file has a real timeline and [`Cmd::Seek`] is how you move in it.
+    SeekLive(f64),
     /// Play this many seconds through the pause, for a step taken while
     /// paused: hearing where the step landed is the point of stepping by
     /// milliseconds, and a silent one is just a number moving. Sent right
@@ -79,19 +119,22 @@ pub enum Cmd {
     /// plays on around them.
     Insert {
         after: Option<u64>,
-        paths: Vec<PathBuf>,
-        /// Album group per path, parallel to `paths` (ADR 17). The player
+        /// Where each track's bytes come from: a file on disk, or a URL the
+        /// transport opens. The engine never looks inside one, it hands it
+        /// to [`Source::open`].
+        locators: Vec<Locator>,
+        /// Album group per track, parallel to `locators` (ADR 17). The player
         /// resolves these from the library at insert time; the engine only
-        /// compares them. Shorter than `paths` pads with None.
+        /// compares them. Shorter than `locators` pads with None.
         groups: Vec<Option<u64>>,
-        /// ReplayGain tags per path, parallel the same way and resolved
+        /// ReplayGain tags per track, parallel the same way and resolved
         /// from the library beside the groups. Shorter pads with the
         /// untagged default, which the rule's fallback then handles.
         gains: Vec<gain::ReplayGain>,
-        /// The slice of the file each path plays, parallel the same way. A
+        /// The slice of the file each entry plays, parallel the same way. A
         /// cue track is a span inside one image file, so two entries can
-        /// share a path and still be different music. Shorter than `paths`
-        /// pads with None, which means play the whole file.
+        /// share a path and still be different music. Shorter than
+        /// `locators` pads with None, which means play the whole file.
         spans: Vec<Option<Span>>,
         explicit: bool,
         /// Jump to the first of the batch and play it now, keeping the rest of
@@ -147,6 +190,18 @@ pub enum Cmd {
         /// wants every boundary soft whatever the tags say.
         albums: bool,
     },
+    /// How much of a live stream to keep behind the playhead, in seconds.
+    ///
+    /// Takes the station on air with it rather than waiting for the next
+    /// connect: the tape is re-capped in place, which grows by raising the
+    /// ceiling and shrinks by trimming on the spot. The engine keeps the
+    /// number too, so the next station this session opens gets it without
+    /// the setting having to ride another [`StartQueue`].
+    ///
+    /// Held to [`LIVE_BUFFER_MIN_SECS`] and up, the same floor the start
+    /// applies, so no path into the engine can leave a tape too short for a
+    /// pause to mean anything.
+    SetLiveBuffer(u32),
     /// How tagged loudness is levelled (ADR 19): the mode and the two
     /// offsets. Applied to every source in hand as it arrives, so a mode
     /// switch is heard on the track playing rather than the one after it.
@@ -160,6 +215,28 @@ pub enum Cmd {
 /// a transition between two tracks and starts reading as both playing at
 /// once; the UI's slider tops out here and the engine clamps to it.
 pub const CROSSFADE_MAX_SECS: f32 = 12.0;
+
+/// How long a station may sit paused before the connection is given up.
+///
+/// The tape is what makes a pause worth holding a socket open for, and past
+/// half an hour there's nothing left to come back to: the window has rolled
+/// over several times, and the resume is going to be a rejoin at the live
+/// edge whatever happens. So the socket goes, the bytes stop, and a tab
+/// forgotten overnight isn't still pulling a station's bandwidth in the
+/// morning.
+pub const LIVE_IDLE_HANGUP_SECS: u64 = 1800;
+
+/// How often the station's song boundaries are refreshed for their
+/// distances alone. Six times the pump's own clock, so nothing drawing them
+/// ever has a stale list, and nowhere near the rate the decode loop turns
+/// at.
+const MARKS_REFRESH: StdDuration = StdDuration::from_millis(100);
+
+/// The shortest tape the engine will keep, whatever it was asked for. The
+/// setting clamps to a real band before it gets here; this is the floor for a
+/// session started without one, which is every test and every embedder that
+/// left the field at its default.
+const LIVE_BUFFER_MIN_SECS: u32 = 30;
 
 /// How far short of a track's end a seek is allowed to land. See
 /// [`Source::inside_track`]: the last frame is not a place a reader can go.
@@ -182,9 +259,15 @@ pub enum LoopMode {
 struct Source {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
-    /// The file behind the reader, kept so a decoder that falls over names
-    /// the file it fell over on.
-    path: PathBuf,
+    /// What's behind the reader, the full path or the URL, kept so a decoder
+    /// that falls over names what it fell over on. A string rather than the
+    /// locator itself because every use of it is a log line, and resolving it
+    /// once at the open keeps the per-packet guard from formatting anything.
+    origin: String,
+    /// What the track is called, as the entry's published info names it.
+    /// Kept so a station rebuilt over its own tape comes back with the name
+    /// it already had rather than a fresh read of the locator.
+    name: String,
     /// Set when a read or a decode panicked. The reader and decoder are
     /// unusable from that point: the panic unwound out of the middle of
     /// their state, and calling back in could land on the same broken
@@ -225,6 +308,18 @@ struct Source {
     /// the file, and the cut has to be made against the file's clock before
     /// the resampler turns those frames into device-rate ones.
     src_frame: u64,
+    /// When a remote open began, kept until the first chunk of audio comes
+    /// out of it and then taken. Closes the open-latency measurement the
+    /// transport and the probe log the first two thirds of: the number that
+    /// matters to a listener is when audio exists, not when the reader was
+    /// built. None on a local file, which has nothing to explain.
+    opened_at: Option<Instant>,
+    /// The tape a live station is being recorded into, None for everything
+    /// else. Held here because it's the only handle back down: once the probe
+    /// is done the reader is buried under a `MediaSourceStream` and a format
+    /// reader with no way through. The engine reads it for the timeshift
+    /// readout and reopens over it for a [`Cmd::SeekLive`].
+    tape: Option<Arc<Tape>>,
 }
 
 /// A [`Span`] resolved onto the file's own frame clock, which is where the
@@ -279,9 +374,9 @@ struct AbLoop {
 pub const AB_MIN_SECS: f64 = 0.25;
 
 pub struct Engine {
-    /// Append-only pool of file paths. Order entries index into it; nothing is
-    /// ever removed so `Segment.track` indices stay valid.
-    queue: Vec<PathBuf>,
+    /// Append-only pool of track locators. Order entries index into it;
+    /// nothing is ever removed so `Segment.track` indices stay valid.
+    queue: Vec<Locator>,
     /// Album group per pool entry, parallel to `queue` (ADR 17). Grows with
     /// the pool on insert, never shrinks. The engine never derives these,
     /// only compares them: same group means tracks that belong together.
@@ -348,6 +443,30 @@ pub struct Engine {
     /// Set the one time the window opens, cleared on every open, so a
     /// track whose next file wouldn't open doesn't retry every chunk.
     fade_armed: bool,
+    /// Set while a pause has hung up on a live station: how far into the
+    /// station the elapsed clock had got when the socket closed, in
+    /// device-rate frames. None the rest of the time, which is every pause
+    /// on a file and on a seekable stream.
+    ///
+    /// `Some` with no open source is the whole hung-up state. Nothing
+    /// decodes, nothing has ended, and the next Play reopens the station at
+    /// its live edge with this much already on the clock. One field rather
+    /// than a flag beside a position: the entry to come back to is resolved
+    /// off the output clock the same way Next and Prev resolve theirs, so a
+    /// queue edit arriving during the pause moves it without this having to
+    /// know.
+    hung_up: Option<u64>,
+    /// How many seconds of a live stream to tape behind the playhead, handed
+    /// to every station this session opens.
+    live_buffer_secs: u32,
+    /// The station mark set as last published, and when. See
+    /// [`Engine::publish_marks`].
+    marks_rev: u64,
+    marks_at: Instant,
+    /// When the pause holding a station started, for the idle cap. None while
+    /// something is playing, and None for a pause on anything that isn't a
+    /// live stream: a paused file costs nothing to leave sitting.
+    paused_since: Option<Instant>,
 }
 
 /// A crossfade in flight (ADR 19). The engine holds two open sources for
@@ -387,22 +506,32 @@ struct Wound {
     short: i64,
 }
 
-/// The playing context handed to a new engine: the ordered paths, where in
+/// The playing context handed to a new engine: the ordered tracks, where in
 /// them to start, which entries are user-queued rather than part of the
 /// context, the album group per entry, its ReplayGain tags, and the slice of
 /// the file it plays. The four parallel vecs pad out where they run short of
-/// `paths`, with false, None, the untagged default, and None again.
+/// `locators`, with false, None, the untagged default, and None again.
 #[derive(Default)]
 pub struct StartQueue {
-    pub paths: Vec<PathBuf>,
+    pub locators: Vec<Locator>,
     pub start: usize,
     pub explicit: Vec<bool>,
     pub groups: Vec<Option<u64>>,
     pub gains: Vec<gain::ReplayGain>,
-    /// Which part of each path to play, None being all of it. A cue track
+    /// Which part of each entry to play, None being all of it. A cue track
     /// comes through as a span inside its image file, so a restored session
     /// of one disc rip is one path repeated with a span apiece.
     pub spans: Vec<Option<Span>>,
+    /// How much of a live stream to keep behind the playhead, in seconds,
+    /// straight off the setting. Held to [`LIVE_BUFFER_MIN_SECS`] and up, so
+    /// a session started with nothing to say about it still tapes enough for
+    /// a pause to mean something.
+    ///
+    /// Part of the start rather than a command because the first open happens
+    /// before the channel is read: a session that starts playing a station
+    /// would otherwise tape the default for its first entry whatever the
+    /// setting says.
+    pub live_buffer_secs: u32,
 }
 
 impl Engine {
@@ -414,12 +543,13 @@ impl Engine {
         rx: Receiver<Cmd>,
     ) -> Self {
         let StartQueue {
-            paths: queue,
+            locators: queue,
             start,
             explicit,
             groups,
             gains,
             spans,
+            live_buffer_secs,
         } = queue;
         // The starting queue is the playing context: an album, a library run,
         // whatever the caller handed over. A fresh context passes an empty
@@ -467,6 +597,11 @@ impl Engine {
             fade_albums: false,
             fade: None,
             fade_armed: false,
+            hung_up: None,
+            live_buffer_secs: live_buffer_secs.max(LIVE_BUFFER_MIN_SECS),
+            marks_rev: 0,
+            marks_at: Instant::now(),
+            paused_since: None,
         }
     }
 
@@ -483,9 +618,20 @@ impl Engine {
         // gapless boundary, so filter history persists across a track splice.
         self.chain.reset(self.device_rate);
         self.publish_queue();
-        let mut source = self.open_at(self.start);
+        let mut source = self.open_start();
 
         loop {
+            // Whatever was waiting is about to be read, so the flag that said
+            // so comes down first. Set by the player as it sends a command a
+            // listener expects answered now; read only by a stalled reconnect,
+            // which uses it to stop retrying a station and let the command
+            // through. Cleared ahead of the drain rather than after it, since
+            // the sender stores before it sends: a store that lands in between
+            // leaves its command in the channel for this pass or the next one,
+            // where a clear after the drain could swallow the flag and leave
+            // the command behind a full retry schedule.
+            self.shared.interrupt.store(false, Ordering::Relaxed);
+
             // Commands first so pause/seek stay responsive even when the
             // ring is full and decode is idle.
             let mut flush_to: Option<FlushAction> = None;
@@ -507,6 +653,9 @@ impl Engine {
             // drain: drop that stale source and reopen the track that's really
             // next now. The audible track is fully in the ring, so no flush.
             let mut reopen_runahead = false;
+            // A play now arrived and the session owes it a resume, paid once
+            // the flush below has landed rather than here. See the store.
+            let mut resume = false;
             while let Ok(cmd) = self.rx.try_recv() {
                 match cmd {
                     Cmd::TogglePause => {
@@ -521,7 +670,22 @@ impl Engine {
                             self.shared.playing.store(true, Ordering::Relaxed);
                             nav_pos = Some(self.audible_pos());
                             flush_to = None;
+                        } else if source.is_none() && self.hung_up.is_some() {
+                            // Coming back to a station the last pause hung up
+                            // on. The rejoin flips the flag itself, since a
+                            // station that died meanwhile skips forward and
+                            // whatever it lands on should be playing.
+                            source = self.rejoin();
                         } else {
+                            // One shape for everything now. A station holds
+                            // its connection through a pause and keeps
+                            // taping, so the ring and the pending buffer are
+                            // kept too: what they hold is the broadcast from
+                            // the moment the listener stopped, which is
+                            // exactly what the resume should play. The idle
+                            // cap below is the only thing that still hangs
+                            // up, and only after half an hour of nobody
+                            // coming back.
                             let now = self.shared.playing.load(Ordering::Relaxed);
                             self.shared.playing.store(!now, Ordering::Relaxed);
                         }
@@ -549,6 +713,12 @@ impl Engine {
                         // behind this one re-arms it for the new one.
                         self.cancel_audition();
                         flush_to = Some(FlushAction::Seek(secs.max(0.0)));
+                        nav_pos = None;
+                        nav_at = None;
+                    }
+                    Cmd::SeekLive(behind) => {
+                        self.cancel_audition();
+                        flush_to = Some(FlushAction::SeekLive(behind.max(0.0)));
                         nav_pos = None;
                         nav_at = None;
                     }
@@ -640,7 +810,7 @@ impl Engine {
                     }
                     Cmd::Insert {
                         after,
-                        paths,
+                        locators,
                         groups,
                         gains,
                         spans,
@@ -648,7 +818,7 @@ impl Engine {
                         and_play,
                         start_secs,
                     } => {
-                        let at = self.insert(after, paths, groups, gains, spans, explicit);
+                        let at = self.insert(after, locators, groups, gains, spans, explicit);
                         // From the ended state the source is None, so the new
                         // entries are added in order but nothing opens them
                         // and we stay silent. Route the first of the batch
@@ -662,10 +832,8 @@ impl Engine {
                         }
                         // Play now means play: resume if we were paused, so a
                         // drop onto Play now starts audio instead of loading it
-                        // silent.
-                        if and_play {
-                            self.shared.playing.store(true, Ordering::Relaxed);
-                        }
+                        // silent. Owed rather than done, and paid below.
+                        resume |= and_play;
                     }
                     Cmd::Remove { id } => reopen_runahead |= self.remove(id),
                     Cmd::RemoveMany { ids } => reopen_runahead |= self.remove_many(&ids),
@@ -684,6 +852,19 @@ impl Engine {
                     Cmd::SetCrossfade { secs, albums } => {
                         self.fade_secs = crossfade_secs(secs);
                         self.fade_albums = albums;
+                    }
+                    Cmd::SetLiveBuffer(secs) => {
+                        let secs = secs.max(LIVE_BUFFER_MIN_SECS);
+                        self.live_buffer_secs = secs;
+                        // The station playing has its own tape, allocated
+                        // when the connection was made, so the new length
+                        // has to reach it directly. Whatever is open is the
+                        // right one to re-cap: a station only ever has one
+                        // tape, and an outgoing one inside a fade is a few
+                        // seconds from being dropped either way.
+                        if let Some(tape) = source.as_ref().and_then(|src| src.tape.as_ref()) {
+                            tape.set_cap_secs(secs);
+                        }
                     }
                     Cmd::SetGainRule(rule) => {
                         self.rule = rule;
@@ -713,7 +894,18 @@ impl Engine {
             // the work either side of it is arranged around that: everything
             // that can be done while the ring is still playing happens
             // before the cut, and what's left after it is arithmetic.
+            let flushed = flush_to.is_some();
             if let Some(action) = flush_to {
+                // Anything that opens a track of its own ends the hung-up
+                // state: a Next off a paused station, a Jump, a drop onto Play
+                // now. The station's frozen clock belongs to a track nobody is
+                // going back to. A timeshift seek is the exception, since it
+                // only ever moves inside a station that's already open: with
+                // nothing open it has nothing to do and leaves the hung-up
+                // state exactly as it found it.
+                if !matches!(action, FlushAction::SeekLive(_)) {
+                    self.hung_up = None;
+                }
                 match action {
                     FlushAction::Track { pos, back, at } => {
                         // A loop belongs to the track it was marked on, so
@@ -727,7 +919,27 @@ impl Engine {
                     FlushAction::Seek(secs) => {
                         source = self.seek_to(source.take(), secs);
                     }
+                    FlushAction::SeekLive(behind) => {
+                        source = self.seek_live_to(source.take(), behind);
+                    }
                 }
+            }
+
+            // The resume a play now owes, paid here rather than where the
+            // command was read. Between those two points sits the open, and
+            // on a station that's a request and a probe over the wire: a
+            // callback told to start consuming at the command spends the
+            // whole round trip playing whatever the paused ring still holds,
+            // which is a second of the last track arriving out of nowhere
+            // before the station does. By the time this lands the flush has
+            // thrown those samples away. A local file is unaffected either
+            // way, its open being too fast to hear, and a session already
+            // playing stores true over true.
+            if resume {
+                self.shared.playing.store(true, Ordering::Relaxed);
+            }
+
+            if flushed {
                 continue;
             }
 
@@ -747,7 +959,11 @@ impl Engine {
             // splice, the listener asked for the track to be gone; an automatic
             // reorder isn't, so `reorder_tail` never asks for a reopen once the
             // runahead has fed the ring.
-            if reopen_runahead {
+            // Hung up on a station, there's no runahead to reopen: the source
+            // is gone because a pause closed it, not because a queue edit
+            // invalidated it, and opening the track after it would leave a
+            // connection running under a pause.
+            if reopen_runahead && self.hung_up.is_none() {
                 let next = self.audible_pos() + 1;
                 self.pending.clear();
                 self.pending_pos = 0;
@@ -760,6 +976,13 @@ impl Engine {
                 };
                 continue;
             }
+
+            // A pause on a station holds a socket open, so it can't hold it
+            // forever. Both of these run on every pass rather than off a
+            // decoded chunk, because a pause is exactly when nothing is
+            // decoding and exactly when the tape is moving underneath.
+            source = self.idle_hangup(source);
+            source = self.follow_tape(source);
 
             // Move pending samples into the ring. Ring full means we're
             // comfortably ahead; sleep and go back to command handling.
@@ -854,6 +1077,15 @@ impl Engine {
                         };
                     }
                 }
+                // Paused on a station we hung up on. There's nothing to decode
+                // until Play comes back and nothing has ended either: the
+                // station is still on air, we just stopped listening to it.
+                // Without this arm the drained ring below would read as a
+                // played-out queue and the transport would go dead on a pause.
+                None if self.hung_up.is_some() => {
+                    std::thread::sleep(StdDuration::from_millis(20));
+                }
+
                 None => {
                     // Nothing to mix a fade under: the incoming track drives
                     // the mix, and there isn't one. Whatever was fading out
@@ -883,6 +1115,50 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// The session's first open, which is the one open that can arrive on an
+    /// already-paused session: a launch restore comes up where it left off,
+    /// silent, and the player puts the pause flag down before this thread
+    /// starts.
+    ///
+    /// A station is the one entry that can't be opened and left sitting. The
+    /// open is a live socket and a broadcast has no pause, which is the whole
+    /// reason [`hang_up`](Self::hang_up) exists; connecting here would put
+    /// the session in exactly the state that path closes, except from the
+    /// first second of the app's life. So a paused start on a station parks
+    /// in the hung-up state instead, with nothing open and the clock at its
+    /// top, and the first Play rejoins the way a resume from any other pause
+    /// does. No new state for the rest of the loop to answer for: `hung_up`
+    /// with no source is a state it already handles everywhere.
+    ///
+    /// Everything else opens the way it always has. A file and a seekable
+    /// stream hold through a pause perfectly well, and the restore wants
+    /// their duration and their name on screen before anyone presses Play.
+    fn open_start(&mut self) -> Option<Source> {
+        let paused = !self.shared.playing.load(Ordering::Relaxed);
+        if !paused || !self.live_at(self.start) {
+            return self.open_at(self.start);
+        }
+
+        // The cursor moves even though nothing opened: it's what the rejoin
+        // resolves the entry to open off, and what the segment below names.
+        // The pair `adopt` sets, without the rest of what `adopt` does,
+        // which belongs to a track that's really playing.
+        self.pos = self.start;
+        self.idx = self.order[self.start].idx;
+        self.hung_up = Some(0);
+
+        // The position clock is how anything upstream knows what's loaded, so
+        // the entry gets a segment at its own zero without a source behind
+        // it. Otherwise a restore onto a station comes up showing nothing at
+        // all: no name, no transport, nothing to press Play on except the
+        // queue. There's no track info to publish beside it, which is right
+        // for a station; the length of a broadcast is a question with no
+        // answer whether or not we're connected.
+        self.register_segment(0.0);
+
+        None
     }
 
     /// Open the track at play-order position `p`, falling forward through
@@ -916,15 +1192,66 @@ impl Engine {
     fn open_file_at(&mut self, mut p: usize) -> Option<(Source, usize, TrackInfo)> {
         while p < self.order.len() {
             let i = self.order[p].idx;
-            match Source::open(&self.queue[i], self.device_rate, self.spans[i]) {
-                Ok((mut src, info)) => {
+
+            // A station's in-band titles are the only now-playing it has, and
+            // they keep arriving for as long as it plays, so the sink is bound
+            // to this pool entry and lives as long as the source does. Local
+            // files never fire it.
+            let shared = Arc::clone(&self.shared);
+            let on_title: TitleSink = Arc::new(move |title| shared.publish_title(i, title));
+
+            // The same binding for the transport's own state. It fires from
+            // deeper still, inside a read that's already lost its connection,
+            // so it has no way of knowing which entry it belongs to either.
+            let shared = Arc::clone(&self.shared);
+            let on_stream: StreamSink = Arc::new(move |state| shared.publish_stream(i, state));
+
+            // A remote open is the one that takes long enough for the wait to
+            // be worth showing. It's published before the call rather than
+            // after it because after it there's nothing left to wait for.
+            let remote = matches!(self.queue[i], Locator::Remote(_));
+            if remote {
+                self.shared.publish_stream(i, StreamState::Opening);
+            }
+
+            match Source::open_titled(
+                &self.queue[i],
+                self.device_rate,
+                self.spans[i],
+                on_title,
+                on_stream,
+                Arc::clone(&self.shared.interrupt),
+                self.live_buffer_secs,
+            ) {
+                Ok((mut src, info, station)) => {
+                    if remote {
+                        self.shared.publish_stream(i, StreamState::Live);
+                    }
+
+                    // What the station said about itself on the way in. Once
+                    // per open and never again, so it's published here rather
+                    // than through a sink: a reconnect mid-stream re-reads the
+                    // same headers off the same mount and has nothing new to
+                    // say.
+                    if let Some(station) = station.filter(|s| !s.is_empty()) {
+                        self.shared.publish_station(i, station);
+                    }
+
                     // The gain is set at the track open (ADR 19), so it
                     // changes exactly where the source does.
                     src.level(self.gains[i], &self.rule);
                     return Some((src, p, info));
                 }
                 Err(e) => {
-                    log::warn!("skipping {}: {e}", self.queue[i].display());
+                    // A dead server takes this path the same way a missing
+                    // file does: name it and try the next entry. The state
+                    // goes with it, or the entry we just fell past would sit
+                    // at `Opening` for the rest of the session.
+                    if remote {
+                        self.shared.publish_stream(i, StreamState::Dropped);
+                    }
+
+                    log::warn!("skipping {}: {e}", self.queue[i].label());
                     p += 1;
                 }
             }
@@ -964,6 +1291,269 @@ impl Engine {
             track_frame: start + after,
         });
         prune_segments(&mut segments, consumed);
+    }
+
+    /// Whether the entry at play-order position `p` is a live stream. The one
+    /// thing that has to be asked of the locator rather than of the source:
+    /// once symphonia owns the transport there's no way back down to it, and
+    /// the answer is in the queue anyway.
+    fn live_at(&self, p: usize) -> bool {
+        self.order
+            .get(p)
+            .is_some_and(|e| matches!(&self.queue[e.idx], Locator::Remote(r) if r.live))
+    }
+
+    /// Move the audible station to `behind` seconds back from its live edge
+    /// and re-sync the decoder there. Zero is live.
+    ///
+    /// Nothing goes over the wire: the bytes are already in the tape, and
+    /// what moves is the cursor into it. What it does cost is a decoder,
+    /// because there's no way to tell a running one to start reading
+    /// somewhere else, so the source is rebuilt over the same tape at the new
+    /// offset and the ring is cut the way any seek cuts it.
+    ///
+    /// The elapsed clock carries on rather than jumping back with the cursor.
+    /// It counts the listen, not the position in a timeline a broadcast
+    /// doesn't have, and a station stepped back through has been listened to
+    /// for longer, not less. The title comes back the other way: the tape
+    /// knows which song was playing at the byte the cursor landed on, and
+    /// publishes that one.
+    ///
+    /// Everything about this is refused unless the station is the entry
+    /// actually coming out of the speakers. The decode cursor can be a track
+    /// ahead at a boundary, and moving a stream nobody is hearing yet would
+    /// cut the file still playing out of the ring.
+    fn seek_live_to(&mut self, source: Option<Source>, behind: f64) -> Option<Source> {
+        let src = source?;
+        let Some(tape) = src.tape.clone().filter(|_| self.pos == self.audible_pos()) else {
+            return Some(src);
+        };
+
+        // The rebuild happens while the old source is still coming out of the
+        // ring, so the only silence it costs is the cut itself.
+        let was = tape.cursor();
+        let at = tape.seek_target(behind);
+        let hint = self.live_hint(self.idx);
+        let (mut fresh, info) = match src.reopen_live(at, &hint) {
+            Ok(rebuilt) => rebuilt,
+
+            // Staying put is the right answer to a failed re-sync. The
+            // listener asked to move inside a broadcast and the container
+            // wouldn't have it; the station they were listening to is still
+            // playing, and the cursor goes back to where that station is
+            // rather than where the attempt left it.
+            Err(e) => {
+                log::warn!("live seek to {behind:.1}s behind failed: {e}");
+                tape.restore_cursor(was);
+
+                return Some(src);
+            }
+        };
+        fresh.level(self.gains[self.idx], &self.rule);
+
+        // Read before the flush moves `pushed_playable` out from under it.
+        let elapsed = self.elapsed_frames();
+        drop(src);
+        self.flush_ring();
+        self.adopt(self.pos, info, elapsed, 0);
+
+        Some(fresh)
+    }
+
+    /// The container hint for reopening the station at pool entry `idx`: what
+    /// the locator stored, or what the response's `Content-Type` implied.
+    /// Empty leaves the probe to sniff the bytes, which is what a first open
+    /// does when neither is known.
+    fn live_hint(&self, idx: usize) -> String {
+        if let Locator::Remote(remote) = &self.queue[idx]
+            && !remote.hint.is_empty()
+        {
+            return remote.hint.clone();
+        }
+
+        self.shared
+            .station_info(idx)
+            .and_then(|info| crate::http::extension_for(&info.content_type))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Say where the audible station is being played from, and answer a tape
+    /// that has rolled over the cursor.
+    ///
+    /// The readout can't ride a decoded chunk: both numbers keep moving
+    /// through a pause, which is the one state where nothing is decoding, and
+    /// a listener watching how far back they are during a pause is watching
+    /// the feature work. So it rides the loop instead, which still turns
+    /// while paused.
+    ///
+    /// The underrun is the other half. A pause that outlasted the window
+    /// leaves the cursor pointing at bytes that have been dropped, the reader
+    /// snaps to the oldest byte held, and the decoder is then mid-frame on a
+    /// stream that jumped. Re-syncing at the back of the tape is the same
+    /// move a seek makes, and it's the whole recovery.
+    fn follow_tape(&mut self, source: Option<Source>) -> Option<Source> {
+        let Some(tape) = source.as_ref().and_then(|src| src.tape.clone()) else {
+            self.shared.clear_shift();
+
+            return source;
+        };
+
+        let shift = tape.shift();
+        self.shared.publish_shift(self.idx, shift);
+        self.publish_marks(&tape);
+
+        if tape.took_underrun() {
+            log::info!("the pause outlasted the buffer, re-syncing at the back of it");
+
+            return self.seek_live_to(source, shift.window_secs);
+        }
+
+        source
+    }
+
+    /// Hand the station's song boundaries up for whatever is drawing the
+    /// buffer.
+    ///
+    /// Two clocks, because the list changes for two different reasons. A
+    /// song announced or one falling off the back is a real change and gets
+    /// a revision, which is what a reader polling for song changes watches.
+    /// The distances moving as the live edge advances is not, and it
+    /// happens on every chunk, so it rides a timer instead: often enough
+    /// that a strip drawn at sixty frames a second is never looking at a
+    /// stale one, rarely enough that this isn't rebuilding a list of
+    /// strings on every pass of the decode loop.
+    fn publish_marks(&mut self, tape: &Arc<Tape>) {
+        let rev = tape.marks_rev();
+        let changed = rev != self.marks_rev;
+        if !changed && self.marks_at.elapsed() < MARKS_REFRESH {
+            return;
+        }
+
+        self.marks_rev = rev;
+        self.marks_at = Instant::now();
+        self.shared.publish_live_marks(tape.live_marks(), changed);
+    }
+
+    /// Hang up on a station that has been sitting paused long enough for the
+    /// tape to be worthless.
+    ///
+    /// The timeshift is what makes holding a connection through a pause worth
+    /// anything, and past [`LIVE_IDLE_HANGUP_SECS`] there's nothing left in
+    /// it that the listener paused on: the window has rolled several times
+    /// over. So the socket goes and the resume rejoins live, which is what a
+    /// pause on a station used to do immediately and now only does when the
+    /// pause has stopped being a pause and started being a forgotten tab.
+    fn idle_hangup(&mut self, source: Option<Source>) -> Option<Source> {
+        let holding = source.as_ref().is_some_and(|src| src.tape.is_some())
+            && !self.shared.playing.load(Ordering::Relaxed);
+        if !holding {
+            self.paused_since = None;
+
+            return source;
+        }
+
+        let since = *self.paused_since.get_or_insert_with(Instant::now);
+        if since.elapsed().as_secs() < LIVE_IDLE_HANGUP_SECS {
+            return source;
+        }
+
+        log::info!("station paused for {LIVE_IDLE_HANGUP_SECS}s, letting the connection go");
+        self.paused_since = None;
+
+        self.hang_up(source)
+    }
+
+    /// How far into the audible track the position clock stands, in
+    /// device-rate frames, and zero when the clock is somewhere else
+    /// entirely. What a station hands to the open that replaces it, so the
+    /// elapsed readout carries on rather than restarting.
+    fn elapsed_frames(&self) -> u64 {
+        self.shared
+            .position(self.device_rate)
+            .filter(|(track, _)| *track == self.idx)
+            .map(|(_, secs)| (secs * self.device_rate as f64).round() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Hang up on a live station, which is what every radio does when you stop
+    /// listening to it. Hands the source straight back for everything else, so
+    /// a file and a seekable stream pause exactly the way they always have.
+    ///
+    /// A station keeps broadcasting whether or not anyone is on the socket.
+    /// Holding the connection open through a pause leaves the server either
+    /// dropping us or feeding us at the rate we read, which is not at all, so
+    /// the resume would hear a minute-old broadcast and stay a minute behind
+    /// it for the rest of the session. Closing means the resume asks for now
+    /// and gets now.
+    ///
+    /// The close is the drop. `HttpSource` has no way to shut its body without
+    /// leaving itself half alive, and by the time the source exists the whole
+    /// transport is buried under the decoder and the format reader with no
+    /// handle out. Dropping the `Source` takes all of it, socket included.
+    fn hang_up(&mut self, source: Option<Source>) -> Option<Source> {
+        // Only the station the listener is actually hearing. The decode cursor
+        // can be a track ahead of the speakers at a gapless boundary, and
+        // hanging up on a stream that hasn't started playing yet would cut the
+        // file still coming out of the ring.
+        let pos = self.audible_pos();
+        if source.is_none() || pos != self.pos || !self.live_at(pos) {
+            return source;
+        }
+
+        // Where the clock stood, read before the flush moves `pushed_playable`
+        // out from under it. The resume hands this back to `adopt`, so the
+        // elapsed readout carries on from where the listener stopped hearing
+        // rather than restarting at zero. Freezing it is the ordinary
+        // transport behaviour and the honest one here too: the counter says
+        // how much of the station has been heard, and through a pause that
+        // number doesn't move. Counting on through the pause would have it
+        // claim a minute nobody listened to, and resetting on resume would
+        // leak the hang-up into a transport that has no business showing it.
+        let elapsed = self.elapsed_frames();
+
+        drop(source);
+
+        // Nothing from the old connection survives. The ring holds up to half a
+        // second of a broadcast that has moved on since, and the pending buffer
+        // holds a chunk more; playing either on resume is the exact thing this
+        // path exists to stop.
+        self.flush_ring();
+        self.hung_up = Some(elapsed);
+
+        None
+    }
+
+    /// Come back to the station a pause hung up on: one fresh open at the live
+    /// edge, down the same [`open_file_at`](Self::open_file_at) path a first
+    /// open takes. So the title sink, the probe and the skip-on-failure are
+    /// the ones already tested, and a station that died while nobody was
+    /// listening fails here the way it would have failed on the first open.
+    ///
+    /// The published title survives the pause on purpose. It's the only
+    /// now-playing a stream has, and blanking it would leave the transport
+    /// naming nothing for as long as the pause lasts. A station still on the
+    /// same song republishes the same text, which `publish_title` drops as a
+    /// repeat: the slot already holds it, so the display is right and the
+    /// revision correctly says no song changed.
+    fn rejoin(&mut self) -> Option<Source> {
+        let elapsed = self.hung_up.take()?;
+        let pos = self.audible_pos();
+
+        // Play means play whether or not the station answers. A rejoin that
+        // dies falls forward to the next entry, and that entry should not land
+        // on a transport still reading as paused.
+        self.shared.playing.store(true, Ordering::Relaxed);
+        self.shared.ended.store(false, Ordering::Relaxed);
+
+        let (src, at, info) = self.open_file_at(pos)?;
+        // Falling forward past a dead station lands on a different track, and
+        // the station's elapsed means nothing there: that one starts at its
+        // top like any other open.
+        let start = if at == pos { elapsed } else { 0 };
+        self.adopt(at, info, start, 0);
+
+        Some(src)
     }
 
     /// Which position the next open uses when the playing track ends: the same
@@ -1142,11 +1732,41 @@ impl Engine {
     /// the first frame.
     fn skip_to(
         &mut self,
-        old: Option<Source>,
+        mut old: Option<Source>,
         p: usize,
         back: bool,
         at: Option<f64>,
     ) -> Option<Source> {
+        // A station is the one open slow enough for the wait to be a state of
+        // its own, and everything upstream answers "what is loaded" off the
+        // position clock. Leave that clock on the track being left and the
+        // whole connect renders as the old track still playing, with the
+        // station's `Opening` published on an entry nobody upstream is
+        // looking at. So the entry is claimed here, before the open, and the
+        // open catches up to it.
+        //
+        // Only a station. A file opens in a millisecond, and a skip that
+        // lands anywhere but the top (a bookmark, a cue) would show a 0:00
+        // that was never true on the way past.
+        let live = self.live_at(p);
+        // The wind-back asks the clock where the listener has actually got
+        // to, and the claim below is about to answer that question with the
+        // station at its top, so on the live path the fade is prepared first.
+        // It costs nothing to move: it and the open both happen while the
+        // ring is still playing, and the cut is still after both.
+        let had_source = old.is_some();
+        let wound = live.then(|| self.prepare_skip_fade(old.take())).flatten();
+        if live {
+            // The pair `adopt` sets, without the rest of what `adopt` does,
+            // which belongs to a track that really has a source behind it.
+            // The same move `open_start` makes for a restore that comes up
+            // on a station, and `adopt` writes over both when the source
+            // arrives; this is only about the seconds in between.
+            self.pos = p;
+            self.idx = self.order[p].idx;
+            self.claim_segment();
+        }
+
         let opened = self.open_file_at(p);
         // Nothing decoding, nothing mixing, and the ring still holding
         // samples: this is the half second between the last track's EOF and
@@ -1156,8 +1776,8 @@ impl Engine {
         // what's left the way it would at any gapless boundary, and
         // `pushed_playable` already points past the tail, so the segment
         // goes where the new track really becomes audible.
-        let draining = old.is_none() && self.fade.is_none() && !self.ring_drained();
-        let leaving = self.prepare_skip_fade(old);
+        let draining = !had_source && self.fade.is_none() && !self.ring_drained();
+        let leaving = wound.or_else(|| self.prepare_skip_fade(old));
         let cut = if draining {
             self.pushed_playable
         } else {
@@ -1373,7 +1993,7 @@ impl Engine {
             .iter()
             .map(|e| QueueEntry {
                 id: e.id,
-                path: self.queue[e.idx].clone(),
+                locator: self.queue[e.idx].clone(),
                 explicit: e.explicit,
                 idx: e.idx,
                 group: self.groups[e.idx],
@@ -1417,7 +2037,7 @@ impl Engine {
         }
     }
 
-    /// Splice paths into the pool and order right after entry `after` (or at
+    /// Splice tracks into the pool and order right after entry `after` (or at
     /// the end). Never flushes: the current track keeps playing, only the
     /// future changes. If the splice goes in before the cursor the cursor
     /// moves with it so the playing entry stays put. Returns the order
@@ -1426,13 +2046,13 @@ impl Engine {
     fn insert(
         &mut self,
         after: Option<u64>,
-        paths: Vec<PathBuf>,
+        locators: Vec<Locator>,
         groups: Vec<Option<u64>>,
         gains: Vec<gain::ReplayGain>,
         spans: Vec<Option<Span>>,
         explicit: bool,
     ) -> Option<usize> {
-        if paths.is_empty() {
+        if locators.is_empty() {
             return None;
         }
         let at = match after {
@@ -1442,14 +2062,22 @@ impl Engine {
             },
             None => self.order.len(),
         };
-        let mut new = Vec::with_capacity(paths.len());
-        for (i, path) in paths.into_iter().enumerate() {
+        let mut new = Vec::with_capacity(locators.len());
+        for (i, locator) in locators.into_iter().enumerate() {
             let idx = self.queue.len();
-            self.queue.push(path);
+            self.queue.push(locator);
             self.groups.push(groups.get(i).copied().flatten());
             self.gains.push(gains.get(i).copied().unwrap_or_default());
             self.spans.push(spans.get(i).copied().flatten());
+            // Every parallel-to-the-pool vector grows here, or a slot written
+            // by index for one of these entries lands past the end and the
+            // publish silently does nothing. That's what a station added by
+            // Play now was hitting: opened, described itself, and published
+            // into a vector that had no room for it.
             self.shared.tracks.lock().unwrap().push(None);
+            self.shared.titles.lock().unwrap().push(None);
+            self.shared.station.lock().unwrap().push(None);
+            self.shared.stream.lock().unwrap().push(None);
             new.push(OrderEntry {
                 id: self.next_id,
                 idx,
@@ -1783,6 +2411,29 @@ impl Engine {
         prune_segments(&mut segments, consumed);
     }
 
+    /// Register a position segment for the cursor's track at its own top,
+    /// landing on the frame the speakers are at rather than on the one the
+    /// next push will reach.
+    ///
+    /// The claim a station makes before its open, and the only segment here
+    /// with no audio behind it. Everything else registers at
+    /// `pushed_playable`, which is where the samples about to be written
+    /// really become audible; a claim has nothing to line up with and wants
+    /// to be read now. A ring still holding the last track's tail, or a
+    /// pause holding it for as long as the pause lasts, would leave a
+    /// segment out at `pushed_playable` waiting on a drain the cut is about
+    /// to cancel, and the clock would never reach it at all.
+    fn claim_segment(&self) {
+        let consumed = self.shared.frames_consumed.load(Ordering::Relaxed);
+        let mut segments = self.shared.segments.lock().unwrap();
+        segments.push(Segment {
+            at_frame: consumed,
+            track: self.idx,
+            track_frame: 0,
+        });
+        prune_segments(&mut segments, consumed);
+    }
+
     /// Drop the section, if there was one, and say so. Idempotent, so the
     /// paths that clear defensively don't have to ask first.
     fn clear_ab(&mut self) {
@@ -1861,6 +2512,8 @@ fn skip_fade_discard(owed: u64, short: i64, device_rate: u32) -> Option<u64> {
 
 enum FlushAction {
     Seek(f64),
+    /// Move to this many seconds behind a station's live edge.
+    SeekLive(f64),
     /// Jump to this play-order position.
     Track {
         pos: usize,
@@ -1998,7 +2651,8 @@ pub fn shuffle_head<T>(slice: &mut [T], width: usize) {
 
 /// Run a call into symphonia or a codec crate so a panic inside it comes
 /// back as an error on the path the caller already has for a file it can't
-/// read.
+/// read. `origin` is the path or the URL the bytes came from, for the log
+/// line and the error.
 ///
 /// Decoders parse whatever bytes a file holds, and a malformed one has
 /// already found an arithmetic overflow deep inside a third-party codec and
@@ -2013,15 +2667,11 @@ pub fn shuffle_head<T>(slice: &mut [T], width: usize) {
 /// touches the decoder again.
 pub(crate) fn guard_decode<T>(
     what: &str,
-    path: &std::path::Path,
+    origin: &str,
     f: impl FnOnce() -> T,
 ) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
-        let msg = format!(
-            "{what} panicked on {}: {}",
-            path.display(),
-            panic_detail(&*payload)
-        );
+        let msg = format!("{what} panicked on {origin}: {}", panic_detail(&*payload));
         log::error!("{msg}");
         msg
     })
@@ -2045,13 +2695,14 @@ fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
 /// (decoded frames, frames the container claims are playable). Equal numbers
 /// mean the encoder delay/padding trim is exact, i.e. the gapless boundary
 /// is sample-accurate by construction. No audio device involved.
-pub fn count_frames(path: &PathBuf) -> Result<(u64, Option<u64>), String> {
+pub fn count_frames(path: &Path) -> Result<(u64, Option<u64>), String> {
     // Probe once for the source rate, then open for real with the device
     // rate equal to it, so the resampler is a passthrough and the count is
     // in source frames.
-    let (probe, info) = Source::open(path, 48000, None)?;
+    let (probe, info) = Source::open(&Locator::Local(path.to_path_buf()), 48000, None)?;
     drop(probe);
-    let (mut src, info) = Source::open(path, info.sample_rate, None)?;
+    let (mut src, info) =
+        Source::open(&Locator::Local(path.to_path_buf()), info.sample_rate, None)?;
 
     let mut decoded: u64 = 0;
     let mut chunk = Vec::new();
@@ -2080,12 +2731,13 @@ pub fn count_frames(path: &PathBuf) -> Result<(u64, Option<u64>), String> {
 /// The RMS runs through the same scale and curve, so it always sits inside
 /// the extremes. No audio device involved; run it on a background thread,
 /// a long track is a full decode.
-pub fn decode_peaks(path: &PathBuf, bins: usize) -> Result<PeakLanes, String> {
+pub fn decode_peaks(path: &Path, bins: usize) -> Result<PeakLanes, String> {
     // Probe once for the source rate, then open for real with the device
     // rate equal to it, so the resampler is a passthrough.
-    let (probe, info) = Source::open(path, 48000, None)?;
+    let (probe, info) = Source::open(&Locator::Local(path.to_path_buf()), 48000, None)?;
     drop(probe);
-    let (mut src, info) = Source::open(path, info.sample_rate, None)?;
+    let (mut src, info) =
+        Source::open(&Locator::Local(path.to_path_buf()), info.sample_rate, None)?;
 
     // Coarse pass: one bin per lane per fixed block of frames, so memory
     // stays a few thousand bins whatever the track length, then fold down
@@ -2221,13 +2873,22 @@ fn normalize_peaks(lanes: &mut [Vec<PeakBin>]) {
 /// has nothing to show. Decoding a single window off-thread gives the frozen
 /// bars a real frame to stand on. No audio device involved; run it on a
 /// background thread.
+///
+/// Local tracks only. A remote one would have to open a second connection to
+/// the server, and paying a network round trip to decorate a paused load is
+/// the wrong trade: the bars stay blank until playback feeds the tap, which
+/// is what they do today on any track that fails to decode.
 pub fn decode_window(
-    path: &PathBuf,
+    locator: &Locator,
     position_secs: f64,
     device_rate: u32,
     frames: usize,
 ) -> Result<Vec<f32>, String> {
-    let (mut src, _) = Source::open(path, device_rate, None)?;
+    if locator.path().is_none() {
+        return Err("no decode window for a remote track".into());
+    }
+
+    let (mut src, _) = Source::open(locator, device_rate, None)?;
     if position_secs > 0.0 {
         let _ = src.seek(position_secs);
     }
@@ -2250,31 +2911,194 @@ pub fn decode_window(
 }
 
 impl Source {
-    /// Open `path` and hand back a source for the part of it named by
+    /// Open `locator` and hand back a source for the part of it named by
     /// `span`, None meaning all of it. A cue track is a span inside a whole
     /// disc image, and from here on the source behaves as if the span were
     /// the whole file: it opens positioned at the span's first frame, counts
     /// its position from there, reports the span's length, and calls the
     /// span's end the end of the track.
+    ///
+    /// A remote locator changes where the bytes come from and nothing else.
+    /// Everything past the stream construction below reads the same for both,
+    /// because [`MediaSourceStream`] takes a `MediaSource` and an
+    /// [`crate::http::HttpSource`] goes in exactly where a `File` did.
+    ///
+    /// Station titles are dropped. The openers that come through here are the
+    /// off-thread analysis passes (ReplayGain, peaks, the spectrum window),
+    /// and none of them is playing anything for anyone to see a title on.
+    /// Playback opens through [`Source::open_titled`].
     fn open(
-        path: &PathBuf,
+        locator: &Locator,
         device_rate: u32,
         span: Option<Span>,
     ) -> Result<(Source, TrackInfo), String> {
-        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let (source, info, _) = Source::open_titled(
+            locator,
+            device_rate,
+            span,
+            crate::icy::no_titles(),
+            crate::shared::no_stream(),
+            // Nothing is waiting on an analysis pass the way a listener waits
+            // on a transport, and the passes have their own cancellation.
+            Arc::new(AtomicBool::new(false)),
+            // Nothing pauses an analysis pass either, so the tape only ever
+            // has to hold what the decoder hasn't caught up with.
+            LIVE_BUFFER_MIN_SECS,
+        )?;
+
+        Ok((source, info))
+    }
+
+    /// The same open with somewhere for a station's in-band titles to go,
+    /// and with what the station said about itself handed back beside the
+    /// track info. `on_title` fires on this thread from inside the decode's
+    /// reads, for as long as the source lives, so it has to be short; the
+    /// description is read once here and returned, because that's the only
+    /// time the headers carrying it exist.
+    ///
+    /// A local file answers None for the description, which is the shape of
+    /// the thing: there are no headers on a file.
+    #[allow(clippy::too_many_arguments)]
+    fn open_titled(
+        locator: &Locator,
+        device_rate: u32,
+        span: Option<Span>,
+        on_title: TitleSink,
+        on_stream: StreamSink,
+        interrupt: Arc<AtomicBool>,
+        live_buffer_secs: u32,
+    ) -> Result<(Source, TrackInfo, Option<StationInfo>), String> {
+        // Where the open-latency lines measure from. A local open is over
+        // before the first of them would print, so only a remote one logs.
+        let began = Instant::now();
+        let remote_open = matches!(locator, Locator::Remote(_));
+
+        // A file names its container in its extension. A URL doesn't, so the
+        // hint comes off what the source stored or off the `Content-Type` the
+        // server answered with, and failing both the probe sniffs the bytes.
+        let (mss, hint, origin, station, tape) = match locator {
+            Locator::Local(path) => {
+                let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+                let mut hint = Hint::new();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    hint.with_extension(ext);
+                }
+
+                (mss, hint, path.display().to_string(), None, None)
+            }
+
+            Locator::Remote(remote) => {
+                let (opened, station) =
+                    crate::http::open(remote, on_title, on_stream, interrupt, live_buffer_secs)?;
+                let mss = MediaSourceStream::new(opened.source, Default::default());
+
+                let mut hint = Hint::new();
+                if !remote.hint.is_empty() {
+                    hint.with_extension(&remote.hint);
+                } else if let Some(ext) = crate::http::extension_for(&station.content_type) {
+                    hint.with_extension(ext);
+                }
+
+                (mss, hint, remote.url.clone(), Some(station), opened.tape)
+            }
+        };
+
+        let (source, info) = Source::build(
+            mss,
+            hint,
+            locator.label(),
+            origin,
+            device_rate,
+            span,
+            locator.path(),
+            began,
+            remote_open,
+            tape,
+        )?;
+
+        Ok((source, info, station))
+    }
+
+    /// Re-sync a decoder onto another point in the tape this source is
+    /// already reading, `at` being an absolute offset in the stream.
+    ///
+    /// The tape and the connection behind it carry on untouched: what's
+    /// rebuilt is the probe, the format reader and the decoder, over a fresh
+    /// cursor. That rebuild is the whole trick. Nothing about a station's
+    /// bytes lets a running decoder be told to look somewhere else, and MP3
+    /// and ADTS both find their footing wherever a reader drops in, so
+    /// starting over at the new offset is the cheapest honest way to land
+    /// there. Ogg needs the cursor on a page boundary, which the tape's own
+    /// seek already scanned to.
+    ///
+    /// Errors leave the caller's source alone. A probe that can't make sense
+    /// of a mid-stream drop-in (the codec's setup headers went past hours
+    /// ago, which is Ogg's problem and nobody else's) has to be survivable:
+    /// the listener asked to move inside a broadcast, and the answer to
+    /// failing at that is to keep playing what they had.
+    fn reopen_live(&self, at: u64, hint_ext: &str) -> Result<(Source, TrackInfo), String> {
+        let tape = self.tape.clone().ok_or("not a live stream")?;
+        let mss = MediaSourceStream::new(
+            Box::new(crate::http::live_source(&tape, at)),
+            Default::default(),
+        );
 
         let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
+        if !hint_ext.is_empty() {
+            hint.with_extension(hint_ext);
         }
 
+        Source::build(
+            mss,
+            hint,
+            self.name.clone(),
+            self.origin.clone(),
+            self.device_rate,
+            None,
+            None,
+            Instant::now(),
+            false,
+            Some(tape),
+        )
+    }
+
+    /// Everything after the bytes: probe the container, build the decoder,
+    /// work out how long the track is, and hand back a source positioned at
+    /// the start of whatever it plays.
+    ///
+    /// Shared by the two things that make a source. A locator open builds the
+    /// stream off a file or a fresh connection; a timeshift seek builds one
+    /// over a tape that's already running, at another point in it. Neither
+    /// knows anything the other doesn't past this line, which is the point of
+    /// the split: a station re-synced mid-stream goes through the same probe
+    /// and the same decoder setup as one opened from scratch.
+    ///
+    /// `began` and `remote` are only the open-latency lines, and `path` is
+    /// the one thing a remote track can't have: a second read of the file for
+    /// a fragmented MP4's duration.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        mss: MediaSourceStream<'static>,
+        hint: Hint,
+        name: String,
+        origin: String,
+        device_rate: u32,
+        span: Option<Span>,
+        path: Option<&Path>,
+        began: Instant,
+        remote: bool,
+        tape: Option<Arc<Tape>>,
+    ) -> Result<(Source, TrackInfo), String> {
         // The probe reads the container's headers, which is third-party
         // parsing of file bytes like the decode below. A panic in there
         // leaves nothing to be inconsistent: the reader it was building
         // never got out of the call, and everything it borrowed is dropped
-        // on the way to the error.
-        let format = guard_decode("probe", path, || {
+        // on the way to the error. Bytes off a socket are the same bet: the
+        // reader owns the connection and drops it on the way out.
+        let probe_began = Instant::now();
+        let format = guard_decode("probe", &origin, || {
             symphonia::default::get_probe().probe(
                 &hint,
                 mss,
@@ -2283,6 +3107,18 @@ impl Source {
             )
         })?
         .map_err(|e| format!("probe: {e}"))?;
+
+        // Second of the open-latency timings, and the one that's ours to
+        // shorten if it's the long pole: the probe reads until it recognises
+        // a container, and on a stream every byte it wants is a byte off the
+        // wire at the station's own bitrate.
+        if remote {
+            log::debug!(
+                "stream open: probe settled in {:?}, {:?} into the open",
+                probe_began.elapsed(),
+                began.elapsed()
+            );
+        }
 
         let track = format
             .default_track(TrackType::Audio)
@@ -2314,8 +3150,11 @@ impl Source {
         // A fragmented MP4 states its length in the movie header and
         // nowhere symphonia looks, so without this the whole file reads as
         // zero seconds long: no seek bar range, and a fade window that
-        // treats the track as ended before it started.
-        let file_secs = stated_secs.or_else(|| rox_library::mp4::fragment_duration_secs(path));
+        // treats the track as ended before it started. It reads the file a
+        // second time, so a remote track goes without and keeps whatever the
+        // container stated.
+        let file_secs =
+            stated_secs.or_else(|| path.and_then(rox_library::mp4::fragment_duration_secs));
         let file_frames =
             stated_frames.or_else(|| file_secs.map(|s| (s * sample_rate as f64).round() as u64));
 
@@ -2323,7 +3162,7 @@ impl Source {
         // fields, so it panics on the same class of bad file the decode
         // does. Nothing survives the failure either: the half-built decoder
         // is dropped inside the call and the source is never constructed.
-        let decoder = guard_decode("decoder setup", path, || {
+        let decoder = guard_decode("decoder setup", &origin, || {
             crate::codecs::registry().make_audio_decoder(params, &AudioDecoderOptions::default())
         })?
         .map_err(|e| format!("decoder: {e}"))?;
@@ -2366,10 +3205,7 @@ impl Source {
         };
 
         let info = TrackInfo {
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string()),
+            name,
             duration_secs,
             num_frames,
             sample_rate,
@@ -2387,7 +3223,8 @@ impl Source {
         let mut source = Source {
             format,
             decoder,
-            path: path.clone(),
+            name: info.name.clone(),
+            origin,
             poisoned: false,
             track_id,
             time_base,
@@ -2400,6 +3237,8 @@ impl Source {
             total_frames,
             span: span_frames,
             src_frame: 0,
+            opened_at: remote.then_some(began),
+            tape,
         };
 
         // Seek to the span's first frame before the caller ever asks for a
@@ -2451,11 +3290,32 @@ impl Source {
     fn next_chunk(&mut self, device_rate: u32, out: &mut Vec<f32>) -> bool {
         let from = out.len();
         let more = self.decode_chunk(device_rate, out);
+
+        // How many bytes that audio cost, which is the only exact answer to
+        // how long a byte of this station is. The tape holds the byte count
+        // itself; this is the other half of the ratio, and the window it
+        // sizes and the distance it reports both come out of it.
+        if let Some(tape) = self.tape.as_ref() {
+            tape.note_audio((out.len() - from) as f64 / 2.0 / device_rate as f64);
+        }
         // The source-gain stage (ADR 19), before this source's samples meet
         // any other's. A fade's per-frame pair applies over in the engine,
         // where both sources are in hand.
         gain::apply(&mut out[from..], self.gain);
         self.pos_frames += ((out.len() - from) / 2) as u64;
+
+        // Last of the open-latency timings: audio exists. Taken rather than
+        // read, so this prints once per stream and the branch after it is an
+        // `Option` that's already None.
+        if out.len() > from
+            && let Some(began) = self.opened_at.take()
+        {
+            log::debug!(
+                "stream open: first audio {:?} after the open began",
+                began.elapsed()
+            );
+        }
+
         more
     }
 
@@ -2481,8 +3341,8 @@ impl Source {
             // the state the unwind came out of. See [`guard_decode`] for why
             // asserting unwind safety holds here.
             let read = {
-                let (path, format) = (&self.path, &mut self.format);
-                guard_decode("packet read", path, || format.next_packet())
+                let (origin, format) = (&self.origin, &mut self.format);
+                guard_decode("packet read", origin, || format.next_packet())
             };
             let Ok(read) = read else {
                 self.poisoned = true;
@@ -2512,8 +3372,9 @@ impl Source {
             // decoder call it came from, and reading it is as much the
             // codec's code as producing it was.
             let decoded = {
-                let (path, decoder, scratch) = (&self.path, &mut self.decoder, &mut self.scratch);
-                guard_decode("decode", path, || {
+                let (origin, decoder, scratch) =
+                    (&self.origin, &mut self.decoder, &mut self.scratch);
+                guard_decode("decode", origin, || {
                     decoder.decode(&packet).map(|decoded| {
                         let frames = decoded.frames();
                         if frames == 0 {
@@ -2716,8 +3577,8 @@ impl Source {
         // A panic there poisons the source and reads as a seek that failed,
         // which every caller already handles.
         let seeked = {
-            let (path, format, track_id) = (&self.path, &mut self.format, self.track_id);
-            guard_decode("seek", path, || {
+            let (origin, format, track_id) = (&self.origin, &mut self.format, self.track_id);
+            guard_decode("seek", origin, || {
                 format.seek(
                     SeekMode::Accurate,
                     SeekTo::Time {
@@ -2733,8 +3594,8 @@ impl Source {
         };
         match seeked {
             Ok(seeked) => {
-                let (path, decoder) = (&self.path, &mut self.decoder);
-                if guard_decode("decoder reset", path, || decoder.reset()).is_err() {
+                let (origin, decoder) = (&self.origin, &mut self.decoder);
+                if guard_decode("decoder reset", origin, || decoder.reset()).is_err() {
                     self.poisoned = true;
                     return None;
                 }
@@ -2771,32 +3632,56 @@ impl Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::mpsc;
+
+    use rox_library::locator::Remote;
+
+    use crate::icy::IcyTitle;
+
+    /// A local locator for a fixture path, since the engine asks where a
+    /// track's bytes come from and every fixture here is a file.
+    fn local(path: impl Into<PathBuf>) -> Locator {
+        Locator::Local(path.into())
+    }
 
     /// An engine wired over synthetic paths and a throwaway ring, no audio
     /// device and no decode thread. Enough to drive the pure queue-edit math:
     /// order, cursor, and the runahead detection. `n` context entries with
     /// stable ids 0..n.
     fn test_engine(n: usize) -> Engine {
-        engine_over((0..n).map(|i| PathBuf::from(format!("t{i}"))).collect())
+        engine_over(
+            (0..n)
+                .map(|i| Locator::Local(PathBuf::from(format!("t{i}"))))
+                .collect(),
+        )
     }
 
-    /// The same over paths the caller picked, for the tests that open real
+    /// The same over locators the caller picked, for the tests that open real
     /// files instead of driving the queue math over synthetic ones.
-    fn engine_over(paths: Vec<PathBuf>) -> Engine {
-        let shared = Arc::new(Shared::new(paths.len()));
-        let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(16);
+    fn engine_over(locators: Vec<Locator>) -> Engine {
+        engine_with_ring(locators, 8).0
+    }
+
+    /// [`engine_over`] with the ring's read side kept, for the tests that have
+    /// to see what the audio callback would find in it. `frames` stereo frames
+    /// of capacity.
+    fn engine_with_ring(locators: Vec<Locator>, frames: usize) -> (Engine, rtrb::Consumer<f32>) {
+        let shared = Arc::new(Shared::new(locators.len()));
+        let (producer, consumer) = rtrb::RingBuffer::<f32>::new(frames * 2);
         let (_tx, rx) = mpsc::channel::<Cmd>();
-        Engine::new(
+        let engine = Engine::new(
             StartQueue {
-                paths,
+                locators,
                 ..StartQueue::default()
             },
             shared,
             producer,
             48000,
             rx,
-        )
+        );
+
+        (engine, consumer)
     }
 
     /// The similarity mode's reorder: the named entries lead in the order
@@ -3014,11 +3899,14 @@ mod tests {
     #[test]
     fn a_reorder_during_a_boundary_fade_leaves_the_incoming_track_alone() {
         let fx = Fixtures::new("fade-reorder");
-        let mut e = engine_over(vec![fx.wav("a.wav", 0.2), fx.wav("b.wav", 0.2)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 0.2)),
+            local(fx.wav("b.wav", 0.2)),
+        ]);
         // Two more entries so there's a tail to reorder behind the fade.
         e.insert(
             None,
-            vec!["c".into(), "d".into()],
+            vec![local("c"), local("d")],
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -3060,7 +3948,7 @@ mod tests {
         // What A sounds like, off a source that only seeks there. The
         // fixture is a sine, so a window this size is a real comparison
         // rather than two runs of silence matching.
-        let (mut probe, _) = Source::open(&path, rate, None).expect("the fixture opens");
+        let (mut probe, _) = Source::open(&local(&path), rate, None).expect("the fixture opens");
         probe.seek(a_secs).expect("the probe lands on A");
         let mut want = Vec::new();
         while want.len() < 128 {
@@ -3071,7 +3959,7 @@ mod tests {
         }
         want.truncate(128);
 
-        let (mut src, _) = Source::open(&path, rate, None).expect("the fixture opens");
+        let (mut src, _) = Source::open(&local(&path), rate, None).expect("the fixture opens");
         let mut out = Vec::new();
         let mut played: Vec<f32> = Vec::new();
         let mut wraps = 0;
@@ -3129,7 +4017,7 @@ mod tests {
         let rate = 48_000u32;
         let a = (1.5 * rate as f64) as u64;
         let b = (2.1 * rate as f64) as u64;
-        let (mut src, _) = Source::open(&path, rate, None).expect("the fixture opens");
+        let (mut src, _) = Source::open(&local(&path), rate, None).expect("the fixture opens");
 
         let mut out = Vec::new();
         let landed = loop {
@@ -3180,7 +4068,7 @@ mod tests {
     #[test]
     fn a_seek_out_of_the_section_clears_it_and_one_inside_keeps_it() {
         let fx = Fixtures::new("ab-seek");
-        let mut e = engine_over(vec![fx.wav("a.wav", 4.0)]);
+        let mut e = engine_over(vec![local(fx.wav("a.wav", 4.0))]);
         let source = ready_to_skip(&mut e, 0);
         e.ab = Some(AbLoop {
             track: 0,
@@ -3488,7 +4376,7 @@ mod tests {
         // Splice two grouped tracks and one ungrouped behind the head.
         let at = e.insert(
             Some(0),
-            vec!["a".into(), "b".into(), "c".into()],
+            vec![local("a"), local("b"), local("c")],
             vec![Some(7), Some(7), None],
             Vec::new(),
             Vec::new(),
@@ -3513,7 +4401,7 @@ mod tests {
         let before: Vec<u64> = e.order.iter().map(|en| en.id).collect();
         let at = e.insert(
             None,
-            vec!["c0".into(), "c1".into()],
+            vec![local("c0"), local("c1")],
             vec![Some(9), Some(9)],
             Vec::new(),
             Vec::new(),
@@ -3548,7 +4436,7 @@ mod tests {
         e.pos = 2;
         e.insert(
             None,
-            vec!["c0".into(), "c1".into(), "c2".into(), "c3".into()],
+            vec![local("c0"), local("c1"), local("c2"), local("c3")],
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -3583,7 +4471,7 @@ mod tests {
         e.pos = 1;
         let at = e.insert(
             None,
-            vec!["c0".into()],
+            vec![local("c0")],
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -3599,7 +4487,7 @@ mod tests {
         // Group, gain, and span vecs shorter than paths pad rather than panic.
         e.insert(
             None,
-            vec!["a".into(), "b".into()],
+            vec![local("a"), local("b")],
             vec![Some(3)],
             vec![gain::ReplayGain {
                 track_db: Some(-6.0),
@@ -3743,7 +4631,10 @@ mod tests {
     #[test]
     fn a_skip_that_lands_publishes_its_fade() {
         let fx = Fixtures::new("skip-lands");
-        let mut e = engine_over(vec![fx.wav("a.wav", 4.0), fx.wav("b.wav", 4.0)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 4.0)),
+            local(fx.wav("b.wav", 4.0)),
+        ]);
         e.fade_secs = 4.0;
         let source = ready_to_skip(&mut e, 48_000);
 
@@ -3761,7 +4652,10 @@ mod tests {
     #[test]
     fn a_skip_to_a_dead_end_leaves_no_fade_behind() {
         let fx = Fixtures::new("skip-dead-end");
-        let mut e = engine_over(vec![fx.wav("a.wav", 4.0), fx.missing("gone.wav")]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 4.0)),
+            local(fx.missing("gone.wav")),
+        ]);
         e.fade_secs = 4.0;
         let source = ready_to_skip(&mut e, 48_000);
 
@@ -3778,7 +4672,10 @@ mod tests {
     #[test]
     fn a_boundary_with_nothing_left_to_fade_splices_instead() {
         let fx = Fixtures::new("boundary-empty");
-        let mut e = engine_over(vec![fx.wav("a.wav", 4.0), fx.wav("b.wav", 4.0)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 4.0)),
+            local(fx.wav("b.wav", 4.0)),
+        ]);
         e.fade_secs = 4.0;
         let mut src = e.open_at(0).expect("the fixture opens");
         // The container says the track is over while the decoder still has
@@ -3814,8 +4711,8 @@ mod tests {
     fn a_track_shorter_than_the_fade_closes_it_at_its_own_end() {
         let fx = Fixtures::new("short-track");
         let path = fx.wav("a.wav", 4.0);
-        let mut e = engine_over(vec![path.clone()]);
-        let (src, _) = Source::open(&path, 48_000, None).expect("the fixture opens");
+        let mut e = engine_over(vec![local(&path)]);
+        let (src, _) = Source::open(&local(&path), 48_000, None).expect("the fixture opens");
         // A twelve second window five seconds in, which is where a five
         // second track would hit its own EOF.
         let mut fade = Fade::new(src, 12 * 48_000);
@@ -3833,8 +4730,8 @@ mod tests {
     fn dropping_an_unmixed_fade_takes_its_publish_with_it() {
         let fx = Fixtures::new("drop-fade");
         let path = fx.wav("a.wav", 4.0);
-        let mut e = engine_over(vec![path.clone()]);
-        let (src, _) = Source::open(&path, 48_000, None).expect("the fixture opens");
+        let mut e = engine_over(vec![local(&path)]);
+        let (src, _) = Source::open(&local(&path), 48_000, None).expect("the fixture opens");
         e.fade = Some(Fade::new(src, 96_000));
         e.publish_fade(0, 96_000, false);
 
@@ -3905,7 +4802,10 @@ mod tests {
     #[test]
     fn a_skip_into_a_draining_ring_lets_the_ending_finish() {
         let fx = Fixtures::new("skip-draining");
-        let mut e = engine_over(vec![fx.wav("a.wav", 1.0), fx.wav("b.wav", 1.0)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 1.0)),
+            local(fx.wav("b.wav", 1.0)),
+        ]);
         // Four frames of the last track still queued and unheard, with no
         // source decoding: the state the run loop is in while the ring drains.
         for _ in 0..8 {
@@ -3937,7 +4837,10 @@ mod tests {
     #[test]
     fn a_skip_out_of_a_drained_ring_still_cuts() {
         let fx = Fixtures::new("skip-drained");
-        let mut e = engine_over(vec![fx.wav("a.wav", 1.0), fx.wav("b.wav", 1.0)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 1.0)),
+            local(fx.wav("b.wav", 1.0)),
+        ]);
         e.pushed_playable = 1_000;
         e.shared.frames_consumed.store(1_000, Ordering::Relaxed);
         e.shared.flush_ack.store(u64::MAX, Ordering::Release);
@@ -3954,7 +4857,10 @@ mod tests {
     #[test]
     fn a_skip_with_a_landing_opens_the_track_there() {
         let fx = Fixtures::new("skip-landing");
-        let mut e = engine_over(vec![fx.wav("a.wav", 1.0), fx.wav("b.wav", 3.0)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 1.0)),
+            local(fx.wav("b.wav", 3.0)),
+        ]);
         e.pushed_playable = 1_000;
         e.shared.frames_consumed.store(1_000, Ordering::Relaxed);
         e.shared.flush_ack.store(u64::MAX, Ordering::Release);
@@ -3991,7 +4897,10 @@ mod tests {
     #[test]
     fn a_seek_out_of_the_ended_state_reopens_the_finished_track() {
         let fx = Fixtures::new("seek-ended");
-        let mut e = engine_over(vec![fx.wav("a.wav", 1.0), fx.wav("b.wav", 1.0)]);
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 1.0)),
+            local(fx.wav("b.wav", 1.0)),
+        ]);
         // Both tracks played, the ring drained, nothing decoding: the ended
         // state exactly as the run loop leaves it.
         e.pos = 1;
@@ -4029,7 +4938,8 @@ mod tests {
         let fx = Fixtures::new("seek-edge");
         let path = fx.wav("a.wav", 1.0);
         for target in [1.0, 1.5, 60.0] {
-            let (mut src, info) = Source::open(&path, 48_000, None).expect("the fixture opens");
+            let (mut src, info) =
+                Source::open(&local(&path), 48_000, None).expect("the fixture opens");
             let landed = src.seek(target).expect("a seek inside the track");
             assert!(
                 landed < info.duration_secs.expect("the fixture states its length"),
@@ -4054,7 +4964,14 @@ mod tests {
     /// so is the device rate here, so the resampler is a passthrough and the
     /// samples come back bit for bit.
     fn decode_all(path: &PathBuf, span: Option<Span>) -> Vec<f32> {
-        let (mut src, _) = Source::open(path, 48_000, span).expect("the fixture opens");
+        let (mut src, _) = Source::open(&local(path), 48_000, span).expect("the fixture opens");
+
+        drain_source(&mut src)
+    }
+
+    /// The same over a source already open, for the tests that built one
+    /// themselves.
+    fn drain_source(src: &mut Source) -> Vec<f32> {
         let mut out = Vec::new();
         let mut chunk = Vec::new();
         loop {
@@ -4065,7 +4982,858 @@ mod tests {
                 break;
             }
         }
+
         out
+    }
+
+    /// The transparency proof for the whole unit: the same bytes opened over
+    /// the HTTP transport come back as the same track they do off the disk,
+    /// header and samples both. Nothing downstream of [`Source::open`] gets
+    /// to know which one it's playing.
+    ///
+    /// The transport is a fake serving the fixture's bytes, so this needs no
+    /// network and no server.
+    #[test]
+    fn a_remote_open_reads_the_same_track_as_the_file() {
+        let fx = Fixtures::new("remote-transparency");
+        let path = fx.wav("tone.wav", 2.0);
+        let bytes = std::fs::read(&path).expect("the fixture is readable");
+        let served = crate::http::testing::Fake::serving(bytes, "audio/wav");
+
+        let (mut local, local_info) =
+            Source::open(&local(&path), 48_000, None).expect("the file opens");
+
+        // The hint is empty on purpose: the probe gets the container off the
+        // fake's `Content-Type`, which is the path a real server takes.
+        let url = Locator::Remote(Remote {
+            url: "http://example.invalid/tone.wav".into(),
+            headers: Vec::new(),
+            hint: String::new(),
+            live: false,
+        });
+        let (mut remote, remote_info) =
+            crate::http::testing::with_transport(served, || Source::open(&url, 48_000, None))
+                .expect("the stream opens");
+
+        assert_eq!(remote_info.name, local_info.name, "same display name");
+        assert_eq!(remote_info.sample_rate, local_info.sample_rate);
+        assert_eq!(remote_info.channels, local_info.channels);
+        assert_eq!(remote_info.num_frames, local_info.num_frames);
+        assert_eq!(remote_info.duration_secs, local_info.duration_secs);
+
+        // And the audio itself, not just what the header claimed about it.
+        assert_eq!(drain_source(&mut remote), drain_source(&mut local));
+    }
+
+    /// The station title reaches the slot the player reads, keyed to the pool
+    /// entry that's playing, and the revision counts songs rather than
+    /// metadata blocks. A station resends the current title every few seconds
+    /// between changes, so a revision that moved on every block would make a
+    /// scrobble fire dozens of times per song.
+    #[test]
+    fn a_station_title_reaches_the_published_slot() {
+        let fx = Fixtures::new("icy-title");
+        let path = fx.wav("stream.wav", 1.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+
+        // One title, the same title again, then a change, then hold. The
+        // metaint is small enough that a one-second fixture carries all four.
+        const METAINT: usize = 8192;
+        let fake = live_fake(
+            &wav,
+            METAINT,
+            &["Aphex Twin - Xtal", "Aphex Twin - Xtal", "Autechre - Rae"],
+        );
+
+        let url = Locator::Remote(Remote {
+            url: "http://example.invalid/stream".into(),
+            headers: Vec::new(),
+            hint: "wav".into(),
+            live: true,
+        });
+        let mut e = engine_over(vec![url]);
+
+        let shared = Arc::clone(&e.shared);
+        let opened = crate::http::testing::with_transport(fake.clone(), || {
+            let mut src = e.open_at(0).expect("the stream opens");
+            // Where the revision stood once the open was done with it. The
+            // stream's own states move the same clock, so the songs are
+            // counted as a delta from here rather than from zero.
+            let opened = shared.title_rev();
+
+            // Drain it, which is what carries the cursor past the marks the
+            // feed thread left in the tape and fires the sink. A title lands
+            // when the audio it was announced over is decoded, not when it
+            // comes off the socket, so this has to be a decode rather than a
+            // read. The fixture is a WAV and states its own length, so the
+            // decode ends even though the station doesn't.
+            let mut chunk = Vec::new();
+            for _ in 0..10_000 {
+                chunk.clear();
+                if !src.next_chunk(48_000, &mut chunk) {
+                    break;
+                }
+            }
+
+            opened
+        });
+
+        assert_eq!(
+            shared.live_title(0),
+            Some(IcyTitle {
+                artist: "Autechre".into(),
+                title: "Rae".into(),
+            }),
+            "the last song the station named"
+        );
+        assert_eq!(
+            shared.title_rev() - opened,
+            2,
+            "two songs, not one per metadata block"
+        );
+    }
+
+    /// What the station said about itself reaches the slot beside the title.
+    /// Same trip, different clock: the headers are read once at the open,
+    /// where the titles keep arriving for as long as the stream plays.
+    #[test]
+    fn a_station_description_reaches_the_published_slot() {
+        let fx = Fixtures::new("icy-headers");
+        let path = fx.wav("stream.wav", 0.25);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+
+        let mut fake = live_fake(&wav, 8192, &["Jazz Forever - the standards"]);
+        {
+            let f = Arc::get_mut(&mut fake).unwrap();
+            f.station = crate::http::StationInfo {
+                name: "Jazz Forever".into(),
+                genre: "Jazz".into(),
+                bitrate_kbps: 128,
+                homepage: "https://jazzforever.example".into(),
+                description: "All the standards, all night".into(),
+                content_type: String::new(),
+            };
+        }
+
+        let url = Locator::Remote(Remote {
+            url: "http://example.invalid/stream".into(),
+            headers: Vec::new(),
+            hint: "wav".into(),
+            live: true,
+        });
+        let mut e = engine_over(vec![url]);
+
+        let shared = Arc::clone(&e.shared);
+        crate::http::testing::with_transport(fake, || {
+            e.open_at(0).expect("the stream opens");
+        });
+
+        let info = shared
+            .station_info(0)
+            .expect("the station described itself");
+        assert_eq!(info.name, "Jazz Forever");
+        assert_eq!(info.genre, "Jazz");
+        assert_eq!(info.bitrate_kbps, 128);
+        assert_eq!(info.homepage, "https://jazzforever.example");
+        assert_eq!(info.content_type, "audio/wav", "the codec the row records");
+        // Everything one open publishes about a station rides the one
+        // revision: the open starting, the open landing, and the description
+        // read off the headers on the way through.
+        assert_eq!(shared.title_rev(), 3, "the description moves the revision");
+        assert_eq!(shared.stream_state(0), Some(StreamState::Live));
+    }
+
+    /// A locator for a live station, which is the one shape `hang_up` acts on.
+    fn station(url: &str) -> Locator {
+        Locator::Remote(Remote {
+            url: url.into(),
+            headers: Vec::new(),
+            hint: "wav".into(),
+            live: true,
+        })
+    }
+
+    /// The same URL as an ordinary file over HTTP, which is what a Subsonic
+    /// stream looks like from in here: seekable, a length, no hang-up.
+    fn hosted(url: &str) -> Locator {
+        Locator::Remote(Remote {
+            url: url.into(),
+            headers: Vec::new(),
+            hint: "wav".into(),
+            live: false,
+        })
+    }
+
+    /// A fake answering the way a station does: 200, no length, in-band
+    /// metadata carrying `titles`.
+    fn live_fake(wav: &[u8], metaint: usize, titles: &[&str]) -> Arc<crate::http::testing::Fake> {
+        // Padded past the audio so the stream outlasts the decode. A station
+        // never ends, and a fake that does would have the feed thread
+        // reconnecting in the background of every assertion; the trailing
+        // silence carries the last title and nothing else.
+        let mut served = wav.to_vec();
+        served.resize(wav.len() * 2, 0);
+
+        let body = crate::http::testing::interleave(&served, metaint, titles);
+        let mut fake = crate::http::testing::Fake::serving(body, "audio/wav");
+        {
+            let f = Arc::get_mut(&mut fake).unwrap();
+            f.live = true;
+            f.metaint = Some(metaint);
+            // And served at a broadcast's pace rather than all at once, so
+            // the tape fills the way one really does and the window never
+            // rolls over the cursor mid-test.
+            f.pace = Some((StdDuration::from_millis(1), 1024));
+        }
+
+        fake
+    }
+
+    /// Decode until the station has named a song, so the test has a real title
+    /// in the slot rather than an empty one it can prove nothing about. The
+    /// cap is generous: a metadata block lands every few packets at this
+    /// `metaint` and the fixture carries dozens.
+    ///
+    /// On the title slot rather than the revision, which the stream's own
+    /// state changes also move: entry 0, since every caller here is a
+    /// single-station queue.
+    fn decode_until_titled(e: &Engine, src: &mut Source, chunk: &mut Vec<f32>) {
+        for _ in 0..500 {
+            if e.shared.live_title(0).is_some() {
+                break;
+            }
+            chunk.clear();
+            if !src.next_chunk(48_000, chunk) {
+                break;
+            }
+        }
+
+        assert!(
+            e.shared.live_title(0).is_some(),
+            "the fixture never carried a metadata block"
+        );
+    }
+
+    /// The timeshift, from the pause's side. A broadcast has no pause of its
+    /// own, so rox keeps one: the connection stays up, the feed thread keeps
+    /// taping, and everything decoded before the press stays in the ring
+    /// because that's the moment the listener stopped at and the moment the
+    /// resume has to start from.
+    #[test]
+    fn pausing_a_live_station_keeps_the_connection_and_the_ring() {
+        const METAINT: usize = 4096;
+        let fx = Fixtures::new("live-pause");
+        let path = fx.wav("stream.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, METAINT, &["Boards of Canada - Roygbiv"]);
+
+        let (mut e, ring) = engine_with_ring(vec![station("http://example.invalid/live")], 64);
+        e.shared.flush_ack.store(u64::MAX, Ordering::Release);
+
+        let shared = Arc::clone(&e.shared);
+        crate::http::testing::with_transport(fake.clone(), || {
+            let mut source = e.open_at(0);
+            assert!(source.is_some(), "the station opens");
+
+            // A second of it heard, samples in the ring: the engine where a
+            // pause actually arrives.
+            let mut chunk = Vec::new();
+            decode_until_titled(&e, source.as_mut().unwrap(), &mut chunk);
+            source.as_mut().unwrap().next_chunk(48_000, &mut e.pending);
+            for i in 0..8 {
+                let s = e.pending[i];
+                e.producer.push(s).expect("the ring has room");
+            }
+            let held = ring.slots();
+            assert!(held > 0, "the ring holds what was decoded");
+
+            let tape = source
+                .as_ref()
+                .and_then(|src| src.tape.clone())
+                .expect("a station tapes");
+            let taped = tape.shift().window_secs;
+
+            // The pause itself, the way the run loop takes it now: the flag
+            // goes down and nothing else happens.
+            shared.playing.store(false, Ordering::Relaxed);
+            source = e.idle_hangup(source);
+
+            assert!(source.is_some(), "still connected");
+            assert_eq!(fake.closed_count(), 0, "the socket is still open");
+            assert_eq!(fake.ask_count(), 1, "and nothing reopened anything");
+            assert_eq!(ring.slots(), held, "the ring kept the pre-pause audio");
+            assert!(e.hung_up.is_none(), "there's nothing to come back to");
+
+            // And the tape is still filling under the pause, which is the
+            // whole point: the resume has somewhere to carry on from.
+            wait_for("the tape to keep filling", || {
+                tape.shift().window_secs > taped
+            });
+
+            assert!(shared.tracks.lock().unwrap()[0].is_some());
+            assert!(shared.live_title(0).is_some());
+            assert!(
+                !shared.ended.load(Ordering::Relaxed),
+                "a pause is not an end"
+            );
+        });
+    }
+
+    /// The one pause that still hangs up. Half an hour in there's nothing
+    /// left in the tape that the listener paused on, so holding the socket
+    /// open is only bandwidth: it goes, and the resume rejoins live.
+    #[test]
+    fn a_station_paused_past_the_idle_cap_hangs_up() {
+        const METAINT: usize = 4096;
+        let fx = Fixtures::new("live-idle");
+        let path = fx.wav("stream.wav", 1.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, METAINT, &["Boards of Canada - Roygbiv"]);
+
+        let mut e = engine_over(vec![station("http://example.invalid/live")]);
+        e.shared.flush_ack.store(u64::MAX, Ordering::Release);
+
+        let shared = Arc::clone(&e.shared);
+        crate::http::testing::with_transport(fake.clone(), || {
+            let mut source = e.open_at(0);
+            let mut chunk = Vec::new();
+            decode_until_titled(&e, source.as_mut().unwrap(), &mut chunk);
+
+            // One second heard, then paused, and the pause dated back past
+            // the cap rather than waited out.
+            shared.frames_consumed.store(48_000, Ordering::Relaxed);
+            shared.playing.store(false, Ordering::Relaxed);
+            source = e.idle_hangup(source);
+            assert!(source.is_some(), "a fresh pause holds the connection");
+
+            e.paused_since =
+                Some(Instant::now() - StdDuration::from_secs(LIVE_IDLE_HANGUP_SECS + 1));
+            source = e.idle_hangup(source);
+
+            assert!(source.is_none(), "the source went, and the socket with it");
+            assert_eq!(e.hung_up, Some(48_000), "with the clock where it stopped");
+            wait_for("the body to close", || fake.closed_count() == 1);
+
+            // Nothing a reader depends on went with the connection.
+            assert!(shared.tracks.lock().unwrap()[0].is_some());
+            assert!(shared.live_title(0).is_some());
+            assert!(!shared.ended.load(Ordering::Relaxed));
+        });
+    }
+
+    /// The step back through the buffer. Nothing goes over the wire: the
+    /// bytes are in the tape already, so what a seek costs is a decoder and
+    /// the cut every seek costs.
+    ///
+    /// The fixture is a WAV, which can only be probed from its own header, so
+    /// the point seeked to here is the top of the tape. A real station is MP3
+    /// or AAC and re-syncs on a frame header wherever the cursor lands; that
+    /// half is not testable without an encoder and is verified by ear.
+    #[test]
+    fn a_live_seek_moves_the_cursor_back_through_the_tape() {
+        const METAINT: usize = 4096;
+        let fx = Fixtures::new("live-seek");
+        let path = fx.wav("stream.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, METAINT, &["Boards of Canada - Roygbiv"]);
+
+        let mut e = engine_over(vec![station("http://example.invalid/live")]);
+        e.shared.flush_ack.store(u64::MAX, Ordering::Release);
+
+        crate::http::testing::with_transport(fake.clone(), || {
+            let mut source = e.open_at(0);
+            let mut chunk = Vec::new();
+            decode_until_titled(&e, source.as_mut().unwrap(), &mut chunk);
+
+            // Decode a while, so there's something behind the cursor to go
+            // back into.
+            for _ in 0..40 {
+                chunk.clear();
+                if !source.as_mut().unwrap().next_chunk(48_000, &mut chunk) {
+                    break;
+                }
+            }
+
+            let tape = source
+                .as_ref()
+                .and_then(|src| src.tape.clone())
+                .expect("a station tapes");
+            let was = tape.cursor();
+            assert!(was > 0, "something has been read");
+
+            // Further back than the tape holds, which lands on the oldest
+            // byte in it.
+            source = e.seek_live_to(source, 3600.0);
+
+            assert!(source.is_some(), "still playing");
+            assert!(
+                tape.cursor() < was,
+                "the cursor went back: {} from {was}",
+                tape.cursor()
+            );
+            assert_eq!(fake.ask_count(), 1, "and asked the station for nothing");
+
+            // And it plays from there, which is the part that says the
+            // decoder was really rebuilt rather than merely replaced.
+            chunk.clear();
+            assert!(source.as_mut().unwrap().next_chunk(48_000, &mut chunk));
+            assert!(!chunk.is_empty(), "audio out of the new cursor");
+        });
+    }
+
+    /// A seek into the middle of the stream, where a container may or may
+    /// not be able to pick the stream back up. Either answer has to leave a
+    /// station playing: the listener asked to move inside a broadcast, and
+    /// the worst outcome would be silence for having asked.
+    ///
+    /// Which way it goes isn't asserted because it isn't knowable from here.
+    /// A refusal keeps the old decoder and the old cursor, a re-sync builds a
+    /// new pair, and the fixture is a WAV whose probe hunts forward for a
+    /// header rather than failing where it stands.
+    #[test]
+    fn a_live_seek_into_the_middle_of_the_stream_keeps_playing() {
+        const METAINT: usize = 4096;
+        let fx = Fixtures::new("live-seek-refused");
+        let path = fx.wav("stream.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, METAINT, &["Boards of Canada - Roygbiv"]);
+
+        let mut e = engine_over(vec![station("http://example.invalid/live")]);
+        e.shared.flush_ack.store(u64::MAX, Ordering::Release);
+
+        crate::http::testing::with_transport(fake.clone(), || {
+            let mut source = e.open_at(0);
+            let mut chunk = Vec::new();
+            decode_until_titled(&e, source.as_mut().unwrap(), &mut chunk);
+            for _ in 0..40 {
+                chunk.clear();
+                if !source.as_mut().unwrap().next_chunk(48_000, &mut chunk) {
+                    break;
+                }
+            }
+
+            let tape = source
+                .as_ref()
+                .and_then(|src| src.tape.clone())
+                .expect("a station tapes");
+
+            // Half a second before the cursor. Measured off the cursor
+            // rather than off the edge: the feed thread fills the tape
+            // faster than a decode drains it, so "just behind the edge" is
+            // nowhere near where the listener is.
+            let behind = tape.shift().behind_secs + 0.5;
+            source = e.seek_live_to(source, behind);
+
+            assert!(source.is_some(), "still playing");
+            assert_eq!(fake.ask_count(), 1, "and nothing dialled the station");
+
+            chunk.clear();
+            assert!(source.as_mut().unwrap().next_chunk(48_000, &mut chunk));
+            assert!(!chunk.is_empty(), "audio carries on");
+        });
+    }
+
+    /// Play rejoins at the live edge: one fresh open, the same one a first
+    /// open makes, and the elapsed clock picks up where the pause froze it
+    /// rather than restarting. The counter says how much of the station has
+    /// been heard, and a pause adds nothing to that either way.
+    #[test]
+    fn resuming_a_hung_up_station_reopens_it_once() {
+        const METAINT: usize = 4096;
+        let fx = Fixtures::new("live-resume");
+        let path = fx.wav("stream.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, METAINT, &["Boards of Canada - Roygbiv"]);
+
+        let mut e = engine_over(vec![station("http://example.invalid/live")]);
+        e.shared.flush_ack.store(u64::MAX, Ordering::Release);
+
+        let shared = Arc::clone(&e.shared);
+        crate::http::testing::with_transport(fake.clone(), || {
+            let mut source = e.open_at(0);
+            let mut chunk = Vec::new();
+            decode_until_titled(&e, source.as_mut().unwrap(), &mut chunk);
+            let titled = shared.live_title(0);
+
+            // One second heard before the pause, which is what the resume has
+            // to carry forward.
+            shared.frames_consumed.store(48_000, Ordering::Relaxed);
+            shared.playing.store(false, Ordering::Relaxed);
+            source = e.hang_up(source.take());
+            assert!(source.is_none() && e.hung_up == Some(48_000));
+
+            // Where the revision stood going into the rejoin, since the
+            // reopen's own two states move it as well as any song change.
+            let paused_at = shared.title_rev();
+            source = e.rejoin();
+
+            assert!(source.is_some(), "the station comes back");
+            assert!(e.hung_up.is_none(), "and the pause state is spent");
+            assert!(shared.playing.load(Ordering::Relaxed), "playing again");
+            assert_eq!(fake.ask_count(), 2, "exactly one new request");
+            // The same request a first open makes. A station serves now
+            // whatever offset is named, so the open has no reason to ask
+            // differently; naming no range is the reconnect path's business.
+            let range = fake.asks.lock().unwrap()[1].range;
+            assert_eq!(range, Some(0));
+
+            // The elapsed readout carries on rather than restarting: the clock
+            // hasn't moved, and it still reads the second the listener heard.
+            assert_eq!(shared.position(48_000), Some((0, 1.0)));
+
+            // The station opened again on the same song, so the slot still
+            // names it and the dedupe correctly counted no song change: the
+            // revision moved for the reopen and for nothing else.
+            assert_eq!(shared.live_title(0), titled);
+            assert_eq!(
+                shared.title_rev() - paused_at,
+                2,
+                "the reopen's two states, and no song change under them"
+            );
+        });
+    }
+
+    /// A transport that says what the session was doing at the moment each
+    /// request went out, and takes its time answering the way a station on
+    /// the other side of an ocean does. The gap between a play now and a
+    /// stream's first byte is the only place the bug in question lived, and
+    /// this is the one seam that can see into it.
+    struct Slow {
+        inner: Arc<crate::http::testing::Fake>,
+        shared: Arc<Shared>,
+        /// What the session was doing as each GET went out.
+        at_get: std::sync::Mutex<Vec<AtGet>>,
+    }
+
+    /// One reading of the session, taken at a request.
+    #[derive(Clone, Copy)]
+    struct AtGet {
+        /// The pause flag.
+        playing: bool,
+        /// The flush epoch, which counts the cuts.
+        flushed: u64,
+        /// What the position clock named, which is the answer every surface
+        /// upstream gives to "what is loaded".
+        position: Option<(usize, f64)>,
+    }
+
+    impl crate::http::Http for Slow {
+        fn get(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            range: Option<u64>,
+        ) -> Result<crate::http::Resp, String> {
+            self.at_get.lock().unwrap().push(AtGet {
+                playing: self.shared.playing.load(Ordering::Relaxed),
+                flushed: self.shared.flush_seq.load(Ordering::Relaxed),
+                position: self.shared.position(48_000),
+            });
+            std::thread::sleep(StdDuration::from_millis(50));
+
+            self.inner.get(url, headers, range)
+        }
+    }
+
+    /// Spin until `cond` holds, for the tests that drive the run loop from
+    /// another thread. The deadline is generous: it's there to fail a broken
+    /// build rather than to time anything.
+    fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + StdDuration::from_secs(10);
+        while Instant::now() < deadline {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(StdDuration::from_millis(2));
+        }
+
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Play now onto a station, from a pause, with a local track still in the
+    /// ring. The open is the expensive half of a skip and it deliberately
+    /// happens before the cut, so that a file still coming out of the ring
+    /// covers it. For a local file that open is instant. For a station it's a
+    /// request, a probe and a decode, and a callback resumed at the command
+    /// would spend all of it playing the track the listener had paused.
+    ///
+    /// So the resume waits for the flush. This drives the real run loop,
+    /// because the ordering being tested is the run loop's.
+    #[test]
+    fn a_play_now_onto_a_station_stays_silent_until_the_ring_is_cut() {
+        let fx = Fixtures::new("play-now-paused");
+        let path = fx.wav("local.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, 4096, &["Boards of Canada - Roygbiv"]);
+
+        let shared = Arc::new(Shared::new(1));
+        // No backend here to handle the flush epoch, so the cut would sit out
+        // its whole deadline. An ack from the future clears it.
+        shared.flush_ack.store(u64::MAX, Ordering::Release);
+        let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(8192);
+        let (tx, rx) = mpsc::channel::<Cmd>();
+        let engine = Engine::new(
+            StartQueue {
+                locators: vec![local(&path)],
+                ..StartQueue::default()
+            },
+            Arc::clone(&shared),
+            producer,
+            48_000,
+            rx,
+        );
+
+        let watch = Arc::new(Slow {
+            inner: fake,
+            shared: Arc::clone(&shared),
+            at_get: std::sync::Mutex::new(Vec::new()),
+        });
+        let driver: Arc<dyn crate::http::Http> = Arc::clone(&watch) as Arc<dyn crate::http::Http>;
+        let decode = std::thread::spawn(move || {
+            crate::http::testing::with_transport(driver, || engine.run());
+        });
+
+        // Paused over the local file, which is where the listener was: the
+        // ring holds its samples and nothing is coming out.
+        tx.send(Cmd::TogglePause).expect("the engine is listening");
+        wait_for("the pause to land", || {
+            !shared.playing.load(Ordering::Relaxed)
+        });
+
+        tx.send(Cmd::Insert {
+            after: None,
+            locators: vec![station("http://example.invalid/live")],
+            groups: Vec::new(),
+            gains: Vec::new(),
+            spans: Vec::new(),
+            explicit: true,
+            and_play: true,
+            start_secs: None,
+        })
+        .expect("the engine is listening");
+
+        wait_for("the station's request to go out", || {
+            !watch.at_get.lock().unwrap().is_empty()
+        });
+        let at = watch.at_get.lock().unwrap()[0];
+
+        assert!(
+            !at.playing,
+            "the callback was still silent when the request went out"
+        );
+        assert_eq!(
+            at.flushed, 0,
+            "and the ring still held the paused track, which is exactly why"
+        );
+        // The wait has to show somewhere, and the only surface that can show
+        // it is the one reading the position clock. So the clock names the
+        // station before the request leaves, at its own zero, and the entry
+        // whose `Opening` is published a line later is the entry upstream is
+        // already looking at.
+        assert_eq!(
+            at.position,
+            Some((1, 0.0)),
+            "the clock had already moved to the station"
+        );
+
+        // The resume lands on the far side of the cut, so the first thing
+        // heard is the station.
+        wait_for("the resume", || shared.playing.load(Ordering::Relaxed));
+        assert!(
+            shared.flush_seq.load(Ordering::Relaxed) > 0,
+            "the ring was cut"
+        );
+
+        // The entry the insert created has a slot of its own in everything
+        // published per pool entry. It didn't before: the vectors parallel to
+        // the pool stopped growing at the session's starting length, so a
+        // station arriving by Play now published into nothing.
+        assert_eq!(
+            shared.stream_state(1),
+            Some(StreamState::Live),
+            "the inserted entry has somewhere to publish"
+        );
+
+        tx.send(Cmd::Quit).expect("the engine is listening");
+        decode.join().expect("the decode thread ends cleanly");
+    }
+
+    /// The buffer setting moved while a station is on air.
+    ///
+    /// The tape is allocated when the connection is made, so nothing about
+    /// the length can reach it except a command. This is the whole of that
+    /// path: the number lands on the open tape, the shift the transport
+    /// reads follows it, and the engine keeps it for the next station this
+    /// session opens. The floor holds against anything a caller asks for,
+    /// the same way the start applies it.
+    #[test]
+    fn the_live_buffer_command_recaps_the_station_on_air() {
+        let fx = Fixtures::new("live-buffer-cmd");
+        let path = fx.wav("stream.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, 4096, &["Boards of Canada - Roygbiv"]);
+
+        let shared = Arc::new(Shared::new(1));
+        shared.flush_ack.store(u64::MAX, Ordering::Release);
+        let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(8192);
+        let (tx, rx) = mpsc::channel::<Cmd>();
+        let engine = Engine::new(
+            StartQueue {
+                locators: vec![station("http://example.invalid/live")],
+                live_buffer_secs: 600,
+                ..StartQueue::default()
+            },
+            Arc::clone(&shared),
+            producer,
+            48_000,
+            rx,
+        );
+
+        let driver = Arc::clone(&fake);
+        let decode = std::thread::spawn(move || {
+            crate::http::testing::with_transport(driver, || engine.run());
+        });
+
+        wait_for(
+            "the station to come on at the length it started with",
+            || shared.shift(0).is_some_and(|shift| shift.cap_secs == 600.0),
+        );
+
+        tx.send(Cmd::SetLiveBuffer(60))
+            .expect("the engine is listening");
+        wait_for("the tape to take the new length", || {
+            shared.shift(0).is_some_and(|shift| shift.cap_secs == 60.0)
+        });
+
+        tx.send(Cmd::SetLiveBuffer(1))
+            .expect("the engine is listening");
+        wait_for("the floor to hold under it", || {
+            shared.shift(0).is_some_and(|shift| shift.cap_secs == 30.0)
+        });
+
+        tx.send(Cmd::Quit).expect("the engine is listening");
+        decode.join().expect("the decode thread ends cleanly");
+    }
+
+    /// A launch restore comes up paused, and the engine's very first act is
+    /// to open the entry it starts on. For a station that would be a socket
+    /// held open through a pause, which is the exact state a pause on a
+    /// playing station goes out of its way to close: the server either drops
+    /// us or keeps us however far behind the pause lasted. So a paused start
+    /// on a station connects to nothing and waits, and Play is what dials.
+    #[test]
+    fn a_paused_start_on_a_station_waits_for_play_before_it_connects() {
+        let fx = Fixtures::new("paused-start");
+        let path = fx.wav("stream.wav", 2.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = live_fake(&wav, 4096, &["Boards of Canada - Roygbiv"]);
+
+        let shared = Arc::new(Shared::new(1));
+        shared.flush_ack.store(u64::MAX, Ordering::Release);
+        // The restore's own pause, down before the decode thread exists,
+        // which is how the player does it.
+        shared.playing.store(false, Ordering::Relaxed);
+        let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(8192);
+        let (tx, rx) = mpsc::channel::<Cmd>();
+        let engine = Engine::new(
+            StartQueue {
+                locators: vec![station("http://example.invalid/live")],
+                ..StartQueue::default()
+            },
+            Arc::clone(&shared),
+            producer,
+            48_000,
+            rx,
+        );
+
+        let driver = Arc::clone(&fake);
+        let decode = std::thread::spawn(move || {
+            crate::http::testing::with_transport(driver, || engine.run());
+        });
+
+        // The queue publish is the first thing the run loop does and the
+        // open is the second, so past the one is past the other.
+        wait_for("the session to come up", || shared.queue_rev() > 0);
+        assert_eq!(
+            fake.ask_count(),
+            0,
+            "a restore that came up paused asked the station for nothing"
+        );
+        // Loaded at its own zero all the same, so the transport has
+        // something to show and something to press Play on.
+        assert_eq!(shared.position(48_000), Some((0, 0.0)));
+        assert_eq!(
+            shared.stream_state(0),
+            None,
+            "nothing opened, nothing to say"
+        );
+
+        tx.send(Cmd::TogglePause).expect("the engine is listening");
+        // Waiting on the open landing rather than on the pause flag, which
+        // the rejoin puts up before it dials: Play means Play whether or not
+        // the station answers, so the flag is true a moment before there's a
+        // request to count.
+        wait_for("the station to come on", || {
+            shared.stream_state(0) == Some(StreamState::Live)
+        });
+
+        assert!(shared.playing.load(Ordering::Relaxed));
+        assert_eq!(fake.ask_count(), 1, "and Play is one open, not two");
+
+        tx.send(Cmd::Quit).expect("the engine is listening");
+        decode.join().expect("the decode thread ends cleanly");
+    }
+
+    /// A seekable stream is a file that happens to arrive over a socket, and
+    /// its pause is the one every file has always taken: the connection holds,
+    /// the ring keeps what it holds, and the resume carries on mid-track.
+    #[test]
+    fn a_seekable_remote_pauses_the_way_a_file_does() {
+        let fx = Fixtures::new("seekable-pause");
+        let path = fx.wav("track.wav", 1.0);
+        let wav = std::fs::read(&path).expect("the fixture is readable");
+        let fake = crate::http::testing::Fake::serving(wav, "audio/wav");
+
+        let mut e = engine_over(vec![hosted("http://example.invalid/track.wav")]);
+        crate::http::testing::with_transport(fake.clone(), || {
+            let source = e.open_at(0);
+            assert!(source.is_some(), "the stream opens");
+            // Where the probe left things. It rewinds over the container
+            // header while it settles on a format, and a rewind past the
+            // window is its own request, so the pause is measured as a
+            // difference rather than against one.
+            let (asks, closed) = (fake.ask_count(), fake.closed_count());
+
+            e.shared.playing.store(false, Ordering::Relaxed);
+            let source = e.hang_up(source);
+
+            assert!(source.is_some(), "the source is handed straight back");
+            assert!(e.hung_up.is_none(), "nothing to come back to");
+            assert_eq!(fake.closed_count(), closed, "the connection is still up");
+            assert_eq!(fake.ask_count(), asks, "and it asked for nothing new");
+            assert_eq!(
+                e.shared.flush_seq.load(Ordering::Relaxed),
+                0,
+                "no flush, so the ring keeps what it was playing"
+            );
+        });
+    }
+
+    #[test]
+    fn a_local_file_pauses_the_way_it_always_has() {
+        let fx = Fixtures::new("file-pause");
+        let path = fx.wav("track.wav", 1.0);
+
+        let mut e = engine_over(vec![local(&path)]);
+        let source = e.open_at(0);
+        assert!(source.is_some(), "the fixture opens");
+
+        e.shared.playing.store(false, Ordering::Relaxed);
+        let source = e.hang_up(source);
+
+        assert!(source.is_some(), "nothing here to hang up on");
+        assert!(e.hung_up.is_none());
+        assert_eq!(e.shared.flush_seq.load(Ordering::Relaxed), 0, "no flush");
     }
 
     /// A spanned source is the slice, not the file: it reports the slice's
@@ -4075,8 +5843,8 @@ mod tests {
     fn a_span_opens_at_its_start_and_reports_its_own_length() {
         let fx = Fixtures::new("span-open");
         let path = fx.wav("image.wav", 4.0);
-        let (src, info) =
-            Source::open(&path, 48_000, Some(span(1_000, Some(3_000)))).expect("the image opens");
+        let (src, info) = Source::open(&local(&path), 48_000, Some(span(1_000, Some(3_000))))
+            .expect("the image opens");
 
         assert_eq!(info.duration_secs, Some(2.0), "the span's length, not 4s");
         assert_eq!(info.num_frames, Some(96_000));
@@ -4135,8 +5903,8 @@ mod tests {
     fn seeking_inside_a_span_stays_inside_it_and_reads_track_relative() {
         let fx = Fixtures::new("span-seek");
         let path = fx.wav("image.wav", 4.0);
-        let (mut src, _) =
-            Source::open(&path, 48_000, Some(span(1_000, Some(3_000)))).expect("the image opens");
+        let (mut src, _) = Source::open(&local(&path), 48_000, Some(span(1_000, Some(3_000))))
+            .expect("the image opens");
 
         // A container resolves a seek to the packet holding the timestamp,
         // so the landing is a few milliseconds coarse. The point is which
@@ -4184,7 +5952,8 @@ mod tests {
     fn an_open_ended_span_runs_to_the_files_end() {
         let fx = Fixtures::new("span-open-end");
         let path = fx.wav("image.wav", 4.0);
-        let (src, info) = Source::open(&path, 48_000, Some(span(3_000, None))).expect("it opens");
+        let (src, info) =
+            Source::open(&local(&path), 48_000, Some(span(3_000, None))).expect("it opens");
         assert_eq!(info.duration_secs, Some(1.0));
         assert_eq!(info.num_frames, Some(48_000));
         assert_eq!(src.total_frames, Some(48_000));
@@ -4208,7 +5977,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel::<Cmd>();
         let mut e = Engine::new(
             StartQueue {
-                paths: vec![path.clone(), path],
+                locators: vec![local(&path), local(&path)],
                 spans: vec![Some(span(0, Some(1_000))), Some(span(1_000, None))],
                 ..StartQueue::default()
             },
@@ -4288,7 +6057,7 @@ mod tests {
     fn a_decoder_panic_ends_the_track_rather_than_the_thread() {
         let fx = Fixtures::new("decoder-panic");
         let path = fx.wav("tone.wav", 1.0);
-        let (mut src, _) = Source::open(&path, 48_000, None).expect("the fixture opens");
+        let (mut src, _) = Source::open(&local(&path), 48_000, None).expect("the fixture opens");
         src.decoder = Box::new(PanickingDecoder);
 
         let mut out = Vec::new();
@@ -4312,7 +6081,7 @@ mod tests {
     fn a_panic_on_seek_reads_as_a_seek_that_failed() {
         let fx = Fixtures::new("seek-panic");
         let path = fx.wav("tone.wav", 2.0);
-        let (mut src, _) = Source::open(&path, 48_000, None).expect("the fixture opens");
+        let (mut src, _) = Source::open(&local(&path), 48_000, None).expect("the fixture opens");
         src.decoder = Box::new(PanickingDecoder);
         // The wav reader seeks without decoding, so what goes down here is
         // the decoder reset that follows the landing.
@@ -4325,8 +6094,8 @@ mod tests {
     /// untouched.
     #[test]
     fn the_decode_guard_turns_a_panic_into_an_error_on_the_file() {
-        let path = PathBuf::from("/music/broken.opus");
-        let err = guard_decode("decode", &path, || {
+        let path = "/music/broken.opus";
+        let err = guard_decode("decode", path, || {
             panic!("attempt to shift left with overflow")
         })
         .expect_err("a panic is an error");
@@ -4341,10 +6110,10 @@ mod tests {
         );
 
         // A `&'static str` payload reads the same way a formatted one does.
-        let err = guard_decode("probe", &path, || panic!("static message"))
+        let err = guard_decode("probe", path, || panic!("static message"))
             .expect_err("a panic is an error");
         assert!(err.contains("static message"), "{err}");
 
-        assert_eq!(guard_decode("decode", &path, || 7).ok(), Some(7));
+        assert_eq!(guard_decode("decode", path, || 7).ok(), Some(7));
     }
 }

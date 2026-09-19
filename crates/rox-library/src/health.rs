@@ -271,6 +271,8 @@ mod tests {
     /// whichever fields it wants missing.
     fn track(path: &str) -> TrackRow {
         TrackRow {
+            remote_url: String::new(),
+            remote_live: false,
             path: path.into(),
             sub: 0,
             cue: None,

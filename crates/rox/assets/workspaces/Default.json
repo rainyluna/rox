@@ -600,6 +600,13 @@
                           "smooth_follow": true
                         }
                       }
+                    },
+                    {
+                      "panel_name": "stations",
+                      "children": [],
+                      "info": {
+                        "panel": {}
+                      }
                     }
                   ],
                   "info": {
@@ -633,6 +640,8 @@
                           "max_height": 24.0,
                           "show_total": false,
                           "scrobble_marker": true,
+                          "live_dash_len": 2.0,
+                          "live_sweep": true,
                           "items": [
                             "elapsed",
                             "strip",

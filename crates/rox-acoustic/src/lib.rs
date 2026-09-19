@@ -571,7 +571,9 @@ fn analyze_batch(
 pub fn extract(path: &Path, duration_ms: u32) -> Result<Vec<f32>, String> {
     let duration = duration_ms as f64 / 1000.0;
     let frames = (WINDOW_SECS * RATE as f64) as usize;
-    let path = path.to_path_buf();
+    // The decode window asks where a track's bytes come from; everything this
+    // pass measures is a file on disk.
+    let locator = rox_library::locator::Locator::Local(path.to_path_buf());
     // A track no longer than one window has one window in it, read from the
     // top. Anything longer spreads the probes across the range a window can
     // still start in, so none of them runs off the end.
@@ -582,7 +584,8 @@ pub fn extract(path: &Path, duration_ms: u32) -> Result<Vec<f32>, String> {
     let mut taken = 0usize;
     let mut last_err = String::new();
     for probe in PROBES {
-        let stereo = match rox_playback::engine::decode_window(&path, span * probe, RATE, frames) {
+        let stereo = match rox_playback::engine::decode_window(&locator, span * probe, RATE, frames)
+        {
             Ok(stereo) => stereo,
             Err(e) => {
                 last_err = e;

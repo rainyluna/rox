@@ -334,8 +334,14 @@ mod opus_tests {
 
     /// The fixture: one second of a 440 Hz sine, checked in beside this crate's
     /// tests with the ffmpeg command in the README there.
-    fn fixture() -> std::path::PathBuf {
-        fixtures().join("tone-440.opus")
+    /// The tone fixture as the decode window wants it: a local locator, since
+    /// the engine asks where a track's bytes come from now.
+    fn fixture() -> rox_library::locator::Locator {
+        named("tone-440.opus")
+    }
+
+    fn named(name: &str) -> rox_library::locator::Locator {
+        rox_library::locator::Locator::Local(fixtures().join(name))
     }
 
     fn fixtures() -> std::path::PathBuf {
@@ -370,7 +376,7 @@ mod opus_tests {
     #[test]
     fn the_transient_fixture_decodes_without_panicking() {
         let audio = crate::engine::decode_window(
-            &fixtures().join("dense-transients.opus"),
+            &named("dense-transients.opus"),
             0.0,
             OPUS_RATE,
             1_000_000,
@@ -391,7 +397,7 @@ mod opus_tests {
     #[test]
     fn the_transient_fixture_decodes_to_the_level_libopus_reads() {
         let audio = crate::engine::decode_window(
-            &fixtures().join("dense-transients.opus"),
+            &named("dense-transients.opus"),
             0.0,
             OPUS_RATE,
             1_000_000,

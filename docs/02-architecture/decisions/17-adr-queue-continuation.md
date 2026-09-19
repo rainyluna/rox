@@ -9,8 +9,8 @@ and the player appends that batch into the running engine as context entries thr
 queue commands from [ADR 16](16-adr-play-queue.md). A provider is a selection strategy,
 continue the browse order, shuffle the library, later a pool built from history, not a
 source of audio. Remote sources (a streaming service) are the extension host's question
-(#8); if one ever exists it implements this same trait behind a layer that produces
-playable paths.
+([ADR 29](29-adr-source-contract.md)); if one ever exists it implements this same trait
+behind a layer that produces playable paths.
 
 The trigger is in the player, on the pump's clock. The pump already ticks every 16 ms
 and reads the queue snapshot and the position clock; when the audible cursor comes within
