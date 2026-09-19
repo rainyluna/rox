@@ -179,6 +179,15 @@ impl EqParams {
         }
     }
 
+    /// Set all 10 band gains and reset center frequencies to standard ISO
+    /// octaves and widths to one octave.
+    pub fn apply_graphic_curve(&self, gains: &[f32; BANDS]) {
+        self.reset_shape();
+        for (band, &db) in gains.iter().enumerate() {
+            self.set_gain(band, db);
+        }
+    }
+
     /// The whole curve, in band order. What gets persisted.
     pub fn gains(&self) -> Vec<f32> {
         (0..BANDS).map(|band| self.gain(band)).collect()
@@ -721,5 +730,19 @@ mod tests {
             first != second,
             "a center that moved has to change what comes out"
         );
+    }
+
+    #[test]
+    fn apply_graphic_curve_resets_shape_and_sets_gains() {
+        let params = EqParams::new(true, &[], &[], &[]);
+        params.set_freq(0, 50.0);
+        params.set_q(0, 4.0);
+        let gains = [1.0, 2.0, 3.0, 4.0, 5.0, -1.0, -2.0, -3.0, -4.0, -5.0];
+        params.apply_graphic_curve(&gains);
+        assert_eq!(params.freq(0), BAND_HZ[0]);
+        assert_eq!(params.q(0), Q_DEFAULT);
+        for band in 0..BANDS {
+            assert_eq!(params.gain(band), gains[band]);
+        }
     }
 }

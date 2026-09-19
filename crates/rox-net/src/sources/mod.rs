@@ -19,6 +19,7 @@
 
 use serde_json::Value;
 
+pub mod autoeq;
 pub mod radio_browser;
 pub mod subsonic;
 

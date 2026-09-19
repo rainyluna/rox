@@ -11,6 +11,7 @@
 // debug builds so stdout/stderr logging stays visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autoeq_window;
 mod backdrop_visual;
 mod bake;
 mod bake_dialog;

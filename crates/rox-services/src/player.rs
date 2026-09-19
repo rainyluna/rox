@@ -4178,6 +4178,20 @@ pub fn reset_eq_shape(cx: &mut App) {
     eq_changed(cx);
 }
 
+/// Apply a full graphic EQ curve (10 band gains), resetting band centers and widths
+/// to their ISO octave positions, persisting the settings, and notifying observers.
+pub fn apply_graphic_eq(gains: &[f32; rox_playback::eq::BANDS], cx: &mut App) {
+    let params = eq_params();
+    params.apply_graphic_curve(gains);
+    let (gains_vec, freqs, qs) = (params.gains(), params.freqs(), params.qs());
+    Settings::update(move |s| {
+        s.eq.gains = gains_vec;
+        s.eq.freqs = freqs;
+        s.eq.qs = qs;
+    });
+    eq_changed(cx);
+}
+
 /// Persist the curve once the drag settles, the same shape
 /// [`Player::persist_volume_soon`] uses: the atomics already have the
 /// value on the audio thread, so only the file write has to wait for the
