@@ -922,6 +922,9 @@ settings-integrations-lastfm-hearts = { $n ->
    *[other] { $n } curtidas
 }
 settings-integrations-lastfm-import-loved = Importar faixas curtidas
+settings-integrations-lastfm-import-plays = Importar reproduções
+    .description = Preencher contagens e histórico de reprodução a partir dos scrobbles do Last.fm
+settings-integrations-lastfm-import-plays-button = Importar reproduções
 settings-integrations-lastfm-intro-builtin = Conecte sua conta do Last.fm: autorize o rox no navegador e as faixas tocadas viram scrobbles lá
 settings-integrations-lastfm-intro-custom = Esta build não traz identidade de api, então o scrobbling precisa da sua própria conta de api (Last.fm/api/account/create); cole a chave e o segredo compartilhado, depois conecte
 settings-integrations-lastfm-key-placeholder = Chave de API
@@ -1467,6 +1470,7 @@ tasks-importing = Importando { $progress }
 tasks-job-acoustic = Análise acústica
 tasks-job-convert = Converter áudio
 tasks-job-loved-import = Faixas curtidas do Last.fm
+tasks-job-plays-import = Contagens de reproduções do Last.fm
 tasks-job-replaygain = ReplayGain
 tasks-job-scan = Varredura da biblioteca
 tasks-job-tempo = Análise de andamento
@@ -2079,6 +2083,19 @@ lastfm-import-added = { $count ->
     [0] , { $count } adicionadas aos favoritos
     [one] , { $count } adicionada aos favoritos
    *[other] , { $count } adicionadas aos favoritos
+}
+lastfm-import-plays-read = { $count ->
+    [one] { $count } faixa com reproduções lida
+   *[other] { $count } faixas com reproduções lidas
+}
+lastfm-import-plays-stopped = { $count ->
+    [one] Parou depois de { $count } faixa
+   *[other] Parou depois de { $count } faixas
+}
+lastfm-import-plays-matched = , { $count } com correspondência
+lastfm-import-plays-updated = { $count ->
+    [one] , { $count } reprodução adicionada
+   *[other] , { $count } reproduções adicionadas
 }
 
 ## Tag tools
