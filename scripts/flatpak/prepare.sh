@@ -63,7 +63,8 @@ cp "$here/flathub.json" "$out/"
 rox='\|url: https://github.com/zealsprince/rox.git|,/commit:/'
 sed -e "$rox{s|url: .*|url: https://github.com/$repo.git|;s|tag: .*|tag: v$version|;s|commit: .*|commit: $commit|;}" \
     "$here/$manifest" > "$out/$manifest"
-sed -e "$rox{/tag: /d;}" "$out/$manifest" > "$out/build/$manifest"
+sed -e "$rox{s|url: .*|url: https://github.com/$repo.git|;/tag: /d;s|commit: .*|commit: $commit|;}" \
+    "$here/$manifest" > "$out/build/$manifest"
 
 # The metainfo script fills in place and reads tags through the checkout.
 cp "$root/crates/rox/assets/app/rox.metainfo.xml" "$out/rox.metainfo.xml"
