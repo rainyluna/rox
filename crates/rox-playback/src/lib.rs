@@ -9,6 +9,7 @@ pub mod analysis;
 pub mod broadcast;
 pub mod chain;
 pub mod codecs;
+pub mod convolver;
 pub mod continuation;
 pub mod engine;
 pub mod eq;

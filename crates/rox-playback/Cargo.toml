@@ -66,6 +66,7 @@ rtrb = "0.3"
 # `Resampler::reset` instead. Only a real mid-stream rate change builds a new
 # one.
 rubato = { version = "5", default-features = false }
+realfft = "3.5"
 # The logging facade: decode and output errors go through log macros the host
 # app's backend (crate::logging in rox) captures. A library only declares the
 # facade, never installs a logger.
