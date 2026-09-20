@@ -12,6 +12,14 @@
 //!
 //! Follows the ADR 19 bypass rule: when disabled or with no impulse response and
 //! neutral spatial settings, samples pass bit-exact and internal filter state stays clear.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::manual_div_ceil,
+    clippy::approx_constant,
+    clippy::vec_init_then_push,
+    clippy::chunks_exact_to_as_chunks
+)]
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
