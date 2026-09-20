@@ -1,8 +1,6 @@
-use std::sync::Arc;
 use rox_playback::chain::{Chain, Node};
-use rox_playback::convolver::{
-    parse_wav, Convolver, ConvolverMode, ConvolverParams, IrLayout,
-};
+use rox_playback::convolver::{Convolver, ConvolverMode, ConvolverParams, IrLayout, parse_wav};
+use std::sync::Arc;
 
 const SAMPLE_RATE: u32 = 48000;
 
@@ -111,8 +109,14 @@ fn test_hesuvi_virtual_stereo_binaural_rendering() {
         .0;
 
     // Direct ear peak should arrive earlier than contralateral ear peak!
-    assert_eq!(left_max_idx, 5, "Left ear must receive direct sound at sample 5");
-    assert_eq!(right_max_idx, 18, "Right ear must receive cross-ear sound at sample 18");
+    assert_eq!(
+        left_max_idx, 5,
+        "Left ear must receive direct sound at sample 5"
+    );
+    assert_eq!(
+        right_max_idx, 18,
+        "Right ear must receive cross-ear sound at sample 18"
+    );
     assert!(
         left_samples[left_max_idx] > right_samples[right_max_idx],
         "Direct ear must be louder than contralateral ear (ILD cue)"
@@ -198,7 +202,10 @@ fn test_live_switching_of_modes_and_ir() {
     let dry = vec![0.333f32; 64];
     let mut test_buf = dry.clone();
     convolver.process(&mut test_buf);
-    assert_eq!(test_buf, dry, "Disabled convolver must be bit-exact passthrough");
+    assert_eq!(
+        test_buf, dry,
+        "Disabled convolver must be bit-exact passthrough"
+    );
 }
 
 #[test]

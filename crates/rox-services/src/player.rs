@@ -30,12 +30,12 @@ use rox_playback::Shift;
 use rox_playback::StationInfo;
 use rox_playback::StreamState;
 use rox_playback::continuation::{self, Pick};
-use rox_playback::engine::{self, Cmd, StartQueue, shuffle_head, shuffle_slice};
 use rox_playback::convolver::{self, Convolver, ConvolverParams};
 pub use rox_playback::convolver::{
-    ConvolverMode, IrLayout, POINT_BL, POINT_BR, POINT_FC, POINT_FL, POINT_FR, POINT_SL,
-    POINT_SR, SURROUND_POINTS,
+    ConvolverMode, IrLayout, POINT_BL, POINT_BR, POINT_FC, POINT_FL, POINT_FR, POINT_SL, POINT_SR,
+    SURROUND_POINTS,
 };
+use rox_playback::engine::{self, Cmd, StartQueue, shuffle_head, shuffle_slice};
 use rox_playback::eq::{Eq, EqParams};
 use rox_playback::gain;
 use rox_playback::output::{self, Mode, Negotiated, Request};
@@ -533,7 +533,9 @@ impl Session {
         // ever sends for the chain: the bands are atomics on the shared
         // handle, so every later turn of a knob is a store.
         let _ = tx.send(Cmd::ChainPush(Box::new(Eq::new(eq_params().clone()))));
-        let _ = tx.send(Cmd::ChainPush(Box::new(Convolver::new(convolver_params().clone()))));
+        let _ = tx.send(Cmd::ChainPush(Box::new(Convolver::new(
+            convolver_params().clone(),
+        ))));
         let gains = queue.gains.clone();
         let live = live_flags(&queue.locators);
         let engine = engine::Engine::new(queue, shared.clone(), out.producer, device_rate, rx);

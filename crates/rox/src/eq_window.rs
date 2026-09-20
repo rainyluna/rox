@@ -1058,11 +1058,9 @@ impl EqWindow {
                             } else {
                                 palette::text_muted()
                             })
-                            .child(
-                                ir_name
-                                    .clone()
-                                    .unwrap_or_else(|| rox_i18n::t!("eq-convolver-no-file").to_string()),
-                            ),
+                            .child(ir_name.clone().unwrap_or_else(|| {
+                                rox_i18n::t!("eq-convolver-no-file").to_string()
+                            })),
                     )
                     .child(small_button(
                         rox_i18n::t!("eq-convolver-load"),
@@ -1112,12 +1110,7 @@ impl EqWindow {
                 )
             })
             .when_some(self.convolver_error.clone(), |d, err| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(palette::tone_bad())
-                        .child(err),
-                )
+                d.child(div().text_xs().text_color(palette::tone_bad()).child(err))
             })
             .child(
                 div()
@@ -1182,14 +1175,18 @@ impl EqWindow {
                                     rox_i18n::t!("eq-convolver-reset-levels"),
                                     icons::REFRESH_CW,
                                     false,
-                                    cx.listener(|_, _, _, cx| player::reset_convolver_channel_gains(cx)),
+                                    cx.listener(|_, _, _, cx| {
+                                        player::reset_convolver_channel_gains(cx)
+                                    }),
                                 )),
                         )
                         .child(self.convolver_slider_row(
                             rox_i18n::t!("eq-convolver-fl"),
                             player::convolver_channel_gain_db(player::POINT_FL),
                             settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                            |val, cx| player::set_convolver_channel_gain_db(player::POINT_FL, val, cx),
+                            |val, cx| {
+                                player::set_convolver_channel_gain_db(player::POINT_FL, val, cx)
+                            },
                             4,
                             cx,
                         ))
@@ -1197,52 +1194,88 @@ impl EqWindow {
                             rox_i18n::t!("eq-convolver-fr"),
                             player::convolver_channel_gain_db(player::POINT_FR),
                             settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                            |val, cx| player::set_convolver_channel_gain_db(player::POINT_FR, val, cx),
+                            |val, cx| {
+                                player::set_convolver_channel_gain_db(player::POINT_FR, val, cx)
+                            },
                             5,
                             cx,
                         ))
-                        .when(ir_layout == Some(IrLayout::Hesuvi14) && mode == ConvolverMode::Surround7_1, |d| {
-                            d.child(self.convolver_slider_row(
-                                rox_i18n::t!("eq-convolver-fc"),
-                                player::convolver_channel_gain_db(player::POINT_FC),
-                                settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                                |val, cx| player::set_convolver_channel_gain_db(player::POINT_FC, val, cx),
-                                6,
-                                cx,
-                            ))
-                            .child(self.convolver_slider_row(
-                                rox_i18n::t!("eq-convolver-sl"),
-                                player::convolver_channel_gain_db(player::POINT_SL),
-                                settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                                |val, cx| player::set_convolver_channel_gain_db(player::POINT_SL, val, cx),
-                                7,
-                                cx,
-                            ))
-                            .child(self.convolver_slider_row(
-                                rox_i18n::t!("eq-convolver-sr"),
-                                player::convolver_channel_gain_db(player::POINT_SR),
-                                settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                                |val, cx| player::set_convolver_channel_gain_db(player::POINT_SR, val, cx),
-                                8,
-                                cx,
-                            ))
-                            .child(self.convolver_slider_row(
-                                rox_i18n::t!("eq-convolver-bl"),
-                                player::convolver_channel_gain_db(player::POINT_BL),
-                                settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                                |val, cx| player::set_convolver_channel_gain_db(player::POINT_BL, val, cx),
-                                9,
-                                cx,
-                            ))
-                            .child(self.convolver_slider_row(
-                                rox_i18n::t!("eq-convolver-br"),
-                                player::convolver_channel_gain_db(player::POINT_BR),
-                                settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
-                                |val, cx| player::set_convolver_channel_gain_db(player::POINT_BR, val, cx),
-                                10,
-                                cx,
-                            ))
-                        }),
+                        .when(
+                            ir_layout == Some(IrLayout::Hesuvi14)
+                                && mode == ConvolverMode::Surround7_1,
+                            |d| {
+                                d.child(self.convolver_slider_row(
+                                    rox_i18n::t!("eq-convolver-fc"),
+                                    player::convolver_channel_gain_db(player::POINT_FC),
+                                    settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
+                                    |val, cx| {
+                                        player::set_convolver_channel_gain_db(
+                                            player::POINT_FC,
+                                            val,
+                                            cx,
+                                        )
+                                    },
+                                    6,
+                                    cx,
+                                ))
+                                .child(self.convolver_slider_row(
+                                    rox_i18n::t!("eq-convolver-sl"),
+                                    player::convolver_channel_gain_db(player::POINT_SL),
+                                    settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
+                                    |val, cx| {
+                                        player::set_convolver_channel_gain_db(
+                                            player::POINT_SL,
+                                            val,
+                                            cx,
+                                        )
+                                    },
+                                    7,
+                                    cx,
+                                ))
+                                .child(self.convolver_slider_row(
+                                    rox_i18n::t!("eq-convolver-sr"),
+                                    player::convolver_channel_gain_db(player::POINT_SR),
+                                    settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
+                                    |val, cx| {
+                                        player::set_convolver_channel_gain_db(
+                                            player::POINT_SR,
+                                            val,
+                                            cx,
+                                        )
+                                    },
+                                    8,
+                                    cx,
+                                ))
+                                .child(self.convolver_slider_row(
+                                    rox_i18n::t!("eq-convolver-bl"),
+                                    player::convolver_channel_gain_db(player::POINT_BL),
+                                    settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
+                                    |val, cx| {
+                                        player::set_convolver_channel_gain_db(
+                                            player::POINT_BL,
+                                            val,
+                                            cx,
+                                        )
+                                    },
+                                    9,
+                                    cx,
+                                ))
+                                .child(self.convolver_slider_row(
+                                    rox_i18n::t!("eq-convolver-br"),
+                                    player::convolver_channel_gain_db(player::POINT_BR),
+                                    settings_ui::span(-18.0, 6.0, " dB").decimals(1).hard(),
+                                    |val, cx| {
+                                        player::set_convolver_channel_gain_db(
+                                            player::POINT_BR,
+                                            val,
+                                            cx,
+                                        )
+                                    },
+                                    10,
+                                    cx,
+                                ))
+                            },
+                        ),
                 )
             })
     }

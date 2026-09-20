@@ -635,59 +635,194 @@ impl PartitionedConvolver {
                 ConvolverMode::VirtualStereo => (
                     2,
                     vec![
-                        ChannelRouting { in_ch: 0, filter_idx: 0, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 0, filter_idx: 1, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 1, filter_idx: 8, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 1, filter_idx: 7, to_left: false, scale: 1.0 },
+                        ChannelRouting {
+                            in_ch: 0,
+                            filter_idx: 0,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 0,
+                            filter_idx: 1,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 1,
+                            filter_idx: 8,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 1,
+                            filter_idx: 7,
+                            to_left: false,
+                            scale: 1.0,
+                        },
                     ],
                 ),
                 ConvolverMode::Surround7_1 => (
                     7,
                     vec![
-                        ChannelRouting { in_ch: 0, filter_idx: 0, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 0, filter_idx: 1, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 1, filter_idx: 8, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 1, filter_idx: 7, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 2, filter_idx: 6, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 2, filter_idx: 13, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 3, filter_idx: 2, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 3, filter_idx: 3, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 4, filter_idx: 10, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 4, filter_idx: 9, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 5, filter_idx: 4, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 5, filter_idx: 5, to_left: false, scale: 1.0 },
-                        ChannelRouting { in_ch: 6, filter_idx: 12, to_left: true, scale: 1.0 },
-                        ChannelRouting { in_ch: 6, filter_idx: 11, to_left: false, scale: 1.0 },
+                        ChannelRouting {
+                            in_ch: 0,
+                            filter_idx: 0,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 0,
+                            filter_idx: 1,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 1,
+                            filter_idx: 8,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 1,
+                            filter_idx: 7,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 2,
+                            filter_idx: 6,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 2,
+                            filter_idx: 13,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 3,
+                            filter_idx: 2,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 3,
+                            filter_idx: 3,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 4,
+                            filter_idx: 10,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 4,
+                            filter_idx: 9,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 5,
+                            filter_idx: 4,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 5,
+                            filter_idx: 5,
+                            to_left: false,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 6,
+                            filter_idx: 12,
+                            to_left: true,
+                            scale: 1.0,
+                        },
+                        ChannelRouting {
+                            in_ch: 6,
+                            filter_idx: 11,
+                            to_left: false,
+                            scale: 1.0,
+                        },
                     ],
                 ),
             },
             IrLayout::TrueStereo4 if filters.len() >= 4 => (
                 2,
                 vec![
-                    ChannelRouting { in_ch: 0, filter_idx: 0, to_left: true, scale: 1.0 },
-                    ChannelRouting { in_ch: 0, filter_idx: 1, to_left: false, scale: 1.0 },
-                    ChannelRouting { in_ch: 1, filter_idx: 2, to_left: true, scale: 1.0 },
-                    ChannelRouting { in_ch: 1, filter_idx: 3, to_left: false, scale: 1.0 },
+                    ChannelRouting {
+                        in_ch: 0,
+                        filter_idx: 0,
+                        to_left: true,
+                        scale: 1.0,
+                    },
+                    ChannelRouting {
+                        in_ch: 0,
+                        filter_idx: 1,
+                        to_left: false,
+                        scale: 1.0,
+                    },
+                    ChannelRouting {
+                        in_ch: 1,
+                        filter_idx: 2,
+                        to_left: true,
+                        scale: 1.0,
+                    },
+                    ChannelRouting {
+                        in_ch: 1,
+                        filter_idx: 3,
+                        to_left: false,
+                        scale: 1.0,
+                    },
                 ],
             ),
             IrLayout::Stereo2 if filters.len() >= 2 => (
                 2,
                 vec![
-                    ChannelRouting { in_ch: 0, filter_idx: 0, to_left: true, scale: 1.0 },
-                    ChannelRouting { in_ch: 1, filter_idx: 1, to_left: false, scale: 1.0 },
+                    ChannelRouting {
+                        in_ch: 0,
+                        filter_idx: 0,
+                        to_left: true,
+                        scale: 1.0,
+                    },
+                    ChannelRouting {
+                        in_ch: 1,
+                        filter_idx: 1,
+                        to_left: false,
+                        scale: 1.0,
+                    },
                 ],
             ),
             IrLayout::Mono1 if !filters.is_empty() => (
                 2,
                 vec![
-                    ChannelRouting { in_ch: 0, filter_idx: 0, to_left: true, scale: 1.0 },
-                    ChannelRouting { in_ch: 1, filter_idx: 0, to_left: false, scale: 1.0 },
+                    ChannelRouting {
+                        in_ch: 0,
+                        filter_idx: 0,
+                        to_left: true,
+                        scale: 1.0,
+                    },
+                    ChannelRouting {
+                        in_ch: 1,
+                        filter_idx: 0,
+                        to_left: false,
+                        scale: 1.0,
+                    },
                 ],
             ),
             _ => (
                 2,
                 vec![
-                    ChannelRouting { in_ch: 0, filter_idx: 0, to_left: true, scale: 1.0 },
+                    ChannelRouting {
+                        in_ch: 0,
+                        filter_idx: 0,
+                        to_left: true,
+                        scale: 1.0,
+                    },
                     ChannelRouting {
                         in_ch: 1,
                         filter_idx: if filters.len() > 1 { 1 } else { 0 },
@@ -1015,7 +1150,8 @@ impl ConvolverParams {
     }
 
     pub fn set_wet(&self, wet: f32) {
-        self.wet.store(wet.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.wet
+            .store(wet.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn gain_db(&self) -> f32 {
@@ -1372,7 +1508,10 @@ mod tests {
 
         // Crossfeed should have introduced signal into the right channel
         let right_energy: f32 = buf.iter().skip(1).step_by(2).map(|s| s.abs()).sum();
-        assert!(right_energy > 0.01, "Crossfeed must leak signal to right ear");
+        assert!(
+            right_energy > 0.01,
+            "Crossfeed must leak signal to right ear"
+        );
     }
 
     #[test]
@@ -1425,7 +1564,11 @@ mod tests {
 
         for frame in 0..samples {
             for ch in 0..channels {
-                let sample_val = if frame == 0 && ch == 0 { 0.5f32 } else { 0.0f32 };
+                let sample_val = if frame == 0 && ch == 0 {
+                    0.5f32
+                } else {
+                    0.0f32
+                };
                 match bits {
                     16 => {
                         let v = (sample_val * 32767.0) as i16;
