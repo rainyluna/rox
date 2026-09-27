@@ -314,6 +314,19 @@ const MIGRATIONS: &[crate::migrate::Migration] = &[
         up: crate::listens::add_origin,
         rescan: false,
     },
+    // Rows by membership for a plugin source (ADR 29): which collections
+    // hold each row, so syncing one collection never prunes another's rows.
+    // Playlist members snapshot their source beside the path, so a plugin
+    // track's entry relinks when its row comes back. No mtime reset: nothing
+    // here is read from a tag.
+    crate::migrate::Migration {
+        name: "plugin-membership",
+        up: |conn| {
+            crate::members::init_schema(conn)?;
+            crate::playlists::add_source_snapshot(conn)
+        },
+        rescan: false,
+    },
 ];
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -1776,14 +1789,26 @@ pub fn upsert_source_rows(
     source: &str,
     rows: &[TrackRow],
 ) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    upsert_source_rows_in(&tx, source, rows)?;
+    tx.commit()
+}
+
+/// [`upsert_source_rows`] inside a transaction the caller already holds, for
+/// a write that has to land or fail together with the rows. Opens and
+/// commits nothing.
+pub(crate) fn upsert_source_rows_in(
+    conn: &Connection,
+    source: &str,
+    rows: &[TrackRow],
+) -> rusqlite::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let tx = conn.transaction()?;
     {
-        let mut stmt = tx.prepare_cached(
+        let mut stmt = conn.prepare_cached(
             "INSERT INTO tracks
              (source, path, sub, title, artist, album_artist, album, genre, year,
               disc_no, track_no, duration_ms, codec, bitrate, sample_rate, bit_depth,
@@ -1842,7 +1867,7 @@ pub fn upsert_source_rows(
         }
     }
 
-    tx.commit()
+    Ok(())
 }
 
 /// Drop every row of one source whose path isn't in `keep`, and answer how

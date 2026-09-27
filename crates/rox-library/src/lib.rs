@@ -24,6 +24,7 @@ pub mod listens;
 pub mod locator;
 pub mod lyrics;
 pub mod m3u;
+pub mod members;
 pub mod migrate;
 pub mod mp4;
 pub mod open_files;

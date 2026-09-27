@@ -4,8 +4,8 @@
 //! Members are addressed by their own row id, since a playlist may hold a
 //! track twice.
 //!
-//! A prune kills the track id, so members also snapshot the path, and
-//! [`reattach`] relinks them after every scan.
+//! A prune kills the track id, so members also snapshot the source and path,
+//! and [`reattach`] relinks them after every scan.
 
 use std::sync::Arc;
 
@@ -90,6 +90,16 @@ pub(crate) fn add_path_snapshot(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// The store ladder's plugin-membership step, playlist half. Live members
+/// backfill from the catalog; a dangling one reads as local.
+pub(crate) fn add_source_snapshot(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE playlist_tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'local';
+         UPDATE playlist_tracks SET source = COALESCE(
+             (SELECT t.source FROM tracks t WHERE t.id = playlist_tracks.track_id), 'local');",
+    )
+}
+
 /// The store ladder's smart-playlists step. Existing rows default to static
 /// with a NULL definition.
 pub(crate) fn add_smart_columns(conn: &Connection) -> rusqlite::Result<()> {
@@ -99,9 +109,11 @@ pub(crate) fn add_smart_columns(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// Relink dangling members after a scan: by path snapshot first, then by tag
-/// snapshot only when it names exactly one track, so an ambiguous match never
-/// guesses. Live members just refresh their path. None when nothing dangled.
+/// Relink dangling members after a scan or a membership write: by path
+/// snapshot first (source and path for a non-local member), then by tag
+/// snapshot only when it names exactly one local track, so an ambiguous match
+/// never guesses. Live members just refresh their path. None when nothing
+/// dangled.
 pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     conn.execute(
         "UPDATE playlist_tracks SET path = t.path FROM tracks t
@@ -114,15 +126,28 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     if !has_dangling(conn)? {
         return Ok(None);
     }
+    // A plugin's track key can read like a path on disk, so each member only
+    // relinks within the source it snapshotted.
     let by_path = conn.execute(
         "UPDATE playlist_tracks SET track_id = t.id FROM tracks t
-         WHERE playlist_tracks.path <> ''
+         WHERE playlist_tracks.path <> '' AND playlist_tracks.source = 'local'
            AND t.source = 'local' AND t.path = playlist_tracks.path
            AND NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = playlist_tracks.track_id)",
         [],
     )?;
+    let by_source = conn.execute(
+        "UPDATE playlist_tracks SET track_id = t.id FROM tracks t
+         WHERE playlist_tracks.path <> '' AND playlist_tracks.source <> 'local'
+           AND t.source = playlist_tracks.source AND t.path = playlist_tracks.path
+           AND NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = playlist_tracks.track_id)",
+        [],
+    )?;
+
+    // Takes the local track's source too: a plugin member that lands here
+    // belongs to the local file from now on.
     let by_tags = conn.execute(
-        "UPDATE playlist_tracks SET track_id = t.id, path = t.path FROM tracks t
+        "UPDATE playlist_tracks SET track_id = t.id, path = t.path, source = t.source
+         FROM tracks t
          WHERE NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = playlist_tracks.track_id)
            AND NOT (playlist_tracks.title = '' AND playlist_tracks.artist = ''
                     AND playlist_tracks.album = '')
@@ -134,7 +159,7 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
                 AND c.album = playlist_tracks.album) = 1",
         [],
     )?;
-    Ok(Some(by_path + by_tags))
+    Ok(Some(by_path + by_source + by_tags))
 }
 
 fn has_dangling(conn: &Connection) -> rusqlite::Result<bool> {
@@ -496,8 +521,8 @@ pub fn add(
     {
         let mut insert = tx.prepare_cached(
             "INSERT INTO playlist_tracks
-                (playlist_id, track_id, position, title, artist, album, path)
-             SELECT ?1, t.id, ?3, t.title, t.artist, t.album, t.path
+                (playlist_id, track_id, position, title, artist, album, path, source)
+             SELECT ?1, t.id, ?3, t.title, t.artist, t.album, t.path, t.source
              FROM tracks t WHERE t.id = ?2",
         )?;
         for &track_id in track_ids {
@@ -1164,8 +1189,9 @@ mod tests {
         let fav = ensure_favourites(&conn, 100).unwrap();
         add(&mut conn, fav, &[1, 2], 100).unwrap();
         conn.execute(
-            "INSERT INTO playlist_tracks (playlist_id, track_id, position, title, artist, album, path)
-             VALUES (?1, 1, 9, 'One', 'A', 'First', '/m/1.mp3')",
+            "INSERT INTO playlist_tracks
+                (playlist_id, track_id, position, title, artist, album, path, source)
+             VALUES (?1, 1, 9, 'One', 'A', 'First', '/m/1.mp3', 'local')",
             [fav],
         )
         .unwrap();
@@ -1411,5 +1437,114 @@ mod tests {
             ids(&conn, pl).unwrap().is_empty(),
             "but a deleted track has no file to play"
         );
+    }
+
+    fn streamed(key: &str) -> crate::members::PluginTrack {
+        crate::members::PluginTrack {
+            key: key.into(),
+            title: "Streamed".into(),
+            artist: "C".into(),
+            album_artist: "C".into(),
+            album: "Third".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_plugin_member_outlives_its_row_and_relinks_when_it_returns() {
+        let mut conn = seed();
+        let demo = "plugin:demo";
+
+        crate::members::set_collection(&mut conn, demo, "liked", &[streamed("k1")]).unwrap();
+        let id = store::id_for_path(&conn, demo, "k1").unwrap().unwrap();
+        let pl = create(&conn, "Mix", 100).unwrap();
+        add(&mut conn, pl, &[id], 100).unwrap();
+
+        // SQLite hands a deleted top rowid straight back, so a row above it
+        // makes the return land under a fresh id.
+        crate::members::pick(&mut conn, demo, &[streamed("k2")]).unwrap();
+
+        assert_eq!(
+            crate::members::drop_collection(&mut conn, demo, "liked").unwrap(),
+            1
+        );
+        assert!(ids(&conn, pl).unwrap().is_empty(), "the member dangles");
+        assert_eq!(
+            tracks(&conn, pl).unwrap()[0].title,
+            "Streamed",
+            "the tag snapshot keeps the entry"
+        );
+
+        crate::members::pick(&mut conn, demo, &[streamed("k1")]).unwrap();
+        let back = store::id_for_path(&conn, demo, "k1").unwrap().unwrap();
+        assert_ne!(back, id, "the row came back under a fresh id");
+        assert_eq!(ids(&conn, pl).unwrap(), [back], "and the pick relinked it");
+    }
+
+    #[test]
+    fn a_plugin_member_never_attaches_to_a_local_file_at_its_key() {
+        let mut conn = seed();
+        let demo = "plugin:demo";
+
+        crate::members::set_collection(&mut conn, demo, "liked", &[streamed("/m/1.mp3")]).unwrap();
+        let id = store::id_for_path(&conn, demo, "/m/1.mp3")
+            .unwrap()
+            .unwrap();
+        let pl = create(&conn, "Mix", 100).unwrap();
+        add(&mut conn, pl, &[id], 100).unwrap();
+
+        crate::members::drop_collection(&mut conn, demo, "liked").unwrap();
+
+        assert_eq!(reattach(&conn).unwrap(), Some(0));
+        assert!(
+            ids(&conn, pl).unwrap().is_empty(),
+            "the local file at the same path is a different track"
+        );
+    }
+
+    #[test]
+    fn the_source_snapshot_backfills_from_the_live_catalog() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::run_ladder_before(&conn, "plugin-membership").unwrap();
+        assert!(!has_column(&conn, "playlist_tracks", "source"));
+
+        store::insert_batch(&mut conn, &[track("/m/1.mp3", "One", "A", "First")]).unwrap();
+        let rows = [crate::members::row_for(&streamed("k1"), 100)];
+        store::upsert_source_rows(&mut conn, "plugin:demo", &rows).unwrap();
+        let local = store::id_for_path(&conn, crate::cue::LOCAL, "/m/1.mp3")
+            .unwrap()
+            .unwrap();
+        let remote = store::id_for_path(&conn, "plugin:demo", "k1")
+            .unwrap()
+            .unwrap();
+
+        // The old build's insert, which had no source column to write.
+        let pl = create(&conn, "From The Old Build", 100).unwrap();
+        for (position, track_id) in [local, remote, 999].into_iter().enumerate() {
+            conn.execute(
+                "INSERT INTO playlist_tracks
+                    (playlist_id, track_id, position, title, artist, album, path)
+                 VALUES (?1, ?2, ?3, 'T', 'A', 'B', '')",
+                rusqlite::params![pl, track_id, position as i64],
+            )
+            .unwrap();
+        }
+
+        store::init_schema(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT source FROM playlist_tracks ORDER BY position")
+            .unwrap();
+        let sources: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            sources,
+            ["local", "plugin:demo", "local"],
+            "live members take their row's source, a dangling one reads as local"
+        );
+        assert!(has_column(&conn, "source_members", "collection"));
     }
 }
