@@ -134,11 +134,13 @@ question this ADR left for the host: something does need audio bytes rather than
 reference to them.
 
 A plugin row stores no URL. `Locator` gains a third variant beside `Local` and `Remote`
-(`rox-library/src/locator.rs:12-27`) that holds the source id, the track key, and a
-container hint. `rox-playback` opens it through a stream opener passed in when a queue
-starts, the way the live buffer length is (`engine.rs:321-332`), and reads the result as
-a `MediaSource`. The opener is a boxed function, so `rox-playback` never depends on the
-plugin host. `Remote` and `HttpSource` stay as they are for Subsonic and radio.
+(`rox-library/src/locator.rs:12-27`) that holds the source id, the track key, and
+whether the stream is live. `rox-playback` opens it through a stream opener passed in
+when a queue starts, the way the live buffer length is (`engine.rs:321-332`), and reads
+the result as a `MediaSource`. The container hint comes back with the opened stream,
+since only the plugin knows which encode it picked. The opener is a boxed function, so
+`rox-playback` never depends on the plugin host. `Remote` and `HttpSource` stay as they
+are for Subsonic and radio.
 
 This retires the sentence "the engine never asks a source anything"
 (`rox-services/src/catalog.rs:1043-1044`) for plugin rows. The engine reads from the

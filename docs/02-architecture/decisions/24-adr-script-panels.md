@@ -44,8 +44,8 @@ WASM has the strongest sandbox by a wide margin and fails on the product constra
 authoring loop here is edit a file and save it; "install a toolchain and compile" is a
 different activity. And a bundle carrying compiled binaries makes the approval dialog
 meaningless, since "here's what you're agreeing to run" can't be read by the person
-agreeing to it. WASM stays the right answer for the source and playback extension host,
-which is a different problem with different constraints.
+agreeing to it. [ADR 30](30-adr-plugins.md) weighs WASM for plugins too and picks a
+subprocess instead.
 
 Rhai wins on three counts. It's pure Rust, so no toolchain follows it onto any platform.
 It starts capability-free, since `Engine::new_raw` exposes nothing that wasn't explicitly
