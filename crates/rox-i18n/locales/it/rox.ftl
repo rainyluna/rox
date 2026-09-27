@@ -1084,6 +1084,7 @@ settings-library-section-sources = Sorgenti
 settings-library-section-stored-metadata = Metadati salvati
 settings-library-section-tempo = Analisi del tempo
 settings-library-source-off = Spento
+settings-library-source-on = Acceso
 settings-library-source-synced = Sincronizzato il { $date }
 settings-library-split-genres = Dividi i generi su virgole e barre
     .description = "Dubstep, Trap" e "Drum & Bass / Neurofunk" contano ogni valore come genere a sé; i punti e virgola dividono sempre. Off tiene interi i nomi con barra per i tag dove significano un genere solo. I file tengono i tag come sono scritti

@@ -1095,6 +1095,7 @@ settings-library-section-sources = Джерела
 settings-library-section-stored-metadata = Збережені метадані
 settings-library-section-tempo = Аналіз темпу
 settings-library-source-off = Вимкнено
+settings-library-source-on = Увімкнено
 settings-library-source-synced = Синхронізовано { $date }
 settings-library-split-genres = Ділити жанри по комах і скісних
     .description = «Dubstep, Trap» і «Drum & Bass / Neurofunk» рахують кожне значення окремим жанром; крапка з комою ділить завжди. Вимкнено лишає назви зі скісною цілими для тегів, де вони означають один жанр. Файли тримають свої теги як написано

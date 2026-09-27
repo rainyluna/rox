@@ -185,6 +185,18 @@ pub fn milkdrop_dir() -> PathBuf {
     data_dir().join("milkdrop")
 }
 
+/// One folder per plugin, each dropped in by the user. Not created here
+/// (ADR 30).
+pub fn plugins_dir() -> PathBuf {
+    data_dir().join("plugins")
+}
+
+/// Where a plugin writes, outside its own folder: a write inside it would
+/// change the folder hash and switch the plugin off. Not created here.
+pub fn plugin_data_dir(id: &str) -> PathBuf {
+    data_dir().join("plugin-data").join(id)
+}
+
 /// An unsaved look ejects under `_local`. A workspace named that shares the
 /// folder, which costs at worst a bookmark, since the re-link checks the hash.
 pub fn shader_eject_path(workspace: &str, shader: &str) -> PathBuf {
@@ -460,6 +472,9 @@ pub struct Settings {
     /// Whether anything of rox talks to AI tooling (ADR 22). Acoustic
     /// analysis never reads this.
     pub ai_enabled: bool,
+    /// Reveals the Plugins page. Each plugin still has its own switch
+    /// (ADR 30).
+    pub plugins_enabled: bool,
     /// Whether MCP answers tool calls. The rox-mcp proxy checks it on every
     /// call, so a flip applies to the next tool use.
     pub mcp_enabled: bool,
@@ -649,6 +664,8 @@ pub struct AccountsState {
     pub providers: Providers,
     pub discord: DiscordSettings,
     pub subsonic_servers: Vec<SubsonicAccount>,
+    #[serde(deserialize_with = "lenient::vec")]
+    pub plugins: Vec<PluginRecord>,
     /// Legacy single server, read once into `subsonic_servers`, never
     /// written.
     #[serde(skip_serializing)]
@@ -1106,6 +1123,19 @@ pub fn experimental() -> bool {
 
 pub fn set_experimental(on: bool, cx: &mut App) {
     EXPERIMENTAL.store(on, Ordering::Relaxed);
+    for window in cx.windows() {
+        window.update(cx, |_, window, _| window.refresh()).ok();
+    }
+}
+
+static PLUGINS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn plugins_enabled() -> bool {
+    PLUGINS_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_plugins_enabled(on: bool, cx: &mut App) {
+    PLUGINS_ENABLED.store(on, Ordering::Relaxed);
     for window in cx.windows() {
         window.update(cx, |_, window, _| window.refresh()).ok();
     }
@@ -1964,6 +1994,42 @@ impl SubsonicAccount {
             .unwrap_or_default()
             .to_string()
     }
+}
+
+/// A plugin the user switched on at least once (ADR 30). The folder under
+/// [`plugins_dir`] is the plugin; this is what rox remembers about it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginRecord {
+    /// The manifest id, without the `plugin:` prefix.
+    pub id: String,
+    /// Off leaves the rows in the library, hidden.
+    pub enabled: bool,
+    /// Cached from the manifest's source label, so rows name the plugin
+    /// while its folder is missing.
+    pub label: String,
+    /// The folder hash at the last approval.
+    pub hash: String,
+    /// The manifest at the last approval, for the diff a re-approval shows.
+    pub approved_manifest: serde_json::Value,
+    /// Off by default: a plugin row never scrobbles unless this is on.
+    pub scrobble: bool,
+    pub synced: Vec<SyncedCollection>,
+    /// The plugin's own settings, secrets included, as its config schema
+    /// shapes them.
+    pub config: serde_json::Value,
+}
+
+/// A collection the user switched sync on for.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncedCollection {
+    /// The plugin's node id.
+    pub id: String,
+    /// Cached so the offline browser can name it.
+    pub title: String,
+    /// The last complete sync's token, empty for none.
+    pub token: String,
 }
 
 /// Where a fetched lyrics sheet saves.
@@ -3119,6 +3185,7 @@ impl Default for Settings {
             download_updates: false,
             experimental: false,
             ai_enabled: false,
+            plugins_enabled: false,
             mcp_enabled: false,
             acoustic_analysis: false,
             acoustic_auto: false,
@@ -3654,6 +3721,53 @@ mod tests {
         blank.fold_legacy_subsonic();
 
         assert!(blank.subsonic_servers.is_empty());
+    }
+
+    #[test]
+    fn a_plugin_record_round_trips_through_the_accounts_file() {
+        let mut accounts = AccountsState::default();
+        accounts.plugins.push(PluginRecord {
+            id: "demo".into(),
+            enabled: true,
+            label: "Demo".into(),
+            hash: "ab12".into(),
+            approved_manifest: serde_json::json!({ "id": "demo", "api": 0 }),
+            scrobble: true,
+            synced: vec![SyncedCollection {
+                id: "likes".into(),
+                title: "Liked".into(),
+                token: "t-1".into(),
+            }],
+            config: serde_json::json!({ "region": "ca" }),
+        });
+
+        let back: AccountsState =
+            serde_json::from_str(&serde_json::to_string(&accounts).unwrap()).unwrap();
+
+        assert_eq!(back.plugins, accounts.plugins);
+    }
+
+    #[test]
+    fn a_broken_plugin_record_drops_without_its_siblings() {
+        let accounts: AccountsState = serde_json::from_value(serde_json::json!({
+            "plugins": [
+                { "id": "first", "enabled": true },
+                { "id": 7, "enabled": "yes" },
+                { "id": "last" },
+            ],
+        }))
+        .unwrap();
+
+        let ids: Vec<&str> = accounts.plugins.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["first", "last"]);
+
+        assert!(accounts.plugins[0].enabled);
+        assert!(
+            !accounts.plugins[1].enabled,
+            "a missing switch reads as off"
+        );
+        assert!(!accounts.plugins[1].scrobble, "and so does scrobbling");
+        assert!(accounts.plugins[1].config.is_null());
     }
 
     #[test]

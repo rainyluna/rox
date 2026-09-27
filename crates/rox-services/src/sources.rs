@@ -6,7 +6,9 @@
 //!
 //! This module owns every `subsonic:` id, so a row under one no configured
 //! account digests to came from an address an account left, and it goes:
-//! the authorizer won't sign for it, so it could never play.
+//! the authorizer won't sign for it, so it could never play. It answers for
+//! which `plugin:` ids are live and kept too (ADR 30), from the plugin
+//! records.
 //!
 //! A remote row stores only its stream URL; credentials never go in SQLite.
 //! The authorize table finishes each request from settings (for Subsonic, a
@@ -20,8 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, Entity, Task};
 
-use rox_core::settings::{Settings, SubsonicAccount};
+use rox_core::settings::{AccountsState, PluginRecord, Settings, SubsonicAccount};
 use rox_library::TrackRow;
+use rox_library::cue::{Origin, PLUGIN_PREFIX};
 use rox_library::playlists;
 use rox_library::replaygain::ReplayGain;
 use rox_library::rusqlite::Connection;
@@ -41,8 +44,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 
 const MISSES_SWEEP: usize = 4096;
 
-/// The whole namespace this module answers for. A test holds it to
-/// [`Server::source_id`].
+/// Subsonic's namespace. A test holds it to [`Server::source_id`].
 const SOURCE_PREFIX: &str = "subsonic:";
 
 struct Progress {
@@ -95,6 +97,16 @@ fn accounts() -> Vec<SubsonicAccount> {
     Settings::load().accounts.subsonic_servers
 }
 
+/// For what reads Subsonic and plugins together.
+fn accounts_state() -> AccountsState {
+    Settings::load().accounts
+}
+
+/// The source a plugin's rows file under.
+pub fn plugin_source(record: &PluginRecord) -> String {
+    format!("{PLUGIN_PREFIX}{}", record.id)
+}
+
 /// None while it names no address.
 fn server_of(account: &SubsonicAccount) -> Option<Server> {
     if account.url.trim().is_empty() {
@@ -132,6 +144,10 @@ fn live_server(source: &str) -> Option<Server> {
 /// Fill the library's source-name table (see
 /// [`rox_library::cue::source_label`]). Run on every projection load.
 pub fn publish_labels() {
+    rox_library::cue::set_source_labels(labels(&accounts_state()));
+}
+
+fn labels(accounts: &AccountsState) -> HashMap<String, String> {
     let mut labels = HashMap::new();
     labels.insert(
         rox_library::cue::LOCAL.to_string(),
@@ -142,8 +158,8 @@ pub fn publish_labels() {
         rox_i18n::t!("metadata-source-radio").to_string(),
     );
 
-    for account in accounts() {
-        let Some(source) = source_of(&account) else {
+    for account in &accounts.subsonic_servers {
+        let Some(source) = source_of(account) else {
             continue;
         };
 
@@ -153,7 +169,15 @@ pub fn publish_labels() {
         }
     }
 
-    rox_library::cue::set_source_labels(labels);
+    // A plugin with no record keeps the raw id, which is how a removed
+    // plugin's leftover rows read.
+    for record in &accounts.plugins {
+        if !record.label.is_empty() {
+            labels.insert(plugin_source(record), record.label.clone());
+        }
+    }
+
+    labels
 }
 
 /// Called at startup, before anything can resolve a row, and again after
@@ -181,36 +205,84 @@ pub fn install_registry() {
     }
 }
 
-fn live_ids(accounts: &[SubsonicAccount]) -> HashSet<String> {
-    accounts
+/// Switched-on Subsonic accounts in list order, then switched-on plugins.
+fn live_in_order(accounts: &AccountsState) -> Vec<String> {
+    let servers = accounts
+        .subsonic_servers
         .iter()
         .filter(|account| account.enabled)
-        .filter_map(source_of)
-        .collect()
+        .filter_map(source_of);
+
+    let plugins = accounts
+        .plugins
+        .iter()
+        .filter(|record| record.enabled)
+        .map(plugin_source);
+
+    servers.chain(plugins).collect()
 }
 
-/// Every account's that names an address, switched on or not: a
-/// switched-off account keeps its catalog.
+/// The non-local ids whose rows browse.
+pub fn live_ids(accounts: &AccountsState) -> HashSet<String> {
+    live_in_order(accounts).into_iter().collect()
+}
+
+/// What an everyday prune keeps, one set per namespace. None leaves that
+/// namespace alone.
+struct Kept {
+    subsonic: Option<HashSet<String>>,
+    plugins: Option<HashSet<String>>,
+}
+
+impl Kept {
+    fn departs(&self, source: &str) -> bool {
+        let kept = if source.starts_with(SOURCE_PREFIX) {
+            &self.subsonic
+        } else if source.starts_with(PLUGIN_PREFIX) {
+            &self.plugins
+        } else {
+            return false;
+        };
+
+        kept.as_ref().is_some_and(|kept| !kept.contains(source))
+    }
+}
+
+/// Every configured id, switched on or not: a switched-off account or plugin
+/// keeps its rows.
 ///
-/// None means don't prune. An empty address is a half-finished edit, and an
-/// empty list is more likely a file that didn't load than an instruction
-/// ([`remove`] handles its own rows).
-fn kept_ids(accounts: &[SubsonicAccount]) -> Option<HashSet<String>> {
-    if accounts.is_empty() {
+/// An empty address is a half-finished edit, and an empty list is more likely
+/// a file that didn't load than an instruction, so either leaves its namespace
+/// unpruned ([`remove`] handles its own rows).
+fn kept_ids(accounts: &AccountsState) -> Kept {
+    let servers = &accounts.subsonic_servers;
+    let subsonic = match servers.is_empty() {
+        true => None,
+        false => servers.iter().map(source_of).collect(),
+    };
+
+    Kept {
+        subsonic,
+        plugins: kept_plugins(&accounts.plugins),
+    }
+}
+
+fn kept_plugins(records: &[PluginRecord]) -> Option<HashSet<String>> {
+    if records.is_empty() {
         return None;
     }
 
-    accounts.iter().map(source_of).collect()
+    Some(records.iter().map(plugin_source).collect())
 }
 
 /// Referrers (playlist entries, listens, thumbnails) outlive the rows, the
 /// same as they outlive a track the server dropped.
-fn drop_departed(conn: &mut Connection, kept: &HashSet<String>) -> usize {
+fn drop_departed(conn: &mut Connection, kept: &Kept) -> usize {
     let departed: Vec<String> = store::sources(conn)
         .unwrap_or_default()
         .into_iter()
         .map(|(source, _)| source)
-        .filter(|source| source.starts_with(SOURCE_PREFIX) && !kept.contains(source))
+        .filter(|source| kept.departs(source))
         .collect();
 
     let nothing = HashSet::new();
@@ -220,12 +292,8 @@ fn drop_departed(conn: &mut Connection, kept: &HashSet<String>) -> usize {
         .sum()
 }
 
-fn prune_for(conn: &mut Connection, accounts: &[SubsonicAccount]) -> usize {
-    let Some(kept) = kept_ids(accounts) else {
-        return 0;
-    };
-
-    drop_departed(conn, &kept)
+fn prune_for(conn: &mut Connection, accounts: &AccountsState) -> usize {
+    drop_departed(conn, &kept_ids(accounts))
 }
 
 /// What the settings page calls after an address, login, or switch changes:
@@ -238,7 +306,7 @@ pub fn follow_accounts(library: Entity<Library>, cx: &mut App) -> Task<usize> {
         return Task::ready(0);
     }
 
-    let accounts = accounts();
+    let accounts = accounts_state();
     let db_path = library.read(cx).db_path();
 
     cx.spawn(async move |cx| {
@@ -271,12 +339,12 @@ pub fn remove(index: usize, library: Entity<Library>, cx: &mut App) -> Task<usiz
         return Task::ready(0);
     }
 
-    let mut accounts = accounts();
-    if index >= accounts.len() {
+    let mut accounts = accounts_state();
+    if index >= accounts.subsonic_servers.len() {
         return Task::ready(0);
     }
 
-    let removed = accounts.remove(index);
+    let removed = accounts.subsonic_servers.remove(index);
     let gone_source = source_of(&removed);
 
     if let Some(source) = &gone_source {
@@ -315,30 +383,36 @@ pub fn remove(index: usize, library: Entity<Library>, cx: &mut App) -> Task<usiz
     })
 }
 
-/// Unlike the everyday prune, an empty list is trusted here: somebody just
-/// asked for exactly that.
-fn remove_rows(conn: &mut Connection, source: Option<&str>, left: &[SubsonicAccount]) -> usize {
+/// Unlike the everyday prune, an empty server list is trusted here: somebody
+/// just asked for exactly that. Plugins keep the everyday rule, since nobody
+/// asked about them.
+fn remove_rows(conn: &mut Connection, source: Option<&str>, left: &AccountsState) -> usize {
     let nothing = HashSet::new();
     let own = source
         .and_then(|source| store::prune_source(conn, source, &nothing).ok())
         .unwrap_or(0);
 
-    let kept: Option<HashSet<String>> = left.iter().map(source_of).collect();
-    let departed = kept.map_or(0, |kept| drop_departed(conn, &kept));
+    let kept = Kept {
+        subsonic: left.subsonic_servers.iter().map(source_of).collect(),
+        plugins: kept_plugins(&left.plugins),
+    };
+    let departed = drop_departed(conn, &kept);
 
     own + departed
 }
 
-/// Every Subsonic id that isn't a switched-on account's, as the projection
-/// load asks it. Reads the settings once.
+/// Every Subsonic or plugin id that isn't switched on, as the projection load
+/// asks it. Reads the settings once.
 pub fn hidden_sources() -> impl Fn(&str) -> bool {
-    let live = live_ids(&accounts());
+    let live = live_ids(&accounts_state());
 
     move |source| hides(&live, source)
 }
 
 fn hides(live: &HashSet<String>, source: &str) -> bool {
-    source.starts_with(SOURCE_PREFIX) && !live.contains(source)
+    let switchable = source.starts_with(SOURCE_PREFIX) || source.starts_with(PLUGIN_PREFIX);
+
+    switchable && !live.contains(source)
 }
 
 pub fn ping(index: usize, cx: &App) -> Task<Result<ServerInfo, String>> {
@@ -379,7 +453,7 @@ pub fn sync(
     install_registry();
 
     let db_path = library.read(cx).db_path();
-    let accounts = accounts();
+    let accounts = accounts_state();
 
     cx.spawn(async move |cx| {
         let outcome = cx
@@ -423,7 +497,7 @@ pub fn sync(
 /// servers' rows are still somebody's.
 fn run(
     server: &Server,
-    accounts: &[SubsonicAccount],
+    accounts: &AccountsState,
     conn: &mut Connection,
 ) -> Result<SyncOutcome, String> {
     let source = server.source_id();
@@ -458,7 +532,7 @@ fn reconcile(
     source: &str,
     rows: &[TrackRow],
     keep: &HashSet<String>,
-    accounts: &[SubsonicAccount],
+    accounts: &AccountsState,
 ) -> Result<(usize, usize), String> {
     store::upsert_source_rows(conn, source, rows).map_err(|e| e.to_string())?;
 
@@ -576,32 +650,51 @@ pub fn cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
     found
 }
 
-/// The first server holding the key answers. The library has no column for
-/// the art id, so the song is asked for it once; after that the store
-/// answers.
+/// The first live source holding the key answers. The library has no column
+/// for a Subsonic art id, so the song is asked for it once; after that the
+/// store answers.
 fn fetch_cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
-    let servers = live_servers();
-    if servers.is_empty() {
+    let accounts = accounts_state();
+    let live = live_in_order(&accounts);
+    if live.is_empty() {
         return None;
     }
 
     let library = store::open(&rox_core::settings::data_dir().join("library.db")).ok()?;
-    let server = servers.into_iter().find(|server| {
-        matches!(
-            store::id_for_path(&library, &server.source_id(), key),
-            Ok(Some(_))
-        )
-    })?;
+    let source = live
+        .into_iter()
+        .find(|source| matches!(store::id_for_path(&library, source, key), Ok(Some(_))))?;
 
-    let cover_id = server.cover_id(key).ok()?;
-    if cover_id.is_empty() {
-        return None;
+    match Origin::of(&source) {
+        Origin::Subsonic => {
+            let server = accounts
+                .subsonic_servers
+                .iter()
+                .filter_map(server_of)
+                .find(|server| server.source_id() == source)?;
+
+            let cover_id = server.cover_id(key).ok()?;
+            if cover_id.is_empty() {
+                return None;
+            }
+
+            let bytes = server.cover(&cover_id, COVER_SIZE).ok()?;
+            let thumbs = thumbs.lock().ok()?;
+
+            rox_library::thumbs::store_bytes(&thumbs, &bytes, key)
+        }
+
+        // Keyed with the source, since two plugins can hand out the same key.
+        // Subsonic's thumbs keep the bare key so the stored ones stay valid.
+        Origin::Plugin => {
+            let thumb = format!("{source}|{key}");
+
+            // Stored thumbs only. Fetching a miss is plugins::cover's job.
+            rox_library::thumbs::thumbnail(thumbs, Path::new(&thumb))
+        }
+
+        Origin::Local | Origin::Radio => None,
     }
-
-    let bytes = server.cover(&cover_id, COVER_SIZE).ok()?;
-    let thumbs = thumbs.lock().ok()?;
-
-    rox_library::thumbs::store_bytes(&thumbs, &bytes, key)
 }
 
 /// In memory only: a stored miss would outlive the outage that caused it.
@@ -794,6 +887,26 @@ mod tests {
         source_of(&account(true, url)).expect("an address")
     }
 
+    fn plugin(id: &str, enabled: bool) -> PluginRecord {
+        PluginRecord {
+            id: id.to_string(),
+            enabled,
+            label: "Demo".into(),
+            ..PluginRecord::default()
+        }
+    }
+
+    fn state(servers: &[SubsonicAccount], plugins: &[PluginRecord]) -> AccountsState {
+        let mut state = AccountsState::default();
+        state.subsonic_servers = servers.to_vec();
+        state.plugins = plugins.to_vec();
+        state
+    }
+
+    fn servers(servers: &[SubsonicAccount]) -> AccountsState {
+        state(servers, &[])
+    }
+
     const HOME: &str = "https://home.example.com";
     const WORK: &str = "https://work.example.com";
 
@@ -833,8 +946,14 @@ mod tests {
         let rows = [row_for(&kept, 1_700_000_100)];
         let keep = HashSet::from(["sg-1".to_string()]);
 
-        let (pruned, departed) =
-            reconcile(&mut conn, &home, &rows, &keep, &[account(true, HOME)]).unwrap();
+        let (pruned, departed) = reconcile(
+            &mut conn,
+            &home,
+            &rows,
+            &keep,
+            &servers(&[account(true, HOME)]),
+        )
+        .unwrap();
 
         assert_eq!(pruned, 1, "the song the server stopped listing");
         assert_eq!(departed, 2, "both rows of the address the account left");
@@ -848,7 +967,7 @@ mod tests {
     fn a_sync_leaves_the_other_servers_alone() {
         let (home, work) = (id(HOME), id(WORK));
         let mut conn = library(&[&home, &work]);
-        let accounts = [account(true, HOME), account(false, WORK)];
+        let accounts = servers(&[account(true, HOME), account(false, WORK)]);
 
         let rows = [row_for(&track(), 1_700_000_100)];
         let keep = HashSet::from(["sg-1".to_string()]);
@@ -866,7 +985,11 @@ mod tests {
         station.id = "ir-1".into();
         store::upsert_source_rows(&mut conn, "radio", &[row_for(&station, 0)]).unwrap();
 
-        assert_eq!(drop_departed(&mut conn, &HashSet::from([home.clone()])), 2);
+        let kept = Kept {
+            subsonic: Some(HashSet::from([home.clone()])),
+            plugins: None,
+        };
+        assert_eq!(drop_departed(&mut conn, &kept), 2);
 
         assert_eq!(count(&conn, "radio"), 1);
         assert_eq!(count(&conn, "local"), 1);
@@ -878,7 +1001,7 @@ mod tests {
         let home = id(HOME);
         let mut conn = library(&[&home, "subsonic:old"]);
 
-        assert_eq!(prune_for(&mut conn, &[account(false, HOME)]), 2);
+        assert_eq!(prune_for(&mut conn, &servers(&[account(false, HOME)])), 2);
 
         assert_eq!(count(&conn, &home), 2);
         assert_eq!(count(&conn, "subsonic:old"), 0);
@@ -889,10 +1012,13 @@ mod tests {
         let mut conn = library(&[&id(HOME), "subsonic:old"]);
 
         assert_eq!(
-            prune_for(&mut conn, &[account(true, HOME), account(true, "   ")]),
+            prune_for(
+                &mut conn,
+                &servers(&[account(true, HOME), account(true, "   ")])
+            ),
             0
         );
-        assert_eq!(prune_for(&mut conn, &[]), 0);
+        assert_eq!(prune_for(&mut conn, &servers(&[])), 0);
 
         assert_eq!(count(&conn, "subsonic:old"), 2);
     }
@@ -902,7 +1028,7 @@ mod tests {
         let (home, work) = (id(HOME), id(WORK));
         let mut conn = library(&[&home, &work, "subsonic:old"]);
 
-        let gone = remove_rows(&mut conn, Some(&home), &[account(false, WORK)]);
+        let gone = remove_rows(&mut conn, Some(&home), &servers(&[account(false, WORK)]));
 
         assert_eq!(gone, 4, "its own two and the two nobody names");
         assert_eq!(count(&conn, &home), 0);
@@ -916,7 +1042,7 @@ mod tests {
         let home = id(HOME);
         let mut conn = library(&[&home, "subsonic:old"]);
 
-        assert_eq!(remove_rows(&mut conn, Some(&home), &[]), 4);
+        assert_eq!(remove_rows(&mut conn, Some(&home), &servers(&[])), 4);
 
         assert_eq!(count(&conn, &home), 0);
         assert_eq!(count(&conn, "subsonic:old"), 0);
@@ -926,7 +1052,7 @@ mod tests {
     #[test]
     fn only_switched_on_servers_browse() {
         let (home, work) = (id(HOME), id(WORK));
-        let live = live_ids(&[account(true, HOME), account(false, WORK)]);
+        let live = live_ids(&servers(&[account(true, HOME), account(false, WORK)]));
 
         assert!(!hides(&live, &home));
         assert!(hides(&live, &work));
@@ -936,6 +1062,65 @@ mod tests {
             assert!(!hides(&live, source));
             assert!(!hides(&HashSet::new(), source));
         }
+    }
+
+    #[test]
+    fn a_switched_off_plugin_hides_its_rows_and_keeps_them() {
+        let mut conn = library(&["plugin:demo"]);
+
+        let off = state(&[], &[plugin("demo", false)]);
+        assert!(hides(&live_ids(&off), "plugin:demo"));
+
+        assert_eq!(prune_for(&mut conn, &off), 0);
+        assert_eq!(count(&conn, "plugin:demo"), 2);
+
+        let on = state(&[], &[plugin("demo", true)]);
+        assert!(!hides(&live_ids(&on), "plugin:demo"));
+    }
+
+    #[test]
+    fn a_plugin_with_no_record_hides_and_departs() {
+        let mut conn = library(&["plugin:demo", "plugin:other"]);
+        let left = state(&[], &[plugin("other", true)]);
+
+        assert!(hides(&live_ids(&left), "plugin:demo"));
+
+        assert_eq!(prune_for(&mut conn, &left), 2);
+        assert_eq!(count(&conn, "plugin:demo"), 0);
+        assert_eq!(count(&conn, "plugin:other"), 2);
+        assert_eq!(count(&conn, "local"), 1);
+    }
+
+    #[test]
+    fn no_plugin_records_prunes_no_plugin_rows() {
+        let home = id(HOME);
+        let mut conn = library(&[&home, "plugin:demo"]);
+
+        assert_eq!(prune_for(&mut conn, &servers(&[account(true, HOME)])), 0);
+        assert_eq!(remove_rows(&mut conn, Some(&home), &servers(&[])), 2);
+
+        assert_eq!(count(&conn, "plugin:demo"), 2);
+    }
+
+    #[test]
+    fn plugin_records_leave_subsonic_rows_to_the_accounts() {
+        let mut conn = library(&["subsonic:old", "plugin:demo"]);
+
+        assert_eq!(
+            prune_for(&mut conn, &state(&[], &[plugin("demo", true)])),
+            0
+        );
+
+        assert_eq!(count(&conn, "subsonic:old"), 2);
+    }
+
+    #[test]
+    fn every_plugin_record_names_its_rows() {
+        let named = labels(&state(&[], &[plugin("demo", true), plugin("off", false)]));
+
+        assert_eq!(named.get("plugin:demo").map(String::as_str), Some("Demo"));
+        assert_eq!(named.get("plugin:off").map(String::as_str), Some("Demo"));
+        assert!(!named.contains_key("plugin:gone"));
     }
 
     #[test]

@@ -722,8 +722,8 @@ pub fn shard_for_ids(
 }
 
 /// The single definition behind [`Projection::is_browsable`]: radio is out.
-/// Subsonic stays in because a server is a catalog with albums and artists; a
-/// station is a live stream with a name.
+/// Subsonic and plugins stay in because each is a catalog with albums and
+/// artists; a station is a live stream with a name.
 fn source_browsable(source: &str) -> bool {
     crate::cue::Origin::of(source) != crate::cue::Origin::Radio
 }

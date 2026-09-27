@@ -1,5 +1,6 @@
 //! Subsonic servers on the Library page: a row each in the sources table, and a
-//! setup dialog behind it.
+//! setup dialog behind it. Plugins take a row each too, with no dialog: the
+//! Plugins page edits them.
 //!
 //! A server's position in [`SettingsWindow::subsonic`] is its account's index
 //! in accounts.json, and the two only move together. A callback finds its index
@@ -8,7 +9,7 @@
 use super::*;
 
 use gpui::Focusable;
-use rox_core::settings::SubsonicAccount;
+use rox_core::settings::{PluginRecord, SubsonicAccount};
 
 /// Slower than `RG_POLL`: the count moves once per album, a request to somebody
 /// else's server.
@@ -240,6 +241,13 @@ impl SettingsWindow {
             .child(number_cell(ALBUMS_COL_W, stats.albums.to_string()))
             .child(number_cell(SIZE_COL_W, human_size(stats.bytes)))
             .child(action_cell(actions))
+    }
+
+    pub(super) fn plugin_rows(&self) -> Vec<Stateful<Div>> {
+        self.plugins
+            .iter()
+            .map(|(record, stats)| plugin_row(record, *stats))
+            .collect()
     }
 
     fn subsonic_standing(&self, ix: usize, cx: &App) -> SharedString {
@@ -826,6 +834,74 @@ fn follow(this: WeakEntity<SettingsWindow>, pass: Task<usize>, cx: &mut App) -> 
     })
 }
 
+/// Reads like a server's row, minus the dialog and the actions.
+fn plugin_row(record: &PluginRecord, stats: Stats) -> Stateful<Div> {
+    let label = match record.label.is_empty() {
+        true => record.id.clone(),
+        false => record.label.clone(),
+    };
+
+    let standing = match record.enabled {
+        true => rox_i18n::t!("settings-library-source-on"),
+        false => rox_i18n::t!("settings-library-source-off"),
+    };
+
+    let name = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(tokens::SPACE_SM)
+        .child(
+            svg()
+                .path(icons::DATABASE)
+                .size(px(14.))
+                .flex_none()
+                .text_color(palette::text_muted()),
+        )
+        .child(div().min_w_0().truncate().child(label))
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(standing),
+        );
+
+    div()
+        .id(SharedString::from(format!("plugin-row-{}", record.id)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(tokens::SPACE_MD)
+        .py(tokens::SPACE_XS)
+        .border_b_1()
+        .border_color(palette::border())
+        .when(!record.enabled, |row| row.text_color(palette::text_muted()))
+        .child(name)
+        .child(number_cell(TRACKS_COL_W, stats.tracks.to_string()))
+        .child(number_cell(ALBUMS_COL_W, stats.albums.to_string()))
+        .child(number_cell(SIZE_COL_W, human_size(stats.bytes)))
+        .child(div().w(ACTION_COL_W).flex_none())
+}
+
+/// Read once at open, next to the servers.
+pub(super) fn read_plugins(
+    records: &[PluginRecord],
+    library: &Entity<Library>,
+    cx: &App,
+) -> Vec<(PluginRecord, Stats)> {
+    records
+        .iter()
+        .map(|record| {
+            let source = rox_services::sources::plugin_source(record);
+
+            (record.clone(), stats_for(library, &source, cx))
+        })
+        .collect()
+}
+
 fn block_row(key: &'static str, control: impl IntoElement) -> Div {
     panel::setting_row(
         rox_i18n::t!(key),
@@ -834,14 +910,18 @@ fn block_row(key: &'static str, control: impl IntoElement) -> Div {
     )
 }
 
-/// Empty with no address or no sync yet. Its own connection, since the
-/// catalog's belongs to the UI thread; a missing database is left alone, since
-/// opening one creates it.
+/// Empty with no address or no sync yet.
 fn source_stats(library: &Entity<Library>, account: &SubsonicAccount, cx: &App) -> Stats {
     let Some(source) = rox_services::sources::source_of(account) else {
         return Stats::default();
     };
 
+    stats_for(library, &source, cx)
+}
+
+/// Its own connection, since the catalog's belongs to the UI thread; a missing
+/// database is left alone, since opening one creates it.
+fn stats_for(library: &Entity<Library>, source: &str, cx: &App) -> Stats {
     let db = library.read(cx).db_path();
     if !db.exists() {
         return Stats::default();
@@ -849,6 +929,6 @@ fn source_stats(library: &Entity<Library>, account: &SubsonicAccount, cx: &App) 
 
     rox_library::store::open(&db)
         .ok()
-        .and_then(|conn| rox_library::store::stats_for_source(&conn, &source).ok())
+        .and_then(|conn| rox_library::store::stats_for_source(&conn, source).ok())
         .unwrap_or_default()
 }

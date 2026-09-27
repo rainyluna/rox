@@ -1080,6 +1080,7 @@ settings-library-section-sources = Fontes
 settings-library-section-stored-metadata = Metadados salvos
 settings-library-section-tempo = Análise de andamento
 settings-library-source-off = Desativado
+settings-library-source-on = Ativado
 settings-library-source-synced = Sincronizado em { $date }
 settings-library-split-genres = Separar gêneros em vírgulas e barras
     .description = "Dubstep, Trap" e "Drum & Bass / Neurofunk" contam cada valor como um gênero próprio; ponto e vírgula sempre separa. Desligado, os nomes com barra ficam inteiros, para as tags em que eles significam um gênero só. Os arquivos mantêm as tags como estão escritas

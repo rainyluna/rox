@@ -17,11 +17,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
 
-use rox_library::cue::TrackKey;
+use rox_library::cue::{Origin, PLUGIN_PREFIX, TrackKey};
 use rox_library::store::TrackMeta;
 use rox_playback::IcyTitle;
 
-use rox_core::settings::{Lastfm, LastfmSession, Settings, clamp_threshold};
+use rox_core::settings::{Lastfm, LastfmSession, PluginRecord, Settings, clamp_threshold};
 
 use crate::catalog::{Library, LibraryEvent};
 use crate::player::Player;
@@ -148,6 +148,26 @@ fn remember_filed(filed: &mut VecDeque<(TrackKey, IcyTitle)>, song: (TrackKey, I
     filed.push_back(song);
 }
 
+/// ADR 30: a plugin row scrobbles only when its record allows it, and one
+/// with no record never does. Only a plugin row pays for the settings read.
+fn may_scrobble(key: &TrackKey) -> bool {
+    if key.origin() != Origin::Plugin {
+        return true;
+    }
+
+    plugin_scrobbles(&Settings::load().accounts.plugins, &key.source)
+}
+
+fn plugin_scrobbles(records: &[PluginRecord], source: &str) -> bool {
+    let Some(id) = source.strip_prefix(PLUGIN_PREFIX) else {
+        return false;
+    };
+
+    records
+        .iter()
+        .any(|record| record.id == id && record.scrobble)
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -176,6 +196,9 @@ struct Watch {
     played: f64,
     last_pos: f64,
     now_playing_sent: bool,
+    /// Off keeps the row away from every destination. The listen rule still
+    /// runs, so history hears it.
+    may_scrobble: bool,
     /// Set on the listen-rule crossing whether or not scrobbling is armed.
     listened: bool,
     crossed: bool,
@@ -361,10 +384,12 @@ impl Scrobbler {
         self.love_error.clone()
     }
 
-    /// None once the play has seeked past any chance of crossing. Whether a
-    /// line shows at all is `AppState::scrobble_marker`'s call.
+    /// None once the play has seeked past any chance of crossing, or for a
+    /// row that never scrobbles. Whether a line shows at all is
+    /// `AppState::scrobble_marker`'s call.
     pub fn marker(&self) -> Option<f32> {
         match &self.watch {
+            Some(watch) if !watch.may_scrobble => None,
             Some(watch) => watch.marker(self.threshold),
             None => Some(self.threshold),
         }
@@ -808,7 +833,7 @@ impl Scrobbler {
         let scrobbles = self
             .watch
             .as_ref()
-            .is_some_and(|w| self.qualifies_scrobble(w));
+            .is_some_and(|w| w.may_scrobble && self.qualifies_scrobble(w));
 
         let scrobbling = self.scrobbling;
         if let Some(watch) = self.watch.as_mut() {
@@ -835,7 +860,8 @@ impl Scrobbler {
             }
         }
 
-        if !self.armed() {
+        let outward = self.watch.as_ref().is_some_and(|w| w.may_scrobble);
+        if !self.armed() || !outward {
             return;
         }
 
@@ -894,10 +920,13 @@ impl Scrobbler {
 
             None => meta,
         };
+        let may_scrobble = may_scrobble(&key);
+
         // Emitted here so a loop back to the top announces like a track
         // change. Before any account gate; only the shared switch stands
         // ahead of it.
         if self.scrobbling
+            && may_scrobble
             && let Some(event) = started_event(&key, meta.as_ref(), duration)
         {
             cx.emit(event);
@@ -911,6 +940,7 @@ impl Scrobbler {
             played: 0.0,
             last_pos: position,
             now_playing_sent: false,
+            may_scrobble,
             // A song already filed once is armed as filed, so a rewind
             // doesn't file it twice.
             listened: refiled,
@@ -954,11 +984,11 @@ impl Scrobbler {
             watch.listened = true;
             listened_event(watch)
         });
-        let crossed = (!watch.crossed && scrobbling).then(|| {
+        let crossed = (!watch.crossed && scrobbling && watch.may_scrobble).then(|| {
             watch.crossed = true;
             crossed_event(watch)
         });
-        let scrobble = armed && !watch.scrobbled;
+        let scrobble = armed && watch.may_scrobble && !watch.scrobbled;
         if scrobble {
             watch.scrobbled = true;
         }
@@ -1055,6 +1085,7 @@ mod tests {
             played,
             last_pos: pos,
             now_playing_sent: false,
+            may_scrobble: true,
             listened: false,
             crossed: false,
             scrobbled: false,
@@ -1246,6 +1277,36 @@ mod tests {
         let mut watch = watch(0.0, played, played);
         watch.duration = None;
         watch
+    }
+
+    #[test]
+    fn a_plugin_row_scrobbles_only_when_its_record_says_so() {
+        let record = |id: &str, scrobble: bool| PluginRecord {
+            id: id.into(),
+            enabled: true,
+            scrobble,
+            ..PluginRecord::default()
+        };
+        let records = [record("loud", true), record("quiet", false)];
+
+        assert!(plugin_scrobbles(&records, "plugin:loud"));
+        assert!(!plugin_scrobbles(&records, "plugin:quiet"));
+
+        assert!(!plugin_scrobbles(&records, "plugin:gone"), "no record");
+        assert!(!plugin_scrobbles(&[], "plugin:loud"));
+    }
+
+    #[test]
+    fn only_a_plugin_row_is_asked() {
+        for source in ["local", "radio", "subsonic:9f2a1c"] {
+            let key = TrackKey {
+                source: rox_library::cue::source_id(source),
+                path: "sg-1".into(),
+                sub: 0,
+            };
+
+            assert!(may_scrobble(&key), "{source} scrobbles as before");
+        }
     }
 
     #[test]

@@ -68,13 +68,15 @@ pub fn source_label(source: &str) -> String {
 pub const SUBSONIC_PREFIX: &str = "subsonic:";
 pub const PLUGIN_PREFIX: &str = "plugin:";
 
-/// The three cases a surface draws differently. Anything unrecognized reads
-/// as local, so a new source never borrows a station's live handling.
+/// The cases a surface draws differently. Anything unrecognized reads as
+/// local, so a new source never borrows a station's live handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Origin {
     Local,
     Subsonic,
     Radio,
+    /// A plugin's catalog (ADR 30), `plugin:<id>`.
+    Plugin,
 }
 
 impl Origin {
@@ -84,6 +86,8 @@ impl Origin {
             Origin::Radio
         } else if source.starts_with(SUBSONIC_PREFIX) {
             Origin::Subsonic
+        } else if source.starts_with(PLUGIN_PREFIX) {
+            Origin::Plugin
         } else {
             Origin::Local
         }
@@ -772,11 +776,13 @@ FILE "Urban Hymns.flac" WAVE
         assert_eq!(Origin::of("local"), Origin::Local);
         assert_eq!(Origin::of("radio"), Origin::Radio);
         assert_eq!(Origin::of("subsonic:9f2a1c"), Origin::Subsonic);
+        assert_eq!(Origin::of("plugin:demo"), Origin::Plugin);
 
         assert_eq!(Origin::of("tidal:abc"), Origin::Local);
         assert_eq!(Origin::of(""), Origin::Local);
 
         assert_eq!(Origin::of("subsonic"), Origin::Local);
+        assert_eq!(Origin::of("plugins"), Origin::Local);
     }
 
     #[test]

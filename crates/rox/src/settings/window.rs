@@ -37,9 +37,9 @@ use rox_core::settings::layouts::Preset;
 use rox_core::settings::{
     self, AcousticSave, BORDER_MAX, ChromeSide, ChromeStyle, DEFAULT_PRESENCE_FIRST_LINE,
     DEFAULT_PRESENCE_HOVER, DEFAULT_PRESENCE_SECOND_LINE, DiscordStatusLine, Frame,
-    GainModeSetting, LayoutSize, LyricsSave, MARGIN_MAX, NamedLayout, PADDING_MAX, Providers,
-    ROUNDING_MAX, RatingStyle, ReplayGainSave, Settings, ShuffleMode, Theme, WorkspaceMeta,
-    data_dir, settings_path,
+    GainModeSetting, LayoutSize, LyricsSave, MARGIN_MAX, NamedLayout, PADDING_MAX, PluginRecord,
+    Providers, ROUNDING_MAX, RatingStyle, ReplayGainSave, Settings, ShuffleMode, Theme,
+    WorkspaceMeta, data_dir, settings_path,
 };
 use rox_design::assets::icons;
 use rox_design::palette::{self, Palette, ROLES, Role, Side, Sides};
@@ -368,6 +368,8 @@ struct SettingsWindow {
     /// Held so the work survives its callback, and a second one replaces the
     /// first rather than racing it.
     subsonic_follow: Option<Task<()>>,
+    /// The Sources table's plugin rows, read at open.
+    plugins: Vec<(PluginRecord, Stats)>,
     /// Re-read at open and on every catalog write.
     stations: Vec<Station>,
     station_url: Entity<InputState>,
@@ -788,6 +790,7 @@ impl SettingsWindow {
             })
             .collect();
         let subsonic_next_id = subsonic.len() as u64;
+        let plugins = subsonic::read_plugins(&settings.accounts.plugins, &library, cx);
 
         let station_url = cx.new(|cx| {
             InputState::new(window, cx)
@@ -1063,6 +1066,7 @@ impl SettingsWindow {
             subsonic_syncing: rox_services::sources::syncing(),
             subsonic_editing: None,
             subsonic_follow: None,
+            plugins,
             stations,
             station_url,
             station_name,

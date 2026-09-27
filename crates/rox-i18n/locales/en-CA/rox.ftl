@@ -1122,6 +1122,7 @@ settings-library-section-sources = Sources
 settings-library-section-stored-metadata = Stored Metadata
 settings-library-section-tempo = Tempo Analysis
 settings-library-source-off = Off
+settings-library-source-on = On
 settings-library-source-synced = Synced { $date }
 settings-library-split-genres = Split genres on commas and slashes
     .description = "Dubstep, Trap" and "Drum & Bass / Neurofunk" count each value as its own genre; semicolons always split. Off keeps slashed names whole for tags where they mean one genre. Files keep their tags as written

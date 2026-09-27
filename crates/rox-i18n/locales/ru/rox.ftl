@@ -1090,6 +1090,7 @@ settings-library-section-sources = Источники
 settings-library-section-stored-metadata = Сохранённые метаданные
 settings-library-section-tempo = Анализ темпа
 settings-library-source-off = Выключен
+settings-library-source-on = Включён
 settings-library-source-synced = Синхронизирован { $date }
 settings-library-split-genres = Делить жанры по запятым и слэшам
     .description = «Dubstep, Trap» и «Drum & Bass / Neurofunk» дают каждому значению отдельный жанр; точка с запятой делит всегда. Если выключить, имена со слэшем останутся целыми там, где они означают один жанр. В файлах теги остаются как есть

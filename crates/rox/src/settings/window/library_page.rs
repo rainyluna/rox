@@ -272,7 +272,8 @@ impl SettingsWindow {
                 .child(div().w(ACTION_COL_W).flex_none()),
         );
         let servers = self.subsonic_rows(cx);
-        if self.root_stats.is_empty() && servers.is_empty() {
+        let plugins = self.plugin_rows();
+        if self.root_stats.is_empty() && servers.is_empty() && plugins.is_empty() {
             table = table.child(
                 div()
                     .py(tokens::SPACE_XS)
@@ -290,7 +291,7 @@ impl SettingsWindow {
                 table = table.child(portal_banner(root));
             }
         }
-        table = table.children(servers);
+        table = table.children(servers).children(plugins);
         let this = cx.entity().downgrade();
         table = table.child(
             div()

@@ -1074,6 +1074,7 @@ settings-library-section-sources = Quellen
 settings-library-section-stored-metadata = Gespeicherte Metadaten
 settings-library-section-tempo = Tempoanalyse
 settings-library-source-off = Aus
+settings-library-source-on = An
 settings-library-source-synced = Abgeglichen am { $date }
 settings-library-split-genres = Genres an Kommas und Schrägstrichen trennen
     .description = "Dubstep, Trap" und "Drum & Bass / Neurofunk" zählen jeden Wert als eigenes Genre; Semikolons trennen immer. Ausgeschaltet bleiben Namen mit Schrägstrich ganz, für Tags, in denen sie ein Genre meinen. Dateien behalten ihre Tags, wie sie geschrieben sind

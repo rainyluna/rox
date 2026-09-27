@@ -1067,6 +1067,7 @@ settings-library-section-sources = ソース
 settings-library-section-stored-metadata = 保存済みメタデータ
 settings-library-section-tempo = テンポ解析
 settings-library-source-off = オフ
+settings-library-source-on = オン
 settings-library-source-synced = { $date } に同期
 settings-library-split-genres = カンマとスラッシュでジャンルを分ける
     .description = "Dubstep, Trap" や "Drum & Bass / Neurofunk" をそれぞれ別のジャンルとして数える。セミコロンは常に分割する。オフなら、スラッシュ入りで一つのジャンルを表すタグをそのまま残す。ファイルのタグは書かれたまま
