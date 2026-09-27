@@ -81,7 +81,7 @@ shapes the writer never produces, and the schema doesn't cover them. With
 same hinting makes agent edits reliable. The watch on the workspaces folder
 closes the loop: edit on disk, see it apply.
 
-Out of scope: remote access to the socket (anyone who wants it can proxy it; rox
-keeps the surface local), and the Jellyfin, Spotify, and YouTube integrations, which
-point the opposite direction, rox as a client of remote services rather than a
-service to local clients.
+Out of scope: remote access to the socket (anyone who wants it can proxy it; rox keeps
+the surface local), and the Jellyfin and streaming-service integrations, which point the
+opposite direction, rox as a client of remote services rather than a service to local
+clients.

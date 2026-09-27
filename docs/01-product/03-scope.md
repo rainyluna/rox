@@ -1,7 +1,7 @@
 # Scope
 
-What's core, what's peripheral, what's delivered through extensions, what's out of
-scope, and the requirements handed down to architecture.
+What's core, what's peripheral, what's delivered through plugins, what's out of scope,
+and the requirements handed down to architecture.
 
 ## What's core versus peripheral
 
@@ -35,38 +35,66 @@ Peripheral. These can exist without being the point:
 - System integration. Media keys and the OS transport surface (MPRIS on Linux), and a
   tray presence with quit-to-tray. Expected of a desktop player, invisible until missing.
 
-## Sources as extensions
+## Plugins
 
-The local library is the core, but it's one source among several. rox grows an
-extension system whose first job is playback sources: Spotify, YouTube / YouTube Music,
-and Tidal, each showing up as its own library view. A community-maintained extension
-backs each one, the way VSCode extensions back language support. That gives rox a life
-beyond people who keep a large local collection.
+The local library is the core, but it's one source among several. A plugin brings
+something from outside into rox. The first thing people will want is a streaming
+service inside rox: browse its catalog, see their likes and playlists, and play any of
+it like a local track. That gives rox a life beyond people who keep a large local
+collection.
 
-Extensions are the vehicle rather than core code for a practical reason: the viable
-integration paths for these services (librespot for Spotify, yt-dlp for YouTube) are
-unofficial and break whenever the service changes something. A community extension
-updates on its own release cycle, and rox itself is never the thing that's broken.
+The community builds plugins. rox publishes the contract a plugin is written against, an
+example plugin that talks to no service at all, and the host that runs them. It never
+publishes a plugin for a particular service, which keeps a layer between the project and
+any one service's terms. A user drops a plugin into a folder, sees it listed, and
+switches it on. Nothing runs before that. Switching one on says plainly that the plugin
+runs as a program with the user's permissions, and shows what it declared. A plugin
+that changes on disk turns off until the user turns it on again.
+
+Plugins are the vehicle rather than core code for a practical reason: the viable
+integration paths for these services are unofficial client libraries and downloaders
+that break whenever the service changes something. A community plugin updates on its own
+release cycle, and rox itself is never the thing that's broken.
+
+What a plugin can do is a short list, and it grows only by a product decision:
+
+- Add a source. The user browses the service's catalog and their own collections in
+  the plugin's panel and searches it there. Its tracks become library rows the user
+  plays, queues, and keeps in playlists like any other source's.
+- List panels under its own name in Add Panel. Each one is a preset of a panel rox
+  already ships, set up for the plugin's source.
+
+A plugin can use programs the user has installed, such as a command-line downloader. It
+lists the ones it needs, and rox says which are missing.
+
+A plugin never runs code in the UI, processes audio, or stands in for a core surface
+like a visualizer.
+
+The user decides what a plugin puts in the library. Syncing a collection, such as their
+liked tracks or one playlist, keeps its tracks in the library, where local search finds
+them. Anything else becomes a library track when someone plays, queues, or saves it from
+the plugin's panel. Browsing and searching the service happen in that panel. The
+library's search box never waits on a plugin.
 
 Sources aren't equal, and the product shows the difference:
 
-- **Full.** The source provides rox decodable audio (Tidal's API, yt-dlp streams,
-  librespot's decoded samples). It plays through rox's engine, so gapless, ReplayGain,
-  and visualizers all work. A self-hosted source like Subsonic is Full without the
-  fragility that put the other sources behind extensions, since the server is the user's
-  own. A live stream is Full on transport and gets visualizers, while gapless and
-  ReplayGain have nothing to act on.
+- **Full.** The source provides rox decodable audio (files a server serves, audio a
+  plugin fetched or decoded and streams to rox). It plays through rox's engine, so
+  gapless, ReplayGain, and visualizers all work. A self-hosted source like Subsonic is
+  Full without the fragility that put the other sources behind plugins, since the
+  server is the user's own. A live stream is Full on transport and gets visualizers,
+  while gapless and ReplayGain have nothing to act on.
 - **Tapped.** rox remote-controls playback elsewhere but captures the local audio
   output, so visualizers work while engine features don't. Only possible when the audio
   actually plays on this machine.
 - **Remote.** Browse and control only.
 
+Plugin sources are Full. Tapped and Remote would need a plugin capability for
+controlling playback somewhere else, and the set doesn't include one yet.
+
 A unified library, one view merging local and streaming catalogs with matching across
 them, is an ambition rather than a promise. All the core owes it is track identity that
 isn't welded to file paths.
-
-The extension surface stays narrow: a source is a library provider plus a playback
-provider. It's not a scripting layer for the UI.
 
 ## Out of scope
 
@@ -77,8 +105,9 @@ provider. It's not a scripting layer for the UI.
 - **CD ripping.** Well served by other tools, and outside the core loop.
 - **Scripted theming or UI extensions.** Foobar's component ecosystem was its deepest
   magic and its biggest maintenance burden. The fragility came from scripted panels.
-  Extensions add sources, not behavior inside the UI: themes stay tokens, layouts stay
-  declarative artifacts.
+  Plugins bring things in from outside rox, not behavior inside the UI: themes stay
+  tokens, layouts stay declarative artifacts. A plugin's panels are presets of panels
+  rox already ships, so nothing a plugin supplies executes in the UI.
 
 ## Constraints handed to architecture
 
@@ -92,14 +121,16 @@ Product owns these requirements. The structure behind them is the architect's ca
 - **Local-first, offline always.** The core is a library you own, files on disk, and rox
   works fully offline: playback, browse, search, and tag editing never depend on the
   network. Enriching that library over the network (Last.fm scrobbling, tag lookup,
-  lyrics) is fine and wanted. Streaming sources are extensions and purely additive; the
+  lyrics) is fine and wanted. Streaming sources are plugins and purely additive; the
   offline core doesn't grow dependencies on them.
 - **Don't paint sources into a corner.** Streaming isn't core, but two things are cheap
   in the initial design and brutal to retrofit. Track identity is source-qualified, with
   local files as the first source rather than the assumption baked into every key. And
   playback keeps a clean command-in, state-out seam so a second source engine can
-  implement the same contract. How extensions are hosted is an open question and doesn't
-  constrain the core.
+  implement the same contract. How plugins are hosted doesn't constrain the core.
+- **Plugin tracks scrobble only when declared, and never save to disk.** The user can
+  still turn scrobbling off for a plugin that declares it. rox never writes plugin
+  tracks to disk the way it saves songs from a station.
 - **Themes are tokens, layouts are shareable, nothing is scripted.** A theme is colors,
   fonts, spacing, and accent. A layout is a saved arrangement of panels and their
   configs. Both are artifacts a person can hand to someone else and have work. No

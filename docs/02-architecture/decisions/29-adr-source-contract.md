@@ -1,6 +1,6 @@
 # ADR 29: Sources as rows under a source id, in-process first, host deferred
 
-**Status:** Decided
+**Status:** Decided; amended below
 
 Decision: a source is a catalog that becomes library rows plus a way to play them, the
 pair the [scope doc](../../01-product/03-scope.md) names as a library provider and a
@@ -27,8 +27,8 @@ the request needs from settings, a fresh salt and token in Subsonic's case, head
 a source that authorizes that way. Transport and decode stay in core. A source never
 opens an audio device, never touches the ring, and never runs on the decode thread.
 
-A PCM contract exists on paper for the case a reference can't express. librespot
-decrypts and decodes Spotify's stream inside the extension, so what comes back is
+A PCM contract exists on paper for the case a reference can't express. Some services
+have a client library that decrypts and decodes the stream itself, so what comes back is
 samples plus a format description rather than a container rox can hand to symphonia.
 Designing that half now means designing against one imagined implementor, so it waits
 until a source forces it. When it arrives it has to plug into the single-stream engine
@@ -68,9 +68,9 @@ corner" constraint was written to avoid.
 are the library-provider case. A real catalog with browse, search, artwork and
 playlists, over a documented API, against a server the user runs. That last part earns
 it the first slot: when it breaks, it broke because our client is wrong, not because a
-company changed something overnight. The fragility that put Spotify and YouTube behind
-extensions in the first place doesn't apply to a server the user administers. Several
-servers can be configured at once, each an account with its own switch.
+company changed something overnight. The fragility that put the streaming services
+behind extensions in the first place doesn't apply to a server the user administers.
+Several servers can be configured at once, each an account with its own switch.
 
 Web radio is the transport case. No catalog, an unbounded stream, metadata in band.
 Between them the two exercise both halves of the contract, which one source alone can't.
@@ -121,3 +121,65 @@ and no per-track measurement to apply. The tier grades what the source hands ove
 what the content supports, and for a live stream those come apart. That's an amendment
 to what Full means, not a fourth tier. A "Full, live" tier would have one member and no
 second axis behind it.
+
+**Amended 2026-09-26: a plugin row plays from a stream the plugin serves.** The playback
+half above assumed a reference rox can open by itself: a bare URL on the row, finished
+by the authorize table when a queue is built (`rox-services/src/player.rs:470-502`, and
+`rox-services/src/catalog.rs:1043-1074` for the catalog's locators). A Subsonic
+signature doesn't expire, so that held. A plugin source ([ADR 30](30-adr-plugins.md))
+doesn't fit. A streaming service's URLs expire, can point at a different encode on each
+request, and are often segmented. Working one out can take seconds when the plugin runs
+a downloader. ADR 30 has the plugin serve the audio bytes itself. That answers the
+question this ADR left for the host: something does need audio bytes rather than a
+reference to them.
+
+A plugin row stores no URL. `Locator` gains a third variant beside `Local` and `Remote`
+(`rox-library/src/locator.rs:12-27`) that holds the source id, the track key, and a
+container hint. `rox-playback` opens it through a stream opener passed in when a queue
+starts, the way the live buffer length is (`engine.rs:321-332`), and reads the result as
+a `MediaSource`. The opener is a boxed function, so `rox-playback` never depends on the
+plugin host. `Remote` and `HttpSource` stay as they are for Subsonic and radio.
+
+This retires the sentence "the engine never asks a source anything"
+(`rox-services/src/catalog.rs:1043-1044`) for plugin rows. The engine reads from the
+plugin on the decode thread, the same way it already reads from an HTTP connection.
+
+Opening can take seconds, so the service layer pre-opens the current and next entries,
+and the engine usually finds a stream ready. The pre-open has to finish before the
+engine opens the next entry ahead of the audible one (the runahead,
+`engine.rs:657-665`). The ring holds half a second of audio (`RING_SECS`,
+`rox-playback/src/output.rs:27`), so a cold open at a skip or a gapless boundary is
+heard as silence between the tracks. That gap is accepted. A cold open inside the engine
+probably delays pause and seek too, since commands drain at the top of the decode loop
+(`engine.rs:418`). That's inferred from the loop shape and hasn't been measured. The
+prototype for #8 will measure it.
+
+A failed open or read publishes a refusal naming the source through the same
+`publish_refusal` (`rox-playback/src/shared.rs:261`) a failed remote open already uses
+(`engine.rs:853-859`). A dead plugin ends its own track and never stops local playback.
+The host question this ADR left open is taken up by ADR 30.
+
+**Amended 2026-09-26: a third source shape, rows by membership.** This ADR covers two
+shapes: a catalog a client syncs whole (Subsonic), and rows with no client behind them
+(radio). A plugin source is a third. It has no whole catalog to list. Its rows come from
+the collections the user chose to sync and from tracks picked one at a time in the
+plugin's panel. A whole-catalog prune can't reconcile that. A sync drops every row of
+the source the server no longer lists (`rox-library/src/store.rs:1841-1849`, called from
+`rox-services/src/sources.rs:465`). Run against one collection, it would delete every
+row that came from another collection or from a pick.
+
+So a plugin source keeps a membership table: which collections each row belongs to, and
+its position in each. Picked rows belong to a collection of their own. Syncing a
+collection rewrites its members, and a row of the source is pruned only when it belongs
+to no collection or the user removes it. Picked rows follow the station directory,
+where a picked station is written through `stations::put`, an upsert with no prune path
+(`rox-library/src/stations.rs:39-43`). Writing one row never removes another.
+
+Playlists need one change to keep up. A member already snapshots its tags and path so
+it outlives a pruned row (the header of `rox-library/src/playlists.rs`), but `reattach`
+relinks only local rows (`playlists.rs:105-135`). Members gain the source in the
+snapshot, and `reattach` matches non-local rows by source and path. A playlist entry
+for a plugin track then comes back when its row does, after a re-sync, a re-pick, or
+reinstalling the plugin.
+
+Whether a picked row nobody played should expire on its own is left open.

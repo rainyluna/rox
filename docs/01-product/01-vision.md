@@ -63,8 +63,8 @@ rox is the player I switch to and stop missing NekoRoX. A large library loads fa
 browses without lag, the tagging is good enough to trust with a real collection, and the
 window looks like something worth keeping open.
 
-Past that bar is a longer life: sources as extensions. The same panels, visualizers,
-and playback surface working against a Spotify, YouTube Music, or Tidal library view,
-each maintained by the community rather than by rox itself. That opens rox to people
-without a large local collection. None of it displaces the local core that earns the
-switch. [Scope](03-scope.md) has the detail.
+Past that bar is a longer life: sources as plugins. The same panels, visualizers, and
+playback surface working against streaming services' library views, each maintained by
+the community rather than by rox itself. That opens rox to people without a large local
+collection. None of it displaces the local core that earns the switch.
+[Scope](03-scope.md) has the detail.

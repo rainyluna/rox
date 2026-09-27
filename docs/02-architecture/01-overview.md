@@ -79,27 +79,36 @@ cost model is in [Non-functional model](03-non-functional.md).
 
 ## Source extensibility
 
-Product delivers streaming sources (Spotify, YouTube / YouTube Music, Tidal) through
-extensions rather than core code ([scope](../01-product/03-scope.md)). The structure
-above already has the seams that matter, so honoring the constraint costs two calls,
-not a redesign:
+Product delivers streaming sources through plugins rather than core code
+([scope](../01-product/03-scope.md)). The structure above already has the seams that
+matter, so honoring the constraint costs two calls, not a redesign:
 
 - **Track identity is source-qualified.** The library keys tracks by (source, path, sub),
   and local files are the first source. This is cheap in the initial schema and a painful
   migration to retrofit. It also keeps a unified multi-source library possible.
-- **Playback is already a contract.** Commands in, state out, PCM tap out. A source
-  that can provide rox decodable audio (Tidal streams, yt-dlp, librespot's decoded
-  samples) feeds the existing engine and gets everything: gapless, ReplayGain,
-  visualizers. A source that can't gets remote control, with local output capture as a
-  fallback tap so visualizers still work when the audio plays on this machine. The
-  visualizer subsystem drains the same ring either way.
+- **Playback is already a contract.** Commands in, state out, PCM tap out. A source that
+  can provide rox decodable audio (files a server serves, audio bytes a plugin streams)
+  feeds the existing engine and gets everything: gapless, ReplayGain, visualizers. A
+  source that can't gets remote control, with local output capture as a fallback tap so
+  visualizers still work when the audio plays on this machine. The visualizer subsystem
+  drains the same ring either way.
 
-What a source is, and how the first ones arrive, is
-[ADR 29](decisions/29-adr-source-contract.md): a catalog synced into library rows under
-the source's own id, plus a playable reference on each row that core's transport opens.
-The first two, Subsonic and web radio, are written in-process. The shared trait waits
-for a second source client, and the extension host mechanism (WASM in the style of Zed,
-or a subprocess model) is still open.
+What a source is, and how the first ones arrive, is [ADR
+29](decisions/29-adr-source-contract.md): a catalog synced into library rows under the
+source's own id, plus a playable reference on each row that core's transport opens. The
+first two, Subsonic and web radio, are written in-process, and the shared trait waits
+for a second source client. ADR 29's amendments add what a plugin source needs. A
+plugin row stores no URL: the engine opens a stream the plugin serves and decodes its
+bytes like a file, with the current and next entries opened ahead of time. And a
+plugin's rows come from synced collections and single picks, tracked by membership, so
+syncing one collection never prunes another's rows.
+
+Plugins are [ADR 30](decisions/30-adr-plugins.md): a folder the user drops in, run as a
+subprocess over stdin and stdout, declaring capabilities from a closed set. A plugin can
+add a source under `plugin:<id>` that rox browses, searches, syncs, and streams through
+it, and list panel presets of core kinds under its name in Add Panel. It never runs code
+in the UI, touches the engine, or connects to the control socket. The prototype for #8
+measures cold open latency and pipe throughput before the ADR is decided.
 
 ## Decisions (ADRs)
 
@@ -136,4 +145,5 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [26 - Last.fm sessions](decisions/26-adr-lastfm-sessions.md) | One session per api key, so builds stop invalidating each other | Decided |
 | [27 - i18n](decisions/27-adr-i18n.md) | Fluent messages and ICU4X formatting behind one locale static, en-CA as source | Decided |
 | [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Decided |
-| [29 - Source contract](decisions/29-adr-source-contract.md) | Sources as rows under a source id, in-process, trait and host deferred | Decided |
+| [29 - Source contract](decisions/29-adr-source-contract.md) | Sources as rows under a source id, in-process, trait and host deferred | Decided; plugin streams and rows by membership added by its amendments, host taken up by 30 |
+| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Proposed |
