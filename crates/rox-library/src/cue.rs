@@ -66,6 +66,7 @@ pub fn source_label(source: &str) -> String {
 
 /// Written out here because the format lives in rox-net, above this crate.
 pub const SUBSONIC_PREFIX: &str = "subsonic:";
+pub const PLUGIN_PREFIX: &str = "plugin:";
 
 /// The three cases a surface draws differently. Anything unrecognized reads
 /// as local, so a new source never borrows a station's live handling.

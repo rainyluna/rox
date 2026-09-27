@@ -43,6 +43,7 @@ use crate::gain;
 use crate::http::StationInfo;
 use crate::icy::TitleSink;
 use crate::latency;
+use crate::plugin::{Opened, Opener, PluginSource};
 use crate::resample::Resampler;
 use crate::shared::{
     QueueEntry, QueueSnapshot, Segment, Shared, StreamSink, StreamState, TrackInfo,
@@ -194,7 +195,7 @@ struct Source {
     span: Option<SpanFrames>,
     /// File-clock position, for cutting a span's end before resampling.
     src_frame: u64,
-    /// For the last open-latency line: when audio first exists. Remote only.
+    /// For the last open-latency line: when audio first exists. Streams only.
     opened_at: Option<Instant>,
     /// The station's tape, the only handle back down once symphonia owns the reader.
     tape: Option<Arc<Tape>>,
@@ -284,6 +285,8 @@ pub struct Engine {
     /// during the pause just work.
     hung_up: Option<u64>,
     live_buffer_secs: u32,
+    /// None refuses every plugin entry.
+    opener: Option<Opener>,
     /// See [`Engine::publish_marks`].
     marks_rev: u64,
     marks_at: Instant,
@@ -329,6 +332,8 @@ pub struct StartQueue {
     /// Floored at [`LIVE_BUFFER_MIN_SECS`]. In the start rather than a command
     /// because the first open happens before the channel is read.
     pub live_buffer_secs: u32,
+    /// Opens plugin locators. In the start for the live buffer's reason.
+    pub opener: Option<Opener>,
 }
 
 impl Engine {
@@ -347,6 +352,7 @@ impl Engine {
             gains,
             spans,
             live_buffer_secs,
+            opener,
         } = queue;
         // A fresh context passes an empty `explicit`; a launch restore passes the
         // saved flags. Short vecs pad.
@@ -392,6 +398,7 @@ impl Engine {
             fade_armed: false,
             hung_up: None,
             live_buffer_secs: live_buffer_secs.max(LIVE_BUFFER_MIN_SECS),
+            opener,
             marks_rev: 0,
             marks_at: Instant::now(),
             paused_since: None,
@@ -821,9 +828,9 @@ impl Engine {
             let shared = Arc::clone(&self.shared);
             let on_stream: StreamSink = Arc::new(move |state| shared.publish_stream(i, state));
 
-            // Only a remote open is slow enough to show.
-            let remote = matches!(self.queue[i], Locator::Remote(_));
-            if remote {
+            // Only a streamed open is slow enough to show.
+            let streamed = !matches!(self.queue[i], Locator::Local(_));
+            if streamed {
                 self.shared.publish_stream(i, StreamState::Opening);
             }
 
@@ -835,9 +842,10 @@ impl Engine {
                 on_stream,
                 Arc::clone(&self.shared.interrupt),
                 self.live_buffer_secs,
+                self.opener.as_ref(),
             ) {
                 Ok((mut src, info, station)) => {
-                    if remote {
+                    if streamed {
                         self.shared.publish_stream(i, StreamState::Live);
                     }
 
@@ -852,7 +860,7 @@ impl Engine {
                 }
                 Err(e) => {
                     // Skip to the next entry, and clear `Opening` so it doesn't stick.
-                    if remote {
+                    if streamed {
                         self.shared.publish_stream(i, StreamState::Dropped);
                         // Streams send the refusal up; a missing local file is obvious enough.
                         self.shared.publish_refusal(e.clone());
@@ -890,9 +898,7 @@ impl Engine {
 
     /// Asked of the locator: once symphonia owns the transport there's no way down.
     fn live_at(&self, p: usize) -> bool {
-        self.order
-            .get(p)
-            .is_some_and(|e| matches!(&self.queue[e.idx], Locator::Remote(r) if r.live))
+        self.order.get(p).is_some_and(|e| self.queue[e.idx].live())
     }
 
     /// Move the audible station `behind` seconds back and re-sync there, zero
@@ -2139,6 +2145,8 @@ impl Source {
             Arc::new(AtomicBool::new(false)),
             // Nothing pauses an analysis pass.
             LIVE_BUFFER_MIN_SECS,
+            // Analysis passes read files.
+            None,
         )?;
 
         Ok((source, info))
@@ -2155,10 +2163,11 @@ impl Source {
         on_stream: StreamSink,
         interrupt: Arc<AtomicBool>,
         live_buffer_secs: u32,
+        opener: Option<&Opener>,
     ) -> Result<(Source, TrackInfo, Option<StationInfo>), String> {
-        // Open-latency start; only remote opens log.
+        // Open-latency start; only streamed opens log.
         let began = Instant::now();
-        let remote_open = matches!(locator, Locator::Remote(_));
+        let streamed = !matches!(locator, Locator::Local(_));
 
         // A URL's hint comes from the locator or the `Content-Type`, else the probe sniffs.
         let (mss, hint, origin, station, tape) = match locator {
@@ -2188,6 +2197,30 @@ impl Source {
 
                 (mss, hint, remote.url.clone(), Some(station), opened.tape)
             }
+
+            Locator::Plugin(stream) => {
+                let opener = opener.ok_or_else(|| format!("{}: no plugin host", stream.source))?;
+
+                // Named here so every refusal says which plugin it came from.
+                let Opened {
+                    reader,
+                    hint: ext,
+                    length,
+                    seekable,
+                } = opener(stream).map_err(|e| format!("{}: {e}", stream.source))?;
+
+                let source = PluginSource::new(reader, length, seekable);
+                let mss = MediaSourceStream::new(Box::new(source), Default::default());
+
+                let mut hint = Hint::new();
+                if !ext.is_empty() {
+                    hint.with_extension(&ext);
+                }
+
+                let origin = format!("{} {}", stream.source, stream.key);
+
+                (mss, hint, origin, None, None)
+            }
         };
 
         let (source, info) = Source::build(
@@ -2199,7 +2232,7 @@ impl Source {
             span,
             locator.path(),
             began,
-            remote_open,
+            streamed,
             tape,
         )?;
 
@@ -4704,6 +4737,148 @@ mod tests {
 
         tx.send(Cmd::Quit).expect("the engine is listening");
         decode.join().expect("the decode thread ends cleanly");
+    }
+
+    struct Bytes(Vec<u8>);
+
+    impl crate::plugin::ReadAt for Bytes {
+        fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+            let start = (offset as usize).min(self.0.len());
+            let end = (start + len).min(self.0.len());
+
+            Ok(self.0[start..end].to_vec())
+        }
+    }
+
+    fn plugin(key: &str) -> Locator {
+        Locator::Plugin(rox_library::locator::PluginStream {
+            source: "plugin:test".into(),
+            key: key.into(),
+            live: false,
+        })
+    }
+
+    /// Serves the fixture directory by key and notes every key it opens.
+    fn fixture_opener(fx: &Fixtures, asked: Arc<std::sync::Mutex<Vec<String>>>) -> Opener {
+        let dir = fx.0.clone();
+
+        Arc::new(move |stream| {
+            asked.lock().unwrap().push(stream.key.clone());
+            let bytes = std::fs::read(dir.join(&stream.key)).map_err(|e| e.to_string())?;
+
+            Ok(Opened {
+                length: Some(bytes.len() as u64),
+                reader: Box::new(Bytes(bytes)),
+                hint: "wav".into(),
+                seekable: true,
+            })
+        })
+    }
+
+    #[test]
+    fn a_plugin_open_reads_the_same_track_as_the_file() {
+        let fx = Fixtures::new("plugin-transparency");
+        let path = fx.wav("tone.wav", 1.0);
+        let (mut file, file_info) = Source::open(&local(&path), 48_000, None).expect("it opens");
+
+        let mut e = engine_over(vec![plugin("tone.wav")]);
+        e.opener = Some(fixture_opener(&fx, Default::default()));
+        let (mut served, _, served_info) = e.open_file_at(0).expect("the stream opens");
+
+        assert_eq!(
+            served_info.name, "tone.wav",
+            "the key stands in for a missing title"
+        );
+        assert_eq!(served_info.num_frames, file_info.num_frames);
+        assert_eq!(served_info.duration_secs, file_info.duration_secs);
+        assert_eq!(drain_source(&mut served), drain_source(&mut file));
+        assert_eq!(e.shared.stream_state(0), Some(StreamState::Live));
+    }
+
+    /// Drives the real run loop with a stand-in for the output callback.
+    #[test]
+    fn a_plugin_queue_plays_to_the_end_and_advances() {
+        let fx = Fixtures::new("plugin-queue");
+        fx.wav("a.wav", 0.25);
+        fx.wav("b.wav", 0.25);
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let shared = Arc::new(Shared::new(2));
+        shared.flush_ack.store(u64::MAX, Ordering::Release);
+        let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(8192);
+        let (tx, rx) = mpsc::channel::<Cmd>();
+        let engine = Engine::new(
+            StartQueue {
+                locators: vec![plugin("a.wav"), plugin("b.wav")],
+                opener: Some(fixture_opener(&fx, Arc::clone(&asked))),
+                ..StartQueue::default()
+            },
+            Arc::clone(&shared),
+            producer,
+            48_000,
+            rx,
+        );
+        let decode = std::thread::spawn(move || engine.run());
+
+        // Take everything the ring holds and move the clock by it.
+        let mut heard = 0u64;
+        wait_for("the queue to play out", || {
+            let n = consumer.slots();
+            if let Ok(chunk) = consumer.read_chunk(n) {
+                chunk.commit_all();
+            }
+            heard += n as u64 / 2;
+            shared.frames_consumed.store(heard, Ordering::Relaxed);
+
+            shared.ended.load(Ordering::Relaxed)
+        });
+
+        assert_eq!(*asked.lock().unwrap(), vec!["a.wav", "b.wav"]);
+        assert_eq!(heard, 24_000, "both tracks, every frame");
+        assert!(shared.tracks.lock().unwrap()[1].is_some());
+        assert_eq!(shared.take_refusal(), None);
+
+        tx.send(Cmd::Quit).expect("the engine is listening");
+        decode.join().expect("the decode thread ends cleanly");
+    }
+
+    #[test]
+    fn a_plugin_that_refuses_the_open_is_skipped_with_a_refusal() {
+        let fx = Fixtures::new("plugin-refuses");
+        fx.wav("b.wav", 0.25);
+
+        let serves = fixture_opener(&fx, Default::default());
+        let mut e = engine_over(vec![plugin("a.wav"), plugin("b.wav")]);
+        e.opener = Some(Arc::new(move |stream| {
+            if stream.key == "a.wav" {
+                return Err("the service said no".into());
+            }
+
+            serves(stream)
+        }));
+
+        assert!(e.open_at(0).is_some(), "the next entry opens");
+        assert_eq!(e.pos, 1);
+        assert_eq!(
+            e.shared.take_refusal().as_deref(),
+            Some("plugin:test: the service said no")
+        );
+        assert_eq!(e.shared.stream_state(0), Some(StreamState::Dropped));
+        assert_eq!(e.shared.stream_state(1), Some(StreamState::Live));
+    }
+
+    #[test]
+    fn a_plugin_entry_with_no_host_refuses_and_the_queue_moves_on() {
+        let fx = Fixtures::new("plugin-no-host");
+        let mut e = engine_over(vec![plugin("a.wav"), local(fx.wav("b.wav", 0.25))]);
+
+        assert!(e.open_at(0).is_some(), "the local file after it opens");
+        assert_eq!(e.pos, 1);
+        assert_eq!(
+            e.shared.take_refusal().as_deref(),
+            Some("plugin:test: no plugin host")
+        );
+        assert_eq!(e.shared.stream_state(0), Some(StreamState::Dropped));
     }
 
     /// A seekable remote pauses like a file.

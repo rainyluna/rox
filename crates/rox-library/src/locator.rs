@@ -1,6 +1,8 @@
 //! Where a track's bytes come from: a file on disk, or an HTTP stream with
 //! the headers its source needs and a container hint (a URL has no
 //! extension). Lives here so `rox-playback` and the store share one type.
+//! A plugin locator names a stream the plugin serves by source and key, with
+//! no URL: the plugin works out where the bytes live (ADR 29, ADR 30).
 //!
 //! `path()` returns `Option` on purpose. Every path-only operation (tag
 //! writer, rename, convert, ReplayGain, fingerprinting) has to decide what a
@@ -13,6 +15,7 @@ use std::path::PathBuf;
 pub enum Locator {
     Local(PathBuf),
     Remote(Remote),
+    Plugin(PluginStream),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -26,17 +29,38 @@ pub struct Remote {
     pub live: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PluginStream {
+    /// `plugin:<id>`.
+    pub source: String,
+    /// The row's path, opaque to rox.
+    pub key: String,
+    /// No end, no seek, no duration.
+    pub live: bool,
+}
+
 impl Locator {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Locator::Local(path) => Some(path.as_path()),
 
-            Locator::Remote(_) => None,
+            Locator::Remote(_) | Locator::Plugin(_) => None,
         }
     }
 
-    /// Display fallback when tags are missing: the file name, or the last URL
-    /// segment (the host when none survives).
+    /// A stream with no end: no seek, no duration, no position to restore.
+    pub fn live(&self) -> bool {
+        match self {
+            Locator::Local(_) => false,
+
+            Locator::Remote(remote) => remote.live,
+
+            Locator::Plugin(stream) => stream.live,
+        }
+    }
+
+    /// Display fallback when tags are missing: the file name, the last URL
+    /// segment (the host when none survives), or a plugin's key.
     pub fn label(&self) -> String {
         match self {
             Locator::Local(path) => path
@@ -45,6 +69,8 @@ impl Locator {
                 .unwrap_or_default(),
 
             Locator::Remote(remote) => remote_label(&remote.url),
+
+            Locator::Plugin(stream) => stream.key.clone(),
         }
     }
 }
@@ -106,6 +132,19 @@ mod tests {
             remote("http://stream.example.com").label(),
             "stream.example.com"
         );
+    }
+
+    #[test]
+    fn a_plugin_stream_has_no_path_and_labels_by_its_key() {
+        let stream = Locator::Plugin(PluginStream {
+            source: "plugin:demo".into(),
+            key: "a.flac".into(),
+            live: false,
+        });
+
+        assert_eq!(stream.path(), None);
+        assert_eq!(stream.label(), "a.flac");
+        assert!(!stream.live());
     }
 
     #[test]

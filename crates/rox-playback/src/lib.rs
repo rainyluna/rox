@@ -18,6 +18,7 @@ pub mod latency;
 pub mod memory;
 pub mod opus;
 pub mod output;
+pub mod plugin;
 pub mod resample;
 pub mod shared;
 pub mod tape;

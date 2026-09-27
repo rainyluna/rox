@@ -403,16 +403,13 @@ impl Session {
 /// Computed once at insert time, since the seek strip and waveform ask every
 /// pump tick.
 fn live_flags(locators: &[Locator]) -> Vec<bool> {
-    locators
-        .iter()
-        .map(|l| matches!(l, Locator::Remote(remote) if remote.live))
-        .collect()
+    locators.iter().map(Locator::live).collect()
 }
 
 /// A live stream has no position to restore: its saved seconds name a moment
-/// that's gone. Remote files still seek.
+/// that's gone. Anything that ends still seeks, remote or not.
 fn seeks_on_restore(start: &Locator) -> bool {
-    !matches!(start, Locator::Remote(remote) if remote.live)
+    !start.live()
 }
 
 /// An all-station batch replaces the queue instead of joining it: a stream
@@ -464,9 +461,10 @@ fn resolve_queue_meta(
 }
 
 /// Where each key plays from. A remote key reads its URL and live flag off
-/// the row, and the sources registry adds the auth. A pruned row answers with
-/// an empty URL so the open fails instead of reading whatever file sits at
-/// the id's path.
+/// the row, and the sources registry adds the auth. A plugin key goes through
+/// as the row answers it, since the plugin serves its own bytes. A pruned row
+/// answers with an empty URL so the open fails instead of reading whatever
+/// file sits at the id's path.
 fn resolve_locators(
     conn: Option<&rox_library::rusqlite::Connection>,
     keys: &[TrackKey],
@@ -488,6 +486,8 @@ fn resolve_locators(
 
             let mut remote = match row {
                 Some(Locator::Remote(remote)) => remote,
+
+                Some(plugin @ Locator::Plugin(_)) => return plugin,
 
                 _ => rox_library::locator::Remote {
                     url: String::new(),
@@ -1191,7 +1191,8 @@ impl Player {
     /// Two cue tracks of one image share a locator, so anything naming or
     /// resolving a queue row comes through here, never `entry.locator`. An
     /// entry the mirror lacks falls back to its locator, a remote one under
-    /// an empty source that matches no row.
+    /// an empty source that matches no row. A plugin locator carries its
+    /// whole key.
     pub fn key_for(&self, entry: &QueueEntry) -> TrackKey {
         self.key_at(entry.idx)
             .unwrap_or_else(|| match &entry.locator {
@@ -1200,6 +1201,12 @@ impl Player {
                 Locator::Remote(remote) => TrackKey {
                     source: rox_library::cue::source_id(""),
                     path: PathBuf::from(&remote.url),
+                    sub: 0,
+                },
+
+                Locator::Plugin(stream) => TrackKey {
+                    source: rox_library::cue::source_id(&stream.source),
+                    path: PathBuf::from(&stream.key),
                     sub: 0,
                 },
             })
@@ -1543,6 +1550,7 @@ impl Player {
                 // Passed in, not sent: the engine's first open happens before
                 // it reads the channel.
                 live_buffer_secs: clamp_live_buffer_secs(self.settings.live_buffer_secs),
+                opener: crate::openers::current(),
             },
             queue,
             self.effective_volume(),
@@ -3986,6 +3994,56 @@ mod tests {
             other => panic!("a remote row resolved to {other:?}"),
         }
 
+        match &missing[0] {
+            Locator::Remote(remote) => assert!(remote.url.is_empty()),
+            other => panic!("a pruned row resolved to {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plugin_key_resolves_to_its_stream_without_the_authorize_table() {
+        let mut conn = rox_library::rusqlite::Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+
+        let source = "plugin:resolve-passes";
+        let mut row = album_row("album/a.flac", "Album");
+        row.remote_live = true;
+        store::upsert_source_rows(&mut conn, source, &[row]).unwrap();
+
+        // Anything installed under the id would show up on a remote; a plugin
+        // stream has nothing for it to touch.
+        crate::sources_registry::install(
+            source,
+            Box::new(|remote| remote.url = "https://nowhere".into()),
+        );
+
+        let key = TrackKey {
+            source: rox_library::cue::source_id(source),
+            path: PathBuf::from("album/a.flac"),
+            sub: 0,
+        };
+        let locators = resolve_locators(Some(&conn), std::slice::from_ref(&key));
+
+        let pruned = TrackKey {
+            path: PathBuf::from("gone"),
+            ..key
+        };
+        let missing = resolve_locators(Some(&conn), &[pruned]);
+
+        crate::sources_registry::forget(source);
+
+        assert_eq!(
+            locators[0],
+            Locator::Plugin(rox_library::locator::PluginStream {
+                source: source.into(),
+                key: "album/a.flac".into(),
+                live: true,
+            })
+        );
+        assert!(live_flags(&locators)[0]);
+        assert!(!seeks_on_restore(&locators[0]));
+
+        // A pruned plugin row fails its open the way a pruned remote does.
         match &missing[0] {
             Locator::Remote(remote) => assert!(remote.url.is_empty()),
             other => panic!("a pruned row resolved to {other:?}"),

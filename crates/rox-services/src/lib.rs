@@ -15,6 +15,7 @@ pub mod lastfm;
 pub mod librefm;
 pub mod listenbrainz;
 pub mod lyrics;
+pub mod openers;
 pub mod peaks;
 pub mod player;
 pub mod portraits;

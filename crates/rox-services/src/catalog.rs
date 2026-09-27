@@ -1041,7 +1041,8 @@ impl Library {
     }
 
     /// A remote locator is finished here off the registry, so the engine
-    /// never asks a source anything.
+    /// never asks a remote source anything. A plugin locator goes out as is:
+    /// the engine opens it through the plugin.
     pub fn locators_for(&self, ids: &[i64]) -> Result<Vec<Locator>, String> {
         let Some(conn) = &self.conn else {
             return Ok(Vec::new());

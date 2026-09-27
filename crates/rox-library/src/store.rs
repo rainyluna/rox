@@ -1710,9 +1710,10 @@ pub fn paths_by_id(conn: &Connection, ids: &[i64]) -> rusqlite::Result<HashMap<i
 }
 
 /// Where each of these rows plays from: the path for a local one, the
-/// source's stored URL for a remote one. This is the playback resolve hop,
-/// the one [`paths_for`] used to be before a path stopped being the only
-/// answer. Ids the library no longer holds are dropped, same as there.
+/// source's stored URL for a remote one, and the key for a plugin's, which
+/// stores no URL. This is the playback resolve hop, the one [`paths_for`]
+/// used to be before a path stopped being the only answer. Ids the library
+/// no longer holds are dropped, same as there.
 ///
 /// The headers a remote request needs aren't here and never were in the
 /// database: they're per-session credentials, so the caller fills them in
@@ -1738,6 +1739,12 @@ pub fn locators_for(
         if let Ok((source, path, url, live)) = row {
             out.push(if source == crate::cue::LOCAL {
                 crate::locator::Locator::Local(PathBuf::from(path))
+            } else if source.starts_with(crate::cue::PLUGIN_PREFIX) {
+                crate::locator::Locator::Plugin(crate::locator::PluginStream {
+                    source,
+                    key: path,
+                    live: live != 0,
+                })
             } else {
                 crate::locator::Locator::Remote(crate::locator::Remote {
                     url,
@@ -4313,6 +4320,61 @@ mod tests {
         assert_eq!(
             &*key_for_id(&conn, remote_id).unwrap().unwrap().source,
             "radio"
+        );
+    }
+
+    #[test]
+    fn locators_for_answers_a_plugin_row_by_its_key() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let mut served = row("tr-7", "A", "Album", 0);
+        served.remote_url = "https://srv/rest/stream.view?id=tr-7".into();
+        upsert_source_rows(&mut conn, "subsonic:home", &[served]).unwrap();
+
+        let mut station = row("jazz", "A", "Album", 0);
+        station.remote_url = "https://host/jazz".into();
+        station.remote_live = true;
+        upsert_source_rows(&mut conn, "radio", &[station]).unwrap();
+
+        // A plugin row never carries a URL; the live flag is all it keeps.
+        let mut stream = row("album/a.flac", "A", "Album", 0);
+        stream.remote_live = true;
+        upsert_source_rows(&mut conn, "plugin:demo", &[stream]).unwrap();
+
+        let id = |source: &str, path: &str| id_for_path(&conn, source, path).unwrap().unwrap();
+        let ids = [
+            id("subsonic:home", "tr-7"),
+            id("radio", "jazz"),
+            id("plugin:demo", "album/a.flac"),
+        ];
+
+        let locators = locators_for(&conn, &ids).unwrap();
+        assert_eq!(
+            locators[0],
+            crate::locator::Locator::Remote(crate::locator::Remote {
+                url: "https://srv/rest/stream.view?id=tr-7".into(),
+                headers: Vec::new(),
+                hint: String::new(),
+                live: false,
+            })
+        );
+        assert_eq!(
+            locators[1],
+            crate::locator::Locator::Remote(crate::locator::Remote {
+                url: "https://host/jazz".into(),
+                headers: Vec::new(),
+                hint: String::new(),
+                live: true,
+            })
+        );
+        assert_eq!(
+            locators[2],
+            crate::locator::Locator::Plugin(crate::locator::PluginStream {
+                source: "plugin:demo".into(),
+                key: "album/a.flac".into(),
+                live: true,
+            })
         );
     }
 }
