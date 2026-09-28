@@ -20,6 +20,9 @@ sha2 = "0.10"
 # a 24 MB download.
 ureq = "2"
 log = "0.4"
+# logf that rounds the same on every platform, like rox-viz's analyzer, so a
+# vector doesn't depend on which OS computed it.
+libm = "0.2"
 
 # Metal for the forward pass. Kernels compile at runtime, and the extractor
 # falls back to the CPU if the device or a probe pass fails.

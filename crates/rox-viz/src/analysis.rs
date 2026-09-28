@@ -24,7 +24,7 @@ impl Analyzer {
         let window: Vec<f32> = (0..size)
             .map(|i| {
                 let t = i as f32 / (size - 1) as f32;
-                0.5 - 0.5 * (std::f32::consts::TAU * t).cos()
+                0.5 - 0.5 * libm::cosf(std::f32::consts::TAU * t)
             })
             .collect();
         let window_sum = window.iter().sum();
@@ -78,8 +78,8 @@ pub fn log_bands(
     let ratio = hi_hz / lo_hz;
     (0..bands)
         .map(|i| {
-            let f0 = lo_hz * ratio.powf(i as f32 / bands as f32);
-            let f1 = lo_hz * ratio.powf((i + 1) as f32 / bands as f32);
+            let f0 = lo_hz * libm::powf(ratio, i as f32 / bands as f32);
+            let f1 = lo_hz * libm::powf(ratio, (i + 1) as f32 / bands as f32);
             let lo = ((f0 / nyquist * half as f32) as usize).clamp(1, half - 1);
             let hi = ((f1 / nyquist * half as f32) as usize).clamp(lo + 1, half);
             (lo, hi)
@@ -130,7 +130,7 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
     let mut len = 2;
     while len <= n {
         let ang = -std::f32::consts::TAU / len as f32;
-        let (wr, wi) = (ang.cos(), ang.sin());
+        let (wr, wi) = (libm::cosf(ang), libm::sinf(ang));
         for start in (0..n).step_by(len) {
             let (mut cr, mut ci) = (1.0f32, 0.0f32);
             for k in start..start + len / 2 {

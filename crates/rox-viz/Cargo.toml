@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Pure-Rust sin, cos and pow for the window, twiddles and band edges. The
+# platform libms round a few of those differently in the last bit, and
+# rox-acoustic's stored vectors come out of this analyzer, so they'd differ
+# by platform.
+libm = "0.2"
 serde = { version = "1", features = ["derive"] }
 # Signals and routes ride the workspace bundle's derived JSON Schema (ADR 22).
 schemars = "1"

@@ -7107,6 +7107,7 @@ version = "1.28.6"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "libm",
  "log",
  "rox-core",
  "rox-library",
@@ -7407,6 +7408,7 @@ dependencies = [
 name = "rox-viz"
 version = "1.28.6"
 dependencies = [
+ "libm",
  "schemars",
  "serde",
  "serde_json",

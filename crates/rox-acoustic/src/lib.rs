@@ -483,7 +483,7 @@ fn features(mono: &[f32]) -> Option<Vec<f32>> {
         for (values, &(lo, hi)) in per_band.iter_mut().zip(&bands) {
             let sum: f32 = mags[lo..hi].iter().sum();
             // Log energy, so a quiet band isn't a rounding error beside a loud one.
-            values.push((sum / (hi - lo) as f32 + 1e-9).ln());
+            values.push(libm::logf(sum / (hi - lo) as f32 + 1e-9));
         }
 
         let total: f32 = mags.iter().sum();
@@ -493,7 +493,7 @@ fn features(mono: &[f32]) -> Option<Vec<f32>> {
                 .enumerate()
                 .map(|(k, m)| k as f32 * bin_hz * m)
                 .sum();
-            centroid.push((weighted / total + 1.0).ln());
+            centroid.push(libm::logf(weighted / total + 1.0));
             let mut running = 0.0;
             let mut edge = half - 1;
             for (k, m) in mags.iter().enumerate() {
@@ -503,7 +503,7 @@ fn features(mono: &[f32]) -> Option<Vec<f32>> {
                     break;
                 }
             }
-            rolloff.push((edge as f32 * bin_hz + 1.0).ln());
+            rolloff.push(libm::logf(edge as f32 * bin_hz + 1.0));
         }
 
         flux.push(mags);
@@ -747,7 +747,7 @@ mod tests {
             .map(|i| {
                 let phase = i % period;
                 if phase < BURST {
-                    (1.0 - phase as f32 / BURST as f32) * (i as f32 * 0.7).sin() * 0.8
+                    (1.0 - phase as f32 / BURST as f32) * libm::sinf(i as f32 * 0.7) * 0.8
                 } else {
                     0.0
                 }
@@ -760,16 +760,16 @@ mod tests {
     /// analyzed after it.
     const BEFORE_THE_FLUX_MOVED: [f32; DIM] = [
         -15.965477,
-        -15.965543,
-        -15.965543,
+        -15.965542,
+        -15.965542,
         -15.966264,
         -15.9669695,
-        -15.966479,
+        -15.966478,
         -15.963373,
         -15.959001,
         -15.956571,
         -15.956884,
-        -15.948458,
+        -15.948456,
         -15.942306,
         -15.931433,
         -15.921043,
@@ -784,7 +784,7 @@ mod tests {
         -14.532366,
         -15.310902,
         -15.710731,
-        -15.948189,
+        -15.948191,
         -16.123562,
         -16.263449,
         6.1063194,
@@ -797,7 +797,7 @@ mod tests {
         6.1093645,
         6.1091866,
         6.106963,
-        6.1148543,
+        6.1148534,
         6.1175547,
         6.1279283,
         6.1366906,
@@ -812,11 +812,11 @@ mod tests {
         7.7230873,
         6.7881427,
         6.3496385,
-        6.096466,
+        6.0964665,
         5.912886,
         5.7709303,
         8.687916,
-        0.12176962,
+        0.12176965,
         8.972943,
         0.27300486,
         0.00045497756,
