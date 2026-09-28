@@ -3425,6 +3425,9 @@ impl Workspace {
             // the app rather than this window, because the tee it drains is
             // one switch in the transport.
             start_capture(&player, &library, cx);
+            // The plugin host, once per app like capture. Off unless plugins
+            // and experimental features are both on.
+            rox_services::plugins::start(library.clone(), player.clone(), cx);
             let scrobbler = cx.new(|cx| Scrobbler::new(&player, &library, &radio, cx));
             let discord = cx.new(|cx| DiscordPresence::new(&player, &library, cx));
             let listenbrainz = cx.new(|cx| ListenBrainz::new(&scrobbler, cx));

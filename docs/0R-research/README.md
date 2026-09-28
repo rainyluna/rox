@@ -19,3 +19,9 @@ writeup before any decision leans on it.
   one blocker, stock gpui 0.2.2 stopping the Linux and Windows event loops on last
   window close, is patched out in the vendored gpui. macOS needs nothing, since the dock
   is the tray.
+- [04 - Plugin host](04-plugin-host.md) - can a subprocess plugin speaking JSON-RPC
+  over pipes carry browsing, syncing and streaming, built as `crates/rox-plugins` and
+  measured against an external plugin that runs a downloader. It holds: a cold open
+  takes 2 to 4 s, the pipe carries 14 Mbit/s at worst, and a pre-opened next track
+  answers in under 2 ms. The numbers set the timeouts, a 256 KiB read, whole-track
+  buffering up to 64 MB, and a two-entry pre-open.

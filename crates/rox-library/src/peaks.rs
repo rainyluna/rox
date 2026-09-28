@@ -5,6 +5,10 @@
 //! Layout, little-endian: magic, size (u64), mtime (u64), path length (u32)
 //! and bytes, lane count (u32), then per lane a bin count (u32) and that
 //! many (min, max, rms) f32 triples. Lane 0 is the mono mix.
+//!
+//! A track with no file (a plugin's, a server's) is keyed on its source and
+//! track key instead, under its own magic and file name. A plugin key can
+//! read exactly like a path on disk, so the two kinds never share an entry.
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -23,6 +27,10 @@ pub type PeakLanes = Vec<Vec<PeakBin>>;
 
 /// Bump when the layout changes; old entries then read as misses.
 const MAGIC: &[u8; 8] = b"roxwave3";
+
+/// A remote entry: magic, identity length (u32) and bytes, then the lanes as
+/// above. The identity is `source\0key`.
+const REMOTE_MAGIC: &[u8; 8] = b"roxwavr1";
 
 /// Blocking; run off the UI thread.
 pub fn clear(dir: &Path) {
@@ -81,12 +89,16 @@ pub fn load(dir: &Path, track: &Path) -> Option<PeakLanes> {
     if take(&mut rest, path_len)? != track.as_os_str().as_encoded_bytes() {
         return None;
     }
-    let lane_count = take_u32(&mut rest)? as usize;
+    read_lanes(&mut rest)
+}
+
+fn read_lanes(rest: &mut &[u8]) -> Option<PeakLanes> {
+    let lane_count = take_u32(rest)? as usize;
     // Clamp so a garbage lane count can't reserve the moon.
     let mut lanes = Vec::with_capacity(lane_count.min(8));
     for _ in 0..lane_count {
-        let count = take_u32(&mut rest)? as usize;
-        let bins = take(&mut rest, count.checked_mul(12)?)?;
+        let count = take_u32(rest)? as usize;
+        let bins = take(rest, count.checked_mul(12)?)?;
         lanes.push(
             bins.as_chunks::<12>()
                 .0
@@ -100,6 +112,18 @@ pub fn load(dir: &Path, track: &Path) -> Option<PeakLanes> {
         );
     }
     Some(lanes)
+}
+
+fn write_lanes(data: &mut Vec<u8>, lanes: &[Vec<PeakBin>]) {
+    data.extend_from_slice(&(lanes.len() as u32).to_le_bytes());
+    for lane in lanes {
+        data.extend_from_slice(&(lane.len() as u32).to_le_bytes());
+        for bin in lane {
+            data.extend_from_slice(&bin.lo.to_le_bytes());
+            data.extend_from_slice(&bin.hi.to_le_bytes());
+            data.extend_from_slice(&bin.rms.to_le_bytes());
+        }
+    }
 }
 
 /// Writes nothing if the file changed since `stamped`, so a download
@@ -117,16 +141,47 @@ pub fn store(dir: &Path, track: &Path, stamped: Option<(u64, u64)>, lanes: &[Vec
     data.extend_from_slice(&mtime.to_le_bytes());
     data.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
     data.extend_from_slice(path_bytes);
-    data.extend_from_slice(&(lanes.len() as u32).to_le_bytes());
-    for lane in lanes {
-        data.extend_from_slice(&(lane.len() as u32).to_le_bytes());
-        for bin in lane {
-            data.extend_from_slice(&bin.lo.to_le_bytes());
-            data.extend_from_slice(&bin.hi.to_le_bytes());
-            data.extend_from_slice(&bin.rms.to_le_bytes());
-        }
-    }
+    write_lanes(&mut data, lanes);
     let path = entry_path(dir, track);
+    if let Err(e) = std::fs::write(&path, data) {
+        log::warn!("peaks cache: writing {}: {e}", path.display());
+    }
+}
+
+/// A NUL can't appear in a source id, so no two pairs share an identity.
+fn remote_identity(source: &str, key: &str) -> Vec<u8> {
+    [source.as_bytes(), b"\0", key.as_bytes()].concat()
+}
+
+fn remote_entry_path(dir: &Path, identity: &[u8]) -> PathBuf {
+    dir.join(format!("r{:016x}.peaks", fnv1a(identity)))
+}
+
+/// The stored peaks of a track with no file, built while it played.
+pub fn load_remote(dir: &Path, source: &str, key: &str) -> Option<PeakLanes> {
+    let identity = remote_identity(source, key);
+    let data = std::fs::read(remote_entry_path(dir, &identity)).ok()?;
+    let mut rest = data.as_slice();
+    if take(&mut rest, REMOTE_MAGIC.len())? != REMOTE_MAGIC {
+        return None;
+    }
+    let len = take_u32(&mut rest)? as usize;
+    if take(&mut rest, len)? != identity.as_slice() {
+        return None;
+    }
+    read_lanes(&mut rest)
+}
+
+pub fn store_remote(dir: &Path, source: &str, key: &str, lanes: &[Vec<PeakBin>]) {
+    let _ = std::fs::create_dir_all(dir);
+    let identity = remote_identity(source, key);
+    let mut data = Vec::new();
+    data.extend_from_slice(REMOTE_MAGIC);
+    data.extend_from_slice(&(identity.len() as u32).to_le_bytes());
+    data.extend_from_slice(&identity);
+    write_lanes(&mut data, lanes);
+
+    let path = remote_entry_path(dir, &identity);
     if let Err(e) = std::fs::write(&path, data) {
         log::warn!("peaks cache: writing {}: {e}", path.display());
     }
@@ -273,5 +328,43 @@ mod tests {
         std::fs::copy(entry_path(&cache, &a), entry_path(&cache, &b)).unwrap();
         assert_eq!(load(&cache, &b), None);
         assert_eq!(load(&cache, &a), Some(one_bin()));
+    }
+
+    #[test]
+    fn a_remote_entry_round_trips_by_source_and_key() {
+        let scratch = Scratch::new("remote");
+        let lanes = one_bin();
+
+        store_remote(&scratch.cache(), "plugin:demo", "k1", &lanes);
+
+        assert_eq!(
+            load_remote(&scratch.cache(), "plugin:demo", "k1"),
+            Some(lanes)
+        );
+        assert_eq!(load_remote(&scratch.cache(), "plugin:other", "k1"), None);
+        assert_eq!(load_remote(&scratch.cache(), "plugin:demo", "k2"), None);
+    }
+
+    #[test]
+    fn a_plugin_key_equal_to_a_local_path_never_reads_the_local_entry() {
+        let scratch = Scratch::new("remote-vs-local");
+        let track = scratch.track("pcm");
+        let key = track.to_str().unwrap();
+        scratch.store(&track, &one_bin());
+
+        assert_eq!(load_remote(&scratch.cache(), "plugin:demo", key), None);
+
+        let other = vec![vec![bin(-0.5, 0.5, 0.1)]];
+        store_remote(&scratch.cache(), "plugin:demo", key, &other);
+
+        assert_eq!(
+            load(&scratch.cache(), &track),
+            Some(one_bin()),
+            "the file's own entry stands"
+        );
+        assert_eq!(
+            load_remote(&scratch.cache(), "plugin:demo", key),
+            Some(other)
+        );
     }
 }

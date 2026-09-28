@@ -39,7 +39,11 @@ pub struct Heard {
 pub fn put(conn: &mut Connection, stations: &[Station]) -> rusqlite::Result<()> {
     let rows: Vec<TrackRow> = stations.iter().map(row_for).collect();
 
-    store::upsert_source_rows(conn, SOURCE, &rows)
+    // A station removed and added back gets its history back with the row.
+    let tx = conn.transaction()?;
+    store::upsert_source_rows_in(&tx, SOURCE, &rows)?;
+    crate::listens::reattach(&tx)?;
+    tx.commit()
 }
 
 /// Through [`store::prune_source`], which is scoped to the source, so a URL

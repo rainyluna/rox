@@ -1144,6 +1144,9 @@ impl TransportPanel {
         let waiting = player
             .stream_state()
             .filter(|state| matches!(state, StreamState::Opening | StreamState::Reconnecting));
+        // A skip or jump to a track that takes a while to open: a plugin's,
+        // or a server's. The old track still holds the clock meanwhile.
+        let opening = player.opening().is_some();
         let volume = player.volume();
         let muted = player.muted();
         // Loop reads through the button: dim off, the accent on, the one-track
@@ -1329,6 +1332,7 @@ impl TransportPanel {
                             rox_i18n::t!("transport-live-reconnecting")
                         }
                         Some(_) => rox_i18n::t!("transport-live-opening"),
+                        None if opening => rox_i18n::t!("transport-opening-track"),
                         None if playing => rox_i18n::t!("playback-pause"),
                         None => rox_i18n::t!("playback-item-play"),
                     },
@@ -1361,13 +1365,13 @@ impl TransportPanel {
                                 this.state.player.update(cx, |p, _| p.toggle_pause())
                             }),
                         )
-                        .child(match waiting {
+                        .child(match waiting.is_some() || opening {
                             // A pause glyph while a station answers says the press did something it
                             // hasn't yet. The spinner is the app's standard wait, at the glyph's
                             // size.
-                            Some(_) => Spinner::new().color(play_ink.into()).into_any_element(),
+                            true => Spinner::new().color(play_ink.into()).into_any_element(),
 
-                            None => svg()
+                            false => svg()
                                 .path(if playing { icons::PAUSE } else { icons::PLAY })
                                 .size_4()
                                 .text_color(play_ink)

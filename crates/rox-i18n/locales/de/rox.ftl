@@ -3676,6 +3676,7 @@ transport-favourite-nothing = Nichts zum Favorisieren
 transport-favourite-remove = Aus Favoriten entfernen
 transport-live = LIVE
 transport-live-opening = Verbindung zum Sender wird aufgebaut
+transport-opening-track = Titel wird geöffnet
 transport-live-reconnecting = Der Stream ist abgerissen; neuer Verbindungsversuch
 transport-live-dropped = Der Stream ist weg
 transport-live-jump = Zum Live-Punkt springen

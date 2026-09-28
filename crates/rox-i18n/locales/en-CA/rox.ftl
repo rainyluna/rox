@@ -3773,6 +3773,7 @@ transport-favourite-nothing = Nothing to favourite
 transport-favourite-remove = Remove from favourites
 transport-live = LIVE
 transport-live-opening = Connecting to the station
+transport-opening-track = Opening the track
 transport-live-reconnecting = The stream dropped; reconnecting
 transport-live-dropped = The stream is gone
 transport-live-jump = Jump to live

@@ -3762,6 +3762,7 @@ transport-favourite-nothing = Rien à mettre en favori
 transport-favourite-remove = Retirer des favoris
 transport-live = EN DIRECT
 transport-live-opening = Connexion à la station
+transport-opening-track = Ouverture du morceau
 transport-live-reconnecting = Le flux a été coupé ; reconnexion
 transport-live-dropped = Le flux a disparu
 transport-live-jump = Revenir au direct

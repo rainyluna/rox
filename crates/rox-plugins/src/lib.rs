@@ -1,0 +1,20 @@
+//! The plugin host (ADR 30): a plugin is a folder with a `plugin.json`, run
+//! as a subprocess speaking JSON-RPC over its stdin and stdout. This crate
+//! loads the manifest, hashes the folder, spawns and supervises the process,
+//! and reads its streams. It knows nothing of the library, the player or the
+//! UI; `rox-services` turns a host into an opener and a sync.
+//!
+//! A plugin runs with the user's permissions. What the host guarantees is
+//! narrower: it only runs what the user switched on, it never trusts a byte
+//! the plugin sends, and nothing it starts outlives it.
+
+pub mod hash;
+pub mod host;
+pub mod manifest;
+pub mod process;
+pub mod stream;
+pub mod wire;
+
+pub use host::{Host, HostConfig, Status, Timeouts};
+pub use manifest::Manifest;
+pub use stream::{Options, Stats, Stream};

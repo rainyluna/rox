@@ -8,7 +8,7 @@
 //!
 //! Append-only covers the event: when it played and what the tags said
 //! never change. Relinking the track id after a prune ([`reattach`], by the
-//! recorded path) is maintenance, not history.
+//! recorded source and path) is maintenance, not history.
 
 use std::collections::HashMap;
 
@@ -42,6 +42,22 @@ pub(crate) fn add_path_snapshot(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// The store ladder's listen-source step: the source beside the path, so a
+/// plugin track or a station relinks when its row comes back. Backfilled from
+/// the live row; a dangling row stays local, which is what the by-path pass
+/// already took it for. Non-local rows snapshot their row's path too.
+pub(crate) fn add_source_snapshot(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE listens ADD COLUMN source TEXT NOT NULL DEFAULT 'local';
+         UPDATE listens SET source = COALESCE(
+             (SELECT t.source FROM tracks t WHERE t.id = listens.track_id), 'local');
+         UPDATE listens SET path = COALESCE(
+             (SELECT t.path FROM tracks t
+              WHERE t.id = listens.track_id AND t.source <> 'local'), path)
+         WHERE source <> 'local';",
+    )
+}
+
 /// The store ladder's listen-origin step. Rows from before it keep the empty
 /// origin and count as rox's own: they can't be told apart.
 ///
@@ -64,19 +80,19 @@ pub const ORIGIN_SCROBBLE: &str = "lastfm";
 /// Invented so a play count adds up.
 pub const ORIGIN_ESTIMATE: &str = "estimate";
 
-/// Relink events whose track was pruned and returned: by recorded path, then
-/// by tag snapshot only when it names exactly one track. Live events refresh
-/// their path. None when nothing dangled.
+/// Relink events whose track was pruned and returned: by recorded source and
+/// path, then by tag snapshot only when it names exactly one local track.
+/// Live events refresh their snapshot. None when nothing dangled.
 pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     // Match on the fragment form (path#sub), or every listen of a rip attaches
     // to whichever row sorts first.
     conn.execute(
-        "UPDATE listens SET path =
+        "UPDATE listens SET source = t.source, path =
              CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END
          FROM tracks t
-         WHERE t.id = listens.track_id AND t.source = 'local'
-           AND listens.path <>
-             CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END",
+         WHERE t.id = listens.track_id
+           AND (listens.source <> t.source OR listens.path <>
+             CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END)",
         [],
     )?;
     // The matchers are expensive and this runs after every scan and reindex;
@@ -84,17 +100,29 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     if !has_dangling(conn)? {
         return Ok(None);
     }
+    // A plugin's track key can read like a path on disk, so each listen only
+    // relinks within the source it snapshotted.
     let by_path = conn.execute(
         "UPDATE listens SET track_id = t.id FROM tracks t
-         WHERE listens.path <> ''
+         WHERE listens.path <> '' AND listens.source = 'local'
            AND t.source = 'local'
            AND CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END
                = listens.path
            AND NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = listens.track_id)",
         [],
     )?;
+    let by_source = conn.execute(
+        "UPDATE listens SET track_id = t.id FROM tracks t
+         WHERE listens.path <> '' AND listens.source <> 'local'
+           AND t.source = listens.source AND t.path = listens.path
+           AND NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = listens.track_id)",
+        [],
+    )?;
+
+    // Takes the local track's source too: a listen that lands here belongs to
+    // the local file from now on.
     let by_tags = conn.execute(
-        "UPDATE listens SET track_id = t.id, path = t.path FROM tracks t
+        "UPDATE listens SET track_id = t.id, path = t.path, source = t.source FROM tracks t
          WHERE NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = listens.track_id)
            AND NOT (listens.title = '' AND listens.artist = '' AND listens.album = '')
            AND t.source = 'local'
@@ -105,7 +133,7 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
                 AND c.album = listens.album) = 1",
         [],
     )?;
-    Ok(Some(by_path + by_tags))
+    Ok(Some(by_path + by_source + by_tags))
 }
 
 fn has_dangling(conn: &Connection) -> rusqlite::Result<bool> {
@@ -158,10 +186,15 @@ pub fn listen_for_path(
 
 /// Nothing ever updates or deletes a listen; [`reattach`] only re-ties the
 /// track join.
+///
+/// The source is the row's, read as the listen goes in. A row already gone
+/// files `''`, which no source matches, so that listen can't relink by path
+/// into the wrong source.
 pub fn append(conn: &Connection, listen: &Listen) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO listens (track_id, played_at, title, artist, album, genre, path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO listens (track_id, played_at, title, artist, album, genre, path, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                 COALESCE((SELECT source FROM tracks WHERE id = ?1), ''))",
     )?;
     stmt.execute(rusqlite::params![
         listen.track_id,
@@ -1917,5 +1950,179 @@ mod tests {
             .expect("the station's plays roll up");
         assert_eq!(station_row.plays, 2);
         assert_eq!(station_row.title, "Firestarter");
+    }
+
+    mod by_source {
+        use super::super::*;
+        use super::track;
+        use crate::members::{self, PluginTrack};
+        use crate::stations::{self, Station};
+        use crate::store;
+
+        const DEMO: &str = "plugin:demo";
+
+        fn db() -> Connection {
+            let conn = Connection::open_in_memory().unwrap();
+            store::init_schema(&conn).unwrap();
+
+            conn
+        }
+
+        /// Keeps MAX(id) above the row under test, so a returning row can't
+        /// reuse its old rowid.
+        fn keep(conn: &mut Connection) {
+            store::insert_batch(conn, &[track("/m/keep.mp3", "Keep", "K", "K", "")]).unwrap();
+        }
+
+        fn id_of(conn: &Connection, source: &str, path: &str) -> Option<i64> {
+            conn.query_row(
+                "SELECT id FROM tracks WHERE source = ?1 AND path = ?2",
+                [source, path],
+                |row| row.get(0),
+            )
+            .ok()
+        }
+
+        fn heard(conn: &Connection, track_id: i64, path: &str, title: &str, at: i64) {
+            let listen = Listen {
+                track_id,
+                played_at: at,
+                title: title.into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                genre: String::new(),
+                path: path.into(),
+            };
+            append(conn, &listen).unwrap();
+        }
+
+        fn snapshot(conn: &Connection) -> Vec<(i64, String, String)> {
+            let mut stmt = conn
+                .prepare("SELECT track_id, source, path FROM listens ORDER BY played_at")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        }
+
+        fn plugin_track(key: &str, title: &str) -> PluginTrack {
+            PluginTrack {
+                key: key.into(),
+                title: title.into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn a_pruned_plugin_rows_listens_keep_their_tags_and_relink_when_it_returns() {
+            let mut conn = db();
+            members::pick(&mut conn, DEMO, &[plugin_track("k1", "Song")]).unwrap();
+            keep(&mut conn);
+            let old = id_of(&conn, DEMO, "k1").unwrap();
+            heard(&conn, old, "k1", "Song", 100);
+            heard(&conn, old, "k1", "Song", 200);
+            assert_eq!(
+                snapshot(&conn)[0],
+                (old, DEMO.into(), "k1".into()),
+                "the source went in with it"
+            );
+
+            members::remove_track(&mut conn, DEMO, "k1").unwrap();
+            assert_eq!(id_of(&conn, DEMO, "k1"), None);
+            let most = most_played(&conn, 10).unwrap();
+            assert_eq!(
+                (most[0].title.as_str(), most[0].plays),
+                ("Song", 2),
+                "the tags outlive the row"
+            );
+
+            members::pick(&mut conn, DEMO, &[plugin_track("k1", "Song")]).unwrap();
+            let new = id_of(&conn, DEMO, "k1").unwrap();
+            assert_ne!(new, old);
+            assert!(
+                snapshot(&conn).iter().all(|(id, _, _)| *id == new),
+                "the pick relinked both"
+            );
+        }
+
+        #[test]
+        fn a_station_removed_and_added_back_gets_its_history() {
+            let mut conn = db();
+            let station = Station {
+                url: "http://radio.invalid/stream".into(),
+                name: "Station".into(),
+                genre: String::new(),
+            };
+            stations::put(&mut conn, std::slice::from_ref(&station)).unwrap();
+            keep(&mut conn);
+            let old = id_of(&conn, stations::SOURCE, &station.url).unwrap();
+            heard(&conn, old, &station.url, "Station", 100);
+
+            stations::remove(&mut conn, &station.url).unwrap();
+            stations::put(&mut conn, std::slice::from_ref(&station)).unwrap();
+            let new = id_of(&conn, stations::SOURCE, &station.url).unwrap();
+
+            assert_ne!(new, old);
+            assert_eq!(
+                snapshot(&conn),
+                vec![(new, stations::SOURCE.into(), station.url.clone())]
+            );
+        }
+
+        #[test]
+        fn a_plugin_key_never_attaches_to_a_local_file_at_that_path() {
+            let mut conn = db();
+            members::pick(&mut conn, DEMO, &[plugin_track("/m/1.mp3", "Plugin song")]).unwrap();
+            keep(&mut conn);
+            let old = id_of(&conn, DEMO, "/m/1.mp3").unwrap();
+            heard(&conn, old, "/m/1.mp3", "Plugin song", 100);
+            members::remove_track(&mut conn, DEMO, "/m/1.mp3").unwrap();
+
+            store::insert_batch(&mut conn, &[track("/m/1.mp3", "Local song", "L", "L", "")])
+                .unwrap();
+            let local = id_of(&conn, "local", "/m/1.mp3").unwrap();
+
+            assert_eq!(reattach(&conn).unwrap(), Some(0));
+            assert_eq!(snapshot(&conn), vec![(old, DEMO.into(), "/m/1.mp3".into())]);
+            assert_ne!(old, local);
+        }
+
+        #[test]
+        fn a_listen_whose_row_is_already_gone_files_no_source() {
+            let conn = db();
+            heard(&conn, 999, "/m/1.mp3", "Ghost", 100);
+
+            assert_eq!(
+                snapshot(&conn),
+                vec![(999, String::new(), "/m/1.mp3".into())]
+            );
+        }
+
+        #[test]
+        fn the_ladder_backfills_the_source_from_the_live_row() {
+            let mut conn = Connection::open_in_memory().unwrap();
+            store::run_ladder_before(&conn, "listen-source").unwrap();
+            store::insert_batch(&mut conn, &[track("k1", "Song", "A", "B", "")]).unwrap();
+            conn.execute_batch(
+                "UPDATE tracks SET id = 1, source = 'plugin:demo';
+                 INSERT INTO listens (track_id, played_at, title, artist, album, genre, path)
+                     VALUES (1, 100, 'Song', 'A', 'B', '', ''),
+                            (7, 200, 'Gone', 'A', 'B', '', '/m/gone.mp3');",
+            )
+            .unwrap();
+
+            store::init_schema(&conn).unwrap();
+
+            assert_eq!(
+                snapshot(&conn),
+                vec![
+                    (1, DEMO.into(), "k1".into()),
+                    (7, "local".into(), "/m/gone.mp3".into()),
+                ]
+            );
+        }
     }
 }

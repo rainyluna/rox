@@ -2,12 +2,15 @@
 //! The callback only ever touches the atomics; the mutexes are decode-thread
 //! and UI-thread only.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use rox_library::locator::Locator;
 
+use crate::download::Buffered;
 use crate::http::StationInfo;
 use crate::icy::IcyTitle;
 
@@ -28,6 +31,22 @@ pub type StreamSink = Arc<dyn Fn(StreamState) + Send + Sync>;
 
 /// For local files and analysis passes.
 pub fn no_stream() -> StreamSink {
+    Arc::new(|_| {})
+}
+
+/// Why a stream that was playing gave up, sent up from inside a decode read
+/// the way a failed open's reason is. Bound like [`StreamSink`].
+pub type RefusalSink = Arc<dyn Fn(String) + Send + Sync>;
+
+pub fn no_refusal() -> RefusalSink {
+    Arc::new(|_| {})
+}
+
+/// Where a stream downloaded whole says what it has, bound to its entry
+/// like the other sinks. Weak, so a finished track's bytes can go.
+pub type BufferSink = Arc<dyn Fn(Weak<dyn Buffered>) + Send + Sync>;
+
+pub fn no_buffer() -> BufferSink {
     Arc::new(|_| {})
 }
 
@@ -216,6 +235,11 @@ pub struct Shared {
     pub refusal: Mutex<Option<String>>,
     /// The pump ticks sixty times a second; this keeps the common tick lock-free.
     pub refusal_pending: AtomicBool,
+    /// Each entry's download, by pool index, while its source lives.
+    pub buffered: Mutex<HashMap<usize, Weak<dyn Buffered>>>,
+    /// The pool entry a skip, jump or queue start is opening, `u64::MAX` for
+    /// none. A gapless pre-decode never sets it: nobody is waiting on that.
+    pub opening: AtomicU64,
 }
 
 impl Shared {
@@ -254,7 +278,37 @@ impl Shared {
             live_gaps: Mutex::new(Vec::new()),
             refusal: Mutex::new(None),
             refusal_pending: AtomicBool::new(false),
+            buffered: Mutex::new(HashMap::new()),
+            opening: AtomicU64::new(u64::MAX),
         }
+    }
+
+    /// On the title revision, so a waiting surface wakes when the open starts
+    /// and again when it's done.
+    pub fn publish_opening(&self, idx: Option<usize>) {
+        use std::sync::atomic::Ordering;
+
+        let value = idx.map_or(u64::MAX, |idx| idx as u64);
+        if self.opening.swap(value, Ordering::AcqRel) != value {
+            self.title_rev.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub fn opening(&self) -> Option<usize> {
+        let value = self.opening.load(std::sync::atomic::Ordering::Acquire);
+        (value != u64::MAX).then_some(value as usize)
+    }
+
+    /// A reopen after a failed read replaces the entry's download.
+    pub fn publish_buffered(&self, idx: usize, download: Weak<dyn Buffered>) {
+        let mut buffered = self.buffered.lock().unwrap();
+        buffered.retain(|_, weak| weak.strong_count() > 0);
+        buffered.insert(idx, download);
+    }
+
+    /// None once the entry's source is gone, or it never downloaded whole.
+    pub fn buffered(&self, idx: usize) -> Option<Arc<dyn Buffered>> {
+        self.buffered.lock().unwrap().get(&idx)?.upgrade()
     }
 
     /// The newest reason wins.

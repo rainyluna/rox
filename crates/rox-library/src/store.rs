@@ -326,6 +326,14 @@ const MIGRATIONS: &[crate::migrate::Migration] = &[
             crate::playlists::add_source_snapshot(conn)
         },
         rescan: false,
+    }, // Listens snapshot their source beside the path, so a plugin track or a
+    // station relinks its history when its row comes back, and a plugin key
+    // that reads like a path on disk never attaches to a local file. No mtime
+    // reset: nothing here is read from a tag.
+    crate::migrate::Migration {
+        name: "listen-source",
+        up: crate::listens::add_source_snapshot,
+        rescan: false,
     },
 ];
 

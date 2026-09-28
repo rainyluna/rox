@@ -3698,6 +3698,7 @@ transport-favourite-nothing = Nada para favoritar
 transport-favourite-remove = Remover dos favoritos
 transport-live = AO VIVO
 transport-live-opening = Conectando à estação
+transport-opening-track = Abrindo a faixa
 transport-live-reconnecting = A transmissão caiu; reconectando
 transport-live-dropped = A transmissão sumiu
 transport-live-jump = Ir para o ao vivo

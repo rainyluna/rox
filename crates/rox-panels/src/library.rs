@@ -17,6 +17,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_component::spinner::Spinner;
 use gpui_component::table::{Column, ColumnSort, Table, TableDelegate, TableEvent, TableState};
 use gpui_component::{Icon, IconName, Root, Side, Sizable, Size};
 use rox_dock::{Panel, PanelEvent, PanelInfo, PanelState, TabPanel};
@@ -248,6 +249,9 @@ struct TrackTable {
     sort: Option<(SharedString, bool)>,
     playing_id: Option<i64>,
     playing_row: Option<usize>,
+    /// A track a skip or jump is still opening, spun beside its title.
+    opening_id: Option<i64>,
+    opening_row: Option<usize>,
     favourites: HashSet<i64>,
     /// Similar-column scores against the playing track. Scored on a background
     /// thread, never in a paint: the pass is tens of milliseconds on a large
@@ -962,13 +966,17 @@ impl TrackTable {
 
     /// One scan per view swap or track change, never per frame.
     fn locate_playing(&mut self, cx: &App) {
-        let row = self.playing_id.and_then(|id| {
-            let projection = self.projection(cx)?;
-            self.view
-                .iter()
-                .position(|&row| matches!(row, Row::Track(r) if projection.db_id[r as usize] == id))
-        });
-        self.playing_row = row;
+        self.playing_row = self.row_of(self.playing_id, cx);
+        self.opening_row = self.row_of(self.opening_id, cx);
+    }
+
+    fn row_of(&self, id: Option<i64>, cx: &App) -> Option<usize> {
+        let id = id?;
+        let projection = self.projection(cx)?;
+
+        self.view
+            .iter()
+            .position(|&row| matches!(row, Row::Track(r) if projection.db_id[r as usize] == id))
     }
 
     /// None while the catalog has no projection yet.
@@ -1396,6 +1404,7 @@ impl TableDelegate for TrackTable {
         };
         let v = projection.resolve(row);
         let playing = self.playing_row == Some(row_ix);
+        let opening = self.opening_row == Some(row_ix);
         let readings = crate::settings::show_readings();
         let cell = div().truncate();
         let key = self.columns[col_ix].key.clone();
@@ -1429,6 +1438,12 @@ impl TableDelegate for TrackTable {
             // out. The sort columns show that string alone.
             "title" => cell
                 .when(playing, |d| d.text_color(palette::accent()))
+                .when(opening, |d| {
+                    d.flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Spinner::new().xsmall().color(palette::accent().into()))
+                })
                 .child(panel::named(v.title, v.title_sort, readings)),
             "artist" => cell
                 .text_color(palette::text_secondary())
@@ -1608,6 +1623,7 @@ pub struct LibraryPanel {
     /// The change detector. The player notifies every pump tick, so everything
     /// up to this compare stays cheap.
     playing_key: Option<TrackKey>,
+    opening_key: Option<TrackKey>,
     type_ahead: String,
     type_ahead_at: Option<std::time::Instant>,
     /// The catalog loads after the panel builds, so the first non-empty view
@@ -1781,6 +1797,8 @@ impl LibraryPanel {
             sort,
             playing_id: None,
             playing_row: None,
+            opening_id: None,
+            opening_row: None,
             favourites: state.library.read(cx).favourite_ids(),
             similar: Arc::new(HashMap::new()),
             similar_anchor: None,
@@ -1857,6 +1875,7 @@ impl LibraryPanel {
             selection_ids,
             error: None,
             playing_key: None,
+            opening_key: None,
             type_ahead: String::new(),
             type_ahead_at: None,
             restore_scroll: (config.scroll_row > 0).then_some(config.scroll_row),
@@ -1928,21 +1947,37 @@ impl LibraryPanel {
     }
 
     fn sync_playing(&mut self, cx: &mut Context<Self>) {
-        let path = self.state.player.read(cx).now_playing().map(|now| now.key);
-        if path == self.playing_key {
+        let player = self.state.player.read(cx);
+        let path = player.now_playing().map(|now| now.key);
+        let opening = player.opening();
+        if path == self.playing_key && opening == self.opening_key {
             return;
         }
+
+        // An open starting or ending leaves the playing row where it was.
+        let moved = path != self.playing_key;
         self.playing_key = path;
+        self.opening_key = opening;
+
+        let library = self.state.library.read(cx);
         let id = self
             .playing_key
             .as_ref()
-            .and_then(|key| self.state.library.read(cx).id_for_key(key));
+            .and_then(|key| library.id_for_key(key));
+        let opening_id = self
+            .opening_key
+            .as_ref()
+            .and_then(|key| library.id_for_key(key));
         self.table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.playing_id = id;
+            delegate.opening_id = opening_id;
             delegate.locate_playing(cx);
             cx.notify();
         });
+        if !moved {
+            return;
+        }
         if self.follow_playing {
             self.follow_playing(cx);
         }

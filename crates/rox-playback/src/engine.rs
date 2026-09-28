@@ -43,10 +43,11 @@ use crate::gain;
 use crate::http::StationInfo;
 use crate::icy::TitleSink;
 use crate::latency;
-use crate::plugin::{Opened, Opener, PluginSource};
+use crate::plugin::{Opener, PluginSource, Recovery};
 use crate::resample::Resampler;
 use crate::shared::{
-    QueueEntry, QueueSnapshot, Segment, Shared, StreamSink, StreamState, TrackInfo,
+    BufferSink, QueueEntry, QueueSnapshot, RefusalSink, Segment, Shared, StreamSink, StreamState,
+    TrackInfo,
 };
 use crate::tape::Tape;
 
@@ -199,6 +200,9 @@ struct Source {
     opened_at: Option<Instant>,
     /// The station's tape, the only handle back down once symphonia owns the reader.
     tape: Option<Arc<Tape>>,
+    /// A live plugin stream's container, for rebuilding its decoder over the
+    /// tape. A station's comes off its locator and headers instead.
+    live_ext: String,
 }
 
 /// A span on the file's frame clock, where the boundary has to be honored.
@@ -284,6 +288,10 @@ pub struct Engine {
     /// state; the entry to rejoin comes off the output clock, so queue edits
     /// during the pause just work.
     hung_up: Option<u64>,
+    /// The pool entry the last skip or jump opened, until another track is
+    /// adopted. A seek means this track: it isn't audible until its audio
+    /// reaches the speakers, and seeking what is would reopen the one left.
+    navigated: Option<usize>,
     live_buffer_secs: u32,
     /// None refuses every plugin entry.
     opener: Option<Opener>,
@@ -397,6 +405,7 @@ impl Engine {
             fade: None,
             fade_armed: false,
             hung_up: None,
+            navigated: None,
             live_buffer_secs: live_buffer_secs.max(LIVE_BUFFER_MIN_SECS),
             opener,
             marks_rev: 0,
@@ -784,7 +793,12 @@ impl Engine {
     fn open_start(&mut self) -> Option<Source> {
         let paused = !self.shared.playing.load(Ordering::Relaxed);
         if !paused || !self.live_at(self.start) {
-            return self.open_at(self.start);
+            self.shared
+                .publish_opening(self.order.get(self.start).map(|e| e.idx));
+            let source = self.open_at(self.start);
+            self.shared.publish_opening(None);
+
+            return source;
         }
 
         // Move the cursor anyway: the rejoin resolves off it. Only the part of
@@ -828,6 +842,15 @@ impl Engine {
             let shared = Arc::clone(&self.shared);
             let on_stream: StreamSink = Arc::new(move |state| shared.publish_stream(i, state));
 
+            // A plugin stream that gives up mid-track says why, like a failed open.
+            let shared = Arc::clone(&self.shared);
+            let on_refusal: RefusalSink = Arc::new(move |reason| shared.publish_refusal(reason));
+
+            // What a stream downloaded whole has, for the seekbar and the waveform.
+            let shared = Arc::clone(&self.shared);
+            let on_buffer: BufferSink =
+                Arc::new(move |download| shared.publish_buffered(i, download));
+
             // Only a streamed open is slow enough to show.
             let streamed = !matches!(self.queue[i], Locator::Local(_));
             if streamed {
@@ -840,6 +863,8 @@ impl Engine {
                 self.spans[i],
                 on_title,
                 on_stream,
+                on_refusal,
+                on_buffer,
                 Arc::clone(&self.shared.interrupt),
                 self.live_buffer_secs,
                 self.opener.as_ref(),
@@ -881,6 +906,8 @@ impl Engine {
     /// nonzero for a play-from-bookmark.
     fn adopt(&mut self, p: usize, info: TrackInfo, start: u64, after: u64) {
         let i = self.order[p].idx;
+        // A skip sets it again right after; anything else moved on from it.
+        self.navigated = None;
         self.pos = p;
         self.idx = i;
         self.fade_armed = false;
@@ -915,7 +942,10 @@ impl Engine {
         // Rebuilt while the old source still plays, so only the cut is silent.
         let was = tape.cursor();
         let at = tape.seek_target(behind);
-        let hint = self.live_hint(self.idx);
+        let hint = match src.live_ext.is_empty() {
+            true => self.live_hint(self.idx),
+            false => src.live_ext.clone(),
+        };
         let (mut fresh, info) = match src.reopen_live(at, &hint) {
             Ok(rebuilt) => rebuilt,
 
@@ -1216,7 +1246,11 @@ impl Engine {
             self.claim_segment();
         }
 
+        // What the transport and the row show as loading, for as long as the open
+        // takes.
+        self.shared.publish_opening(Some(self.order[p].idx));
         let opened = self.open_file_at(p);
+        self.shared.publish_opening(None);
         // Nothing decoding or mixing but the ring still full: the gap between the
         // last EOF and ended. Don't chop that ending; queue behind it like a
         // gapless boundary.
@@ -1235,6 +1269,7 @@ impl Engine {
         let midpoint = self.install_skip_fade(leaving, cut, back);
         let start = (landed * self.device_rate as f64).round() as u64;
         self.adopt(pos, info, start, midpoint);
+        self.navigated = Some(self.idx);
         Some(src)
     }
 
@@ -1243,7 +1278,10 @@ impl Engine {
     /// source (ended, or draining toward a stop) that same reopen revives the
     /// finished track.
     fn seek_to(&mut self, mut source: Option<Source>, secs: f64) -> Option<Source> {
-        let ap = self.audible_pos();
+        let ap = self
+            .navigated
+            .and_then(|idx| self.order.iter().position(|e| e.idx == idx))
+            .unwrap_or_else(|| self.audible_pos());
         let mut reopened = None;
         if ap != self.pos || source.is_none() {
             // The open source is on the wrong track either way.
@@ -1972,9 +2010,47 @@ pub fn decode_peaks(path: &Path, bins: usize) -> Result<PeakLanes, String> {
     // Probe for the rate, then open at it so the resampler is a passthrough.
     let (probe, info) = Source::open(&Locator::Local(path.to_path_buf()), 48000, None)?;
     drop(probe);
-    let (mut src, info) =
-        Source::open(&Locator::Local(path.to_path_buf()), info.sample_rate, None)?;
+    let (src, info) = Source::open(&Locator::Local(path.to_path_buf()), info.sample_rate, None)?;
 
+    peaks_of(src, info, bins)
+}
+
+/// [`decode_peaks`] over a stream already in memory, such as a plugin track
+/// downloaded whole, so its waveform costs no second fetch. `hint` is the
+/// container's extension, empty to let the probe sniff.
+pub fn decode_peaks_bytes(bytes: Arc<[u8]>, hint: &str, bins: usize) -> Result<PeakLanes, String> {
+    let open = |rate: u32| {
+        let mss = MediaSourceStream::new(
+            Box::new(std::io::Cursor::new(Arc::clone(&bytes))),
+            Default::default(),
+        );
+        let mut probe_hint = Hint::new();
+        if !hint.is_empty() {
+            probe_hint.with_extension(hint);
+        }
+
+        Source::build(
+            mss,
+            probe_hint,
+            String::new(),
+            "buffered stream".into(),
+            rate,
+            None,
+            None,
+            Instant::now(),
+            false,
+            None,
+        )
+    };
+
+    let (probe, info) = open(48000)?;
+    drop(probe);
+    let (src, info) = open(info.sample_rate)?;
+
+    peaks_of(src, info, bins)
+}
+
+fn peaks_of(mut src: Source, info: TrackInfo, bins: usize) -> Result<PeakLanes, String> {
     // Fixed blocks first, so memory stays small whatever the length, then fold
     // to `bins`.
     const BLOCK_FRAMES: usize = 2048;
@@ -2141,6 +2217,8 @@ impl Source {
             span,
             crate::icy::no_titles(),
             crate::shared::no_stream(),
+            crate::shared::no_refusal(),
+            crate::shared::no_buffer(),
             // Analysis passes have their own cancellation.
             Arc::new(AtomicBool::new(false)),
             // Nothing pauses an analysis pass.
@@ -2161,6 +2239,8 @@ impl Source {
         span: Option<Span>,
         on_title: TitleSink,
         on_stream: StreamSink,
+        on_refusal: RefusalSink,
+        on_buffer: BufferSink,
         interrupt: Arc<AtomicBool>,
         live_buffer_secs: u32,
         opener: Option<&Opener>,
@@ -2170,7 +2250,7 @@ impl Source {
         let streamed = !matches!(locator, Locator::Local(_));
 
         // A URL's hint comes from the locator or the `Content-Type`, else the probe sniffs.
-        let (mss, hint, origin, station, tape) = match locator {
+        let (mss, hint, origin, station, tape, live_ext) = match locator {
             Locator::Local(path) => {
                 let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
                 let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -2180,12 +2260,22 @@ impl Source {
                     hint.with_extension(ext);
                 }
 
-                (mss, hint, path.display().to_string(), None, None)
+                (
+                    mss,
+                    hint,
+                    path.display().to_string(),
+                    None,
+                    None,
+                    String::new(),
+                )
             }
 
             Locator::Remote(remote) => {
                 let (opened, station) =
                     crate::http::open(remote, on_title, on_stream, interrupt, live_buffer_secs)?;
+                if let Some(buffered) = &opened.buffered {
+                    (on_buffer)(Arc::downgrade(buffered));
+                }
                 let mss = MediaSourceStream::new(opened.source, Default::default());
 
                 let mut hint = Hint::new();
@@ -2195,22 +2285,34 @@ impl Source {
                     hint.with_extension(ext);
                 }
 
-                (mss, hint, remote.url.clone(), Some(station), opened.tape)
+                (
+                    mss,
+                    hint,
+                    remote.url.clone(),
+                    Some(station),
+                    opened.tape,
+                    String::new(),
+                )
             }
 
             Locator::Plugin(stream) => {
                 let opener = opener.ok_or_else(|| format!("{}: no plugin host", stream.source))?;
 
                 // Named here so every refusal says which plugin it came from.
-                let Opened {
-                    reader,
-                    hint: ext,
-                    length,
-                    seekable,
-                } = opener(stream).map_err(|e| format!("{}: {e}", stream.source))?;
+                let opened = opener(stream).map_err(|e| format!("{}: {e}", stream.source))?;
+                let ext = opened.hint.clone();
 
-                let source = PluginSource::new(reader, length, seekable);
-                let mss = MediaSourceStream::new(Box::new(source), Default::default());
+                // Commands drain at the top of the loop, so a command that came in
+                // during the open waited out the rest of it.
+                log::info!(
+                    "{}: the opener held the decode thread {:?}{}",
+                    stream.source,
+                    began.elapsed(),
+                    match interrupt.load(Ordering::Relaxed) {
+                        true => ", with a command waiting behind it",
+                        false => "",
+                    }
+                );
 
                 let mut hint = Hint::new();
                 if !ext.is_empty() {
@@ -2219,7 +2321,38 @@ impl Source {
 
                 let origin = format!("{} {}", stream.source, stream.key);
 
-                (mss, hint, origin, None, None)
+                if stream.live {
+                    let (source, tape) = crate::plugin::open_live(
+                        stream,
+                        opener,
+                        opened,
+                        on_stream,
+                        interrupt,
+                        live_buffer_secs,
+                    )?;
+                    let mss = MediaSourceStream::new(Box::new(source), Default::default());
+
+                    (mss, hint, origin, None, Some(tape), ext)
+                } else {
+                    let (length, seekable) = (opened.length, opened.seekable);
+                    let (reader, buffered) = crate::plugin::reader_for(opened);
+                    if let Some(buffered) = &buffered {
+                        (on_buffer)(Arc::downgrade(buffered));
+                    }
+
+                    let source =
+                        PluginSource::new(reader, length, seekable).with_recovery(Recovery {
+                            stream: stream.clone(),
+                            opener: Arc::clone(opener),
+                            on_stream,
+                            on_refusal,
+                            on_buffer,
+                            interrupt,
+                        });
+                    let mss = MediaSourceStream::new(Box::new(source), Default::default());
+
+                    (mss, hint, origin, None, None, String::new())
+                }
             }
         };
 
@@ -2235,6 +2368,8 @@ impl Source {
             streamed,
             tape,
         )?;
+        let mut source = source;
+        source.live_ext = live_ext;
 
         Ok((source, info, station))
     }
@@ -2255,7 +2390,7 @@ impl Source {
             hint.with_extension(hint_ext);
         }
 
-        Source::build(
+        let (mut source, info) = Source::build(
             mss,
             hint,
             self.name.clone(),
@@ -2266,7 +2401,10 @@ impl Source {
             Instant::now(),
             false,
             Some(tape),
-        )
+        )?;
+        source.live_ext = self.live_ext.clone();
+
+        Ok((source, info))
     }
 
     /// Probe, build the decoder, work out the length, and position at the start.
@@ -2403,6 +2541,7 @@ impl Source {
             src_frame: 0,
             opened_at: remote.then_some(began),
             tape,
+            live_ext: String::new(),
         };
 
         // Seek to the span's start before the first packet; the decode drops what
@@ -2704,6 +2843,7 @@ impl Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::Opened;
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -3596,6 +3736,77 @@ mod tests {
         let (progress, back) = e.shared.crossfade().expect("the transport shows it");
         assert_eq!(progress, 0.0, "the cut landed right on the window");
         assert!(!back);
+    }
+
+    #[test]
+    fn a_seek_right_after_a_skip_seeks_the_track_skipped_to() {
+        let fx = Fixtures::new("skip-then-seek");
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 4.0)),
+            local(fx.wav("b.wav", 4.0)),
+        ]);
+        e.fade_secs = 4.0;
+        let source = ready_to_skip(&mut e, 48_000);
+
+        let source = e.skip_to(source, 1, false, None);
+        assert_eq!(
+            e.audible_pos(),
+            0,
+            "under the fade the clock hasn't flipped yet"
+        );
+
+        let source = e.seek_to(source, 1.0);
+        assert!(source.is_some());
+        assert_eq!(e.idx, 1, "the seek stayed on the track skipped to");
+        assert_eq!(e.audible_pos(), 1, "and the cut made it the one heard");
+        assert!(e.fade.is_none(), "a seek cuts the fade");
+    }
+
+    #[test]
+    fn any_other_adopt_forgets_the_skip() {
+        let fx = Fixtures::new("skip-forgotten");
+        let mut e = engine_over(vec![
+            local(fx.wav("a.wav", 1.0)),
+            local(fx.wav("b.wav", 1.0)),
+        ]);
+        let source = ready_to_skip(&mut e, 0);
+
+        let _ = e.skip_to(source, 1, false, None);
+        assert_eq!(e.navigated, Some(1));
+
+        let _ = e.open_at(0);
+        assert_eq!(e.navigated, None);
+    }
+
+    #[test]
+    fn only_a_navigation_publishes_its_open() {
+        let fx = Fixtures::new("opening");
+        fx.wav("a.wav", 1.0);
+        fx.wav("b.wav", 1.0);
+        let mut e = engine_over(vec![plugin("a.wav"), plugin("b.wav")]);
+
+        // The opener sees what the transport would while it runs.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (shared, noted, serves) = (
+            Arc::clone(&e.shared),
+            Arc::clone(&seen),
+            fixture_opener(&fx, Default::default()),
+        );
+        e.opener = Some(Arc::new(move |stream| {
+            noted.lock().unwrap().push(shared.opening());
+            serves(stream)
+        }));
+
+        let source = e.open_start();
+        let _ = e.skip_to(source, 1, false, None);
+        let _ = e.open_at(0);
+
+        assert_eq!(*seen.lock().unwrap(), vec![Some(0), Some(1), None]);
+        assert_eq!(
+            e.shared.opening(),
+            None,
+            "and it clears when the open is done"
+        );
     }
 
     #[test]
@@ -4771,6 +4982,7 @@ mod tests {
                 reader: Box::new(Bytes(bytes)),
                 hint: "wav".into(),
                 seekable: true,
+                buffer_whole: true,
             })
         })
     }
@@ -4793,6 +5005,81 @@ mod tests {
         assert_eq!(served_info.duration_secs, file_info.duration_secs);
         assert_eq!(drain_source(&mut served), drain_source(&mut file));
         assert_eq!(e.shared.stream_state(0), Some(StreamState::Live));
+    }
+
+    #[test]
+    fn peaks_from_bytes_in_memory_match_the_files() {
+        let fx = Fixtures::new("peaks-bytes");
+        let path = fx.wav("tone.wav", 1.0);
+        let bytes: Arc<[u8]> = std::fs::read(&path).unwrap().into();
+
+        let from_file = decode_peaks(&path, 64).unwrap();
+        assert_eq!(
+            decode_peaks_bytes(Arc::clone(&bytes), "wav", 64).unwrap(),
+            from_file
+        );
+        assert_eq!(
+            decode_peaks_bytes(bytes, "", 64).unwrap(),
+            from_file,
+            "the probe sniffs"
+        );
+    }
+
+    /// Fails the first read it sees at or past `at`, on whichever stream the
+    /// opener handed out.
+    struct FailsOnce {
+        bytes: Arc<Vec<u8>>,
+        at: u64,
+        failed: Arc<AtomicBool>,
+    }
+
+    impl crate::plugin::ReadAt for FailsOnce {
+        fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+            if offset >= self.at && !self.failed.swap(true, Ordering::Relaxed) {
+                return Err("upstream went away".into());
+            }
+
+            Bytes(self.bytes.to_vec()).read_at(offset, len)
+        }
+    }
+
+    #[test]
+    fn a_plugin_stream_that_fails_mid_track_decodes_the_same_samples() {
+        crate::http::testing::clear_naps();
+        let fx = Fixtures::new("plugin-resume");
+        let path = fx.wav("long.wav", 4.0);
+        let (mut file, _) = Source::open(&local(&path), 48_000, None).expect("it opens");
+
+        let bytes = Arc::new(std::fs::read(&path).unwrap());
+        let failed = Arc::new(AtomicBool::new(false));
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (served_bytes, seen, counted) =
+            (Arc::clone(&bytes), Arc::clone(&failed), Arc::clone(&opens));
+
+        let mut e = engine_over(vec![plugin("long.wav")]);
+        e.opener = Some(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+
+            Ok(Opened {
+                length: Some(served_bytes.len() as u64),
+                reader: Box::new(FailsOnce {
+                    bytes: Arc::clone(&served_bytes),
+                    at: 300_000,
+                    failed: Arc::clone(&seen),
+                }),
+                hint: "wav".into(),
+                seekable: true,
+                buffer_whole: true,
+            })
+        }));
+
+        let (mut served, _, _) = e.open_file_at(0).expect("the stream opens");
+
+        assert_eq!(drain_source(&mut served), drain_source(&mut file));
+        assert!(failed.load(Ordering::Relaxed), "the read really failed");
+        assert_eq!(opens.load(Ordering::Relaxed), 2, "the open and one reopen");
+        assert_eq!(e.shared.stream_state(0), Some(StreamState::Live));
+        assert_eq!(e.shared.take_refusal(), None);
     }
 
     /// Drives the real run loop with a stand-in for the output callback.
@@ -4820,14 +5107,18 @@ mod tests {
         );
         let decode = std::thread::spawn(move || engine.run());
 
-        // Take everything the ring holds and move the clock by it.
+        // Take everything the ring holds and move the clock by it. Counted in
+        // samples: the engine pushes one at a time, so a drain can catch half a
+        // frame, and halving each drain on its own loses it.
+        let mut samples = 0u64;
         let mut heard = 0u64;
         wait_for("the queue to play out", || {
             let n = consumer.slots();
             if let Ok(chunk) = consumer.read_chunk(n) {
                 chunk.commit_all();
             }
-            heard += n as u64 / 2;
+            samples += n as u64;
+            heard = samples / 2;
             shared.frames_consumed.store(heard, Ordering::Relaxed);
 
             shared.ended.load(Ordering::Relaxed)

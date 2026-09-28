@@ -4,7 +4,8 @@
 //! RMS loudness band inside the envelope, a color source (the ramp the
 //! spectrum and VU share), and one row per channel. Peaks come from the
 //! disk cache ([`crate::peaks`]) or a background decode that fills it,
-//! with a gray pulsing stand-in meanwhile. Every change of what the strip
+//! with a gray pulsing stand-in meanwhile. A track with no file shows the
+//! stand-in until its waveform is built from the downloaded stream. Every change of what the strip
 //! shows is a short morph, never a pop; with no track up the panel is
 //! blank and still.
 //!
@@ -267,6 +268,9 @@ enum Peaks {
     Decoding,
     Ready(Arc<PeakLanes>),
     Failed,
+    /// A track with no file and nothing stored: its waveform is decoded
+    /// from the download that plays it, once that's all in.
+    Waiting,
 }
 
 fn display_lanes(set: &[Vec<PeakBin>], split: bool) -> &[Vec<PeakBin>] {
@@ -473,6 +477,8 @@ pub struct WaveformPanel {
     config: WaveformConfig,
     /// The track the peaks, or the running decode, belong to.
     track: Option<PathBuf>,
+    /// The same for a track with no file.
+    remote: Option<TrackKey>,
     peaks: Peaks,
     /// Discards stale decode results when the track changes mid-decode.
     generation: u64,
@@ -555,6 +561,7 @@ impl WaveformPanel {
             state,
             config,
             track: None,
+            remote: None,
             peaks: Peaks::None,
             generation: 0,
             from: Shape::Blank,
@@ -608,6 +615,7 @@ impl WaveformPanel {
     /// full decode that fills it.
     fn start_decode(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.track = Some(path.clone());
+        self.remote = None;
         self.peaks = Peaks::Decoding;
         self.generation += 1;
         let generation = self.generation;
@@ -632,6 +640,81 @@ impl WaveformPanel {
                 }
                 this.peaks = match result {
                     Ok(peaks) => Peaks::Ready(Arc::new(peaks)),
+                    Err(e) => {
+                        log::warn!("waveform decode failed: {e}");
+                        Peaks::Failed
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A track with no file: the stored waveform from an earlier play, or
+    /// the stand-in until the one built from this play's download lands.
+    fn start_remote(&mut self, key: TrackKey, cx: &mut Context<Self>) {
+        self.track = None;
+        self.remote = Some(key.clone());
+        self.peaks = Peaks::Decoding;
+        self.generation += 1;
+        let generation = self.generation;
+
+        cx.spawn(async move |this, cx| {
+            let (source, path) = (
+                key.source.to_string(),
+                key.path.to_string_lossy().into_owned(),
+            );
+            let stored = cx
+                .background_executor()
+                .spawn(async move { peaks::load_remote(&source, &path) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+
+                this.peaks = match stored {
+                    Some(lanes) => Peaks::Ready(Arc::new(lanes)),
+                    None => Peaks::Waiting,
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The whole download is in: decode those bytes off the UI thread, keep
+    /// the result for the next play, and draw it.
+    fn decode_download(
+        &mut self,
+        key: TrackKey,
+        bytes: Arc<[u8]>,
+        hint: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.peaks = Peaks::Decoding;
+        let generation = self.generation;
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let lanes = engine::decode_peaks_bytes(bytes, &hint, PEAK_BINS)?;
+                    peaks::store_remote(&key.source, &key.path.to_string_lossy(), &lanes);
+                    Ok::<_, String>(lanes)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.peaks = match result {
+                    Ok(lanes) => Peaks::Ready(Arc::new(lanes)),
                     Err(e) => {
                         log::warn!("waveform decode failed: {e}");
                         Peaks::Failed
@@ -1683,6 +1766,21 @@ impl WaveformPanel {
             {
                 self.start_decode(path.to_path_buf(), cx);
             }
+
+            // No file to decode: a stored waveform, or one built from the
+            // download. A live stream keeps its live modes instead.
+            if now.path().is_none() && !live && self.remote.as_ref() != Some(&now.key) {
+                self.start_remote(now.key.clone(), cx);
+            }
+
+            // Asked every paint while waiting: two short locks, no disk.
+            if matches!(self.peaks, Peaks::Waiting)
+                && let Some(download) = self.state.player.read(cx).buffered()
+                && let Some(bytes) = download.bytes()
+            {
+                let hint = download.hint().to_string();
+                self.decode_download(now.key.clone(), bytes, hint, cx);
+            }
         }
 
         // Only where a scrobble could happen: the toggle on and a destination
@@ -1729,6 +1827,9 @@ impl WaveformPanel {
 
         // Real peaks only: the placeholder and the error have no track shape.
         let mut hover_duration: Option<f64> = None;
+        // A skip to a track that takes a while to open shows the stand-in, not
+        // the shape of the track being left.
+        let opening = self.state.player.read(cx).opening().is_some();
         let body = match (&now, &self.peaks) {
             // The decoded shape morphs into whatever the live mode draws.
             (Some(_), _) if live => match self.config.live {
@@ -1761,6 +1862,11 @@ impl WaveformPanel {
                         .into_any_element()
                 }
             },
+            (_, _) if opening => {
+                self.retarget(Shape::Placeholder);
+                self.strip(None, None, Vec::new(), Vec::new(), Vec::new())
+                    .into_any_element()
+            }
             // Held through the blink so the next track morphs from it.
             (None, _) if between_tracks => self
                 .strip(marker, ab, marks.clone(), cues.clone(), Vec::new())
@@ -1779,7 +1885,7 @@ impl WaveformPanel {
                 self.message(rox_i18n::t!("waveform-unavailable"))
                     .into_any_element()
             }
-            (Some(_), Peaks::Decoding) => {
+            (Some(_), Peaks::Decoding | Peaks::Waiting) => {
                 self.retarget(Shape::Placeholder);
                 self.strip(marker, ab, marks.clone(), cues.clone(), Vec::new())
                     .into_any_element()

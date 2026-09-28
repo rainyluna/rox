@@ -15,7 +15,7 @@ use rusqlite::{Connection, params};
 
 use crate::cue::{self, TrackKey};
 use crate::replaygain::ReplayGain;
-use crate::{TrackRow, playlists, stations, store};
+use crate::{TrackRow, listens, playlists, stations, store};
 
 /// The collection single picks live in. Node ids from a plugin are never
 /// empty, so it can't collide with a synced one.
@@ -111,6 +111,7 @@ pub fn pick(
     upsert(&tx, source, tracks)?;
     hold(&tx, source, PICKED, tracks)?;
     playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
     tx.commit()?;
 
     let id = cue::source_id(source);
@@ -144,6 +145,7 @@ pub fn set_collection(
 
     let pruned = prune_orphans(&tx, source)?;
     playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
     tx.commit()?;
 
     Ok(pruned)
@@ -166,6 +168,7 @@ pub fn drop_collection(
 
     let pruned = prune_orphans(&tx, source)?;
     playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
     tx.commit()?;
 
     Ok(pruned)
@@ -185,6 +188,7 @@ pub fn remove_track(conn: &mut Connection, source: &str, path: &str) -> rusqlite
         params![source, path],
     )?;
     playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
     tx.commit()
 }
 
@@ -197,6 +201,7 @@ pub fn remove_source(conn: &mut Connection, source: &str) -> rusqlite::Result<us
     tx.execute("DELETE FROM source_members WHERE source = ?1", [source])?;
     let removed = tx.execute("DELETE FROM tracks WHERE source = ?1", [source])?;
     playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
     tx.commit()?;
 
     Ok(removed)

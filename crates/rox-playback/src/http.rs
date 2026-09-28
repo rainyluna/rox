@@ -37,8 +37,10 @@ use std::time::Instant;
 use rox_library::locator::Remote;
 use symphonia::core::io::MediaSource;
 
+use crate::download::{Buffered, Download};
 use crate::icy::IcyReader;
 use crate::icy::TitleSink;
+use crate::plugin::{PluginSource, ReadAt};
 use crate::shared::StreamSink;
 use crate::shared::StreamState;
 use crate::tape::Feed;
@@ -53,7 +55,7 @@ const WINDOW: usize = 1 << 20;
 /// Waits before each reconnect. The first is free (servers cycle connections),
 /// then doubling, so rate limiters aren't hammered. Seven seconds total rides
 /// out a mount restart without holding the queue long.
-const BACKOFF: [Duration; 4] = [
+pub(crate) const BACKOFF: [Duration; 4] = [
     Duration::from_secs(0),
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -61,12 +63,12 @@ const BACKOFF: [Duration; 4] = [
 ];
 
 /// How long the feed can keep retrying after a press.
-const NAP_STEP: Duration = Duration::from_millis(250);
+pub(crate) const NAP_STEP: Duration = Duration::from_millis(250);
 
 /// Wait out a backoff in steps, true if a command arrived. Relaxed: the flag
 /// only hints at the channel, which synchronises itself. Tests record the
 /// steps instead of sleeping.
-fn nap(wait: Duration, interrupt: &AtomicBool) -> bool {
+pub(crate) fn nap(wait: Duration, interrupt: &AtomicBool) -> bool {
     let mut left = wait;
     while !left.is_zero() {
         if interrupt.load(Ordering::Relaxed) {
@@ -324,6 +326,8 @@ pub fn extension_for(content_type: &str) -> Option<&'static str> {
 pub struct Opened {
     pub source: Box<dyn MediaSource>,
     pub tape: Option<Arc<Tape>>,
+    /// Set for a file downloaded whole ([`crate::download`]).
+    pub buffered: Option<Arc<dyn Buffered>>,
 }
 
 /// Open `remote`. Blocking: one request, whose headers say whether ranges
@@ -408,6 +412,38 @@ fn open_with(
             Opened {
                 source: Box::new(source),
                 tape: Some(tape),
+                buffered: None,
+            },
+            station,
+        ));
+    }
+
+    // A file the server serves by range, with a length and no interleaved
+    // metadata, is downloaded whole, the way a plugin's stream is.
+    let whole = crate::download::whole(
+        resp.content_range_total,
+        resp.status == 206 && resp.metaint.is_none(),
+    );
+    if let Some(length) = whole {
+        let hint = match remote.hint.is_empty() {
+            false => remote.hint.clone(),
+            true => extension_for(&station.content_type)
+                .unwrap_or_default()
+                .to_string(),
+        };
+        let ranged = Ranged {
+            http,
+            url: remote.url.clone(),
+            headers: remote.headers.clone(),
+            body: std::sync::Mutex::new(Some((0, resp.body))),
+        };
+        let (download, buffered) = Download::start(Box::new(ranged), length, &hint)?;
+
+        return Ok((
+            Opened {
+                source: Box::new(PluginSource::new(Box::new(download), Some(length), true)),
+                tape: None,
+                buffered: Some(buffered),
             },
             station,
         ));
@@ -419,9 +455,85 @@ fn open_with(
         Opened {
             source: Box::new(source),
             tape: None,
+            buffered: None,
         },
         station,
     ))
+}
+
+/// A file's bytes by offset for its download: one ranged response read front
+/// to back, reopened only when a read asks for somewhere else. A dropped
+/// connection gets one reopen before the error goes up.
+struct Ranged {
+    http: Arc<dyn Http>,
+    url: String,
+    headers: Vec<(String, String)>,
+    /// Where the open body is, and the body.
+    body: std::sync::Mutex<Option<(u64, Box<dyn Read + Send + Sync>)>>,
+}
+
+impl Ranged {
+    fn open_at(&self, at: u64) -> Result<Box<dyn Read + Send + Sync>, String> {
+        let resp = self.http.get(&self.url, &self.headers, Some(at))?;
+        if resp.status >= 300 {
+            return Err(format!("server returned {}", resp.status));
+        }
+
+        // Asked for an offset and got a 200: the server ignored the range, and
+        // reading on would hand over the head of the file.
+        if at > 0 && resp.status != 206 {
+            return Err(format!("server ignored the range request at byte {at}"));
+        }
+
+        Ok(resp.body)
+    }
+}
+
+impl ReadAt for Ranged {
+    fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let mut body = self.body.lock().map_err(|_| "the connection is poisoned")?;
+        let mut out = vec![0u8; len];
+
+        for attempt in 0..2 {
+            if body.as_ref().map(|(at, _)| *at) != Some(offset) {
+                *body = Some((offset, self.open_at(offset)?));
+            }
+            let Some((at, reader)) = body.as_mut() else {
+                continue;
+            };
+
+            let mut n = 0;
+            let failed = loop {
+                if n == len {
+                    break None;
+                }
+                match reader.read(&mut out[n..]) {
+                    Ok(0) => break None,
+                    Ok(got) => n += got,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => break Some(e),
+                }
+            };
+
+            *at += n as u64;
+            match failed {
+                // What came before the drop still counts.
+                Some(_) if n > 0 => {}
+                Some(e) if attempt == 0 => {
+                    log::debug!("file download: connection dropped ({e}), reopening");
+                    *body = None;
+                    continue;
+                }
+                Some(e) => return Err(e.to_string()),
+                None => {}
+            }
+
+            out.truncate(n);
+            return Ok(out);
+        }
+
+        Err("the connection dropped twice".into())
+    }
 }
 
 /// A file or fixed-length stream, read on demand with a window for the
@@ -498,36 +610,90 @@ fn spawn_feed(
     ));
 
     let weak = Arc::downgrade(&tape);
-    let body = wrap_live(resp, &weak);
-    let url = remote.url.clone();
-    let headers = remote.headers.clone();
+    let upstream = Station {
+        http,
+        url: remote.url.clone(),
+        headers: remote.headers.clone(),
+        body: wrap_live(resp, &weak),
+        tape: weak,
+    };
+
+    feed_tape(tape, Box::new(upstream), "station", on_stream, interrupt)
+}
+
+/// What a live feed pulls from: a station's socket or a plugin's stream.
+/// Both are read strictly in order and rejoined at the live edge.
+pub(crate) trait Upstream: Send {
+    /// A clean zero is a drop, not an end: a broadcast never ends.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// A fresh connection at the live edge. A failure goes round the
+    /// feed's loop like a dead read.
+    fn reconnect(&mut self) -> Result<(), String>;
+}
+
+struct Station {
+    http: Arc<dyn Http>,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Box<dyn Read + Send + Sync>,
+    /// For the ICY reader to mark titles on.
+    tape: Weak<Tape>,
+}
+
+impl Upstream for Station {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.body.read(buf)
+    }
+
+    // No range: a broadcast has no offset to name, so the tape marks the join.
+    fn reconnect(&mut self) -> Result<(), String> {
+        let resp = self.http.get(&self.url, &self.headers, None)?;
+        if resp.status >= 300 {
+            return Err(format!("server returned {}", resp.status));
+        }
+
+        self.body = wrap_live(resp, &self.tape);
+
+        Ok(())
+    }
+}
+
+/// Put a thread on `upstream`, taping into `tape`, and hand the tape back.
+/// `what` names the upstream in the log.
+pub(crate) fn feed_tape(
+    tape: Arc<Tape>,
+    upstream: Box<dyn Upstream>,
+    what: &'static str,
+    on_stream: StreamSink,
+    interrupt: Arc<AtomicBool>,
+) -> Result<Arc<Tape>, String> {
+    let weak = Arc::downgrade(&tape);
 
     // Carry the test's retry bookkeeping onto the feed thread.
     #[cfg(test)]
     let probe = testing::probe();
 
     std::thread::Builder::new()
-        .name("station".into())
+        .name(what.into())
         .spawn(move || {
             #[cfg(test)]
             testing::adopt(probe);
 
-            feed(http, url, headers, body, weak, on_stream, interrupt);
+            feed(upstream, what, weak, on_stream, interrupt);
         })
-        .map_err(|e| format!("spawn station thread: {e}"))?;
+        .map_err(|e| format!("spawn {what} thread: {e}"))?;
 
     Ok(tape)
 }
 
-/// Pull the body into the tape until the tape goes away. `Ok(0)` is a drop,
-/// never an end. Reconnects are bounded by [`BACKOFF`], then the tape is
-/// marked done and the engine skips the entry; endless would be a stall the
-/// UI can't escape. A waiting command abandons them too.
+/// Pull the upstream into the tape until the tape goes away. `Ok(0)` is a
+/// drop, never an end. Reconnects are bounded by [`BACKOFF`], then the tape
+/// is marked done and the engine skips the entry; endless would be a stall
+/// the UI can't escape. A waiting command abandons them too.
 fn feed(
-    http: Arc<dyn Http>,
-    url: String,
-    headers: Vec<(String, String)>,
-    mut body: Box<dyn Read + Send + Sync>,
+    mut upstream: Box<dyn Upstream>,
+    what: &str,
     tape: Weak<Tape>,
     on_stream: StreamSink,
     interrupt: Arc<AtomicBool>,
@@ -537,8 +703,8 @@ fn feed(
     let mut read_any = false;
 
     loop {
-        let lost = match body.read(&mut buf) {
-            Ok(0) => io::Error::other("the station closed the connection"),
+        let lost = match upstream.read(&mut buf) {
+            Ok(0) => io::Error::other(format!("the {what} closed the connection")),
 
             Ok(n) => {
                 // Every reader is gone: skipped, hung up, or the session ended.
@@ -550,12 +716,12 @@ fn feed(
 
                 if !read_any {
                     read_any = true;
-                    log::debug!("stream open: first byte off the station");
+                    log::debug!("stream open: first byte off the {what}");
                 }
 
                 // Only worth saying if we'd said it dropped.
                 if attempts > 0 {
-                    log::info!("station recovered after {attempts} attempt(s)");
+                    log::info!("{what} recovered after {attempts} attempt(s)");
                     tape.set_feed(Feed::Live);
                     (on_stream)(StreamState::Live);
                     attempts = 0;
@@ -572,7 +738,7 @@ fn feed(
         };
 
         let Some(wait) = BACKOFF.get(attempts).copied() else {
-            log::warn!("station gone after {attempts} attempts: {lost}");
+            log::warn!("{what} gone after {attempts} attempts: {lost}");
             live.set_feed(Feed::Done);
             (on_stream)(StreamState::Dropped);
 
@@ -583,7 +749,7 @@ fn feed(
         live.set_feed(Feed::Reconnecting);
         (on_stream)(StreamState::Reconnecting);
         log::info!(
-            "station dropped ({lost}), reconnecting in {:?} (attempt {} of {})",
+            "{what} dropped ({lost}), reconnecting in {:?} (attempt {} of {})",
             wait,
             attempts,
             BACKOFF.len()
@@ -593,7 +759,7 @@ fn feed(
         // A command already waiting interrupts even a zero wait. Giving up publishes
         // the same state as running out of attempts.
         if nap(wait, &interrupt) {
-            log::info!("station retry abandoned: a command is waiting");
+            log::info!("{what} retry abandoned: a command is waiting");
             if let Some(live) = tape.upgrade() {
                 live.set_feed(Feed::Done);
             }
@@ -602,21 +768,16 @@ fn feed(
             return;
         }
 
-        // A reconnect with no response goes round the loop like a dead read. No
-        // range: a broadcast has no offset to name, so the tape marks the join.
-        match http.get(&url, &headers, None) {
-            Ok(resp) if resp.status < 300 => {
+        match upstream.reconnect() {
+            Ok(()) => {
                 let Some(live) = tape.upgrade() else {
                     return;
                 };
 
                 live.splice();
-                body = wrap_live(resp, &tape);
             }
 
-            Ok(resp) => log::warn!("station reconnect failed: server returned {}", resp.status),
-
-            Err(e) => log::warn!("station reconnect failed: {e}"),
+            Err(e) => log::warn!("{what} reconnect failed: {e}"),
         }
     }
 }
@@ -1611,6 +1772,93 @@ mod tests {
             Some(&StreamState::Dropped),
             "given up on, the same as running out of attempts"
         );
+    }
+
+    fn whole_open(fake: Arc<Fake>) -> Opened {
+        let (opened, _) = open_with(
+            fake,
+            &remote(false),
+            no_titles(),
+            crate::shared::no_stream(),
+            uninterrupted(),
+            600,
+        )
+        .expect("it opens");
+
+        opened
+    }
+
+    fn wait_whole(buffered: &Arc<dyn Buffered>) -> Arc<[u8]> {
+        let mut whole = None;
+        wait_for("the download to finish", || {
+            whole = buffered.bytes();
+            whole.is_some()
+        });
+
+        whole.unwrap()
+    }
+
+    #[test]
+    fn a_file_served_by_range_downloads_whole() {
+        let fake = Fake::serving(bytes(700_000), "audio/mp4");
+        let mut opened = whole_open(fake.clone());
+        let buffered = opened
+            .buffered
+            .clone()
+            .expect("a ranged file with a length");
+
+        assert_eq!(read_n(&mut opened.source, 700_000), bytes(700_000));
+        assert_eq!(&wait_whole(&buffered)[..], &bytes(700_000)[..]);
+        assert_eq!(buffered.ranges(), vec![(0, 700_000)]);
+        assert_eq!(fake.ask_count(), 1, "one response read front to back");
+    }
+
+    #[test]
+    fn a_seek_past_the_download_asks_for_a_range_there() {
+        let fake = Fake::serving(bytes(3_000_000), "audio/mp4");
+        let mut opened = whole_open(fake.clone());
+
+        read_n(&mut opened.source, 16);
+        opened.source.seek(SeekFrom::Start(2_500_000)).unwrap();
+        assert_eq!(
+            read_n(&mut opened.source, 64),
+            bytes(3_000_000)[2_500_000..][..64]
+        );
+
+        let asks = fake.asks.lock().unwrap();
+        assert!(
+            asks.iter()
+                .any(|ask| ask.range.is_some_and(|at| at >= 2_000_000)),
+            "{asks:?}"
+        );
+        drop(asks);
+
+        let whole = wait_whole(opened.buffered.as_ref().unwrap());
+        assert_eq!(
+            &whole[..],
+            &bytes(3_000_000)[..],
+            "and the part it jumped over filled in"
+        );
+    }
+
+    #[test]
+    fn a_dropped_connection_reopens_where_the_download_was() {
+        let mut fake = Fake::serving(bytes(900_000), "audio/mp4");
+        Arc::get_mut(&mut fake).unwrap().fail_after = 300_000;
+        let mut opened = whole_open(fake.clone());
+
+        assert_eq!(read_n(&mut opened.source, 900_000), bytes(900_000));
+        assert!(fake.ask_count() >= 3, "each drop reopened at its byte");
+    }
+
+    #[test]
+    fn a_server_that_ignores_ranges_plays_as_it_arrives() {
+        let mut fake = Fake::serving(bytes(10_000), "audio/mpeg");
+        Arc::get_mut(&mut fake).unwrap().ranged = false;
+
+        let mut opened = whole_open(fake);
+        assert!(opened.buffered.is_none());
+        assert_eq!(read_n(&mut opened.source, 10_000), bytes(10_000));
     }
 
     /// A file's zero stays an end.

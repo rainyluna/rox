@@ -280,14 +280,17 @@ impl EventEmitter<LibraryJob> for Library {}
 impl Library {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let db_path = rox_core::settings::data_dir().join("library.db");
-        let (conn, status) =
+        let (mut conn, status) =
             match store::open(&db_path).and_then(|conn| store::init_schema(&conn).map(|_| conn)) {
                 Ok(conn) => (Some(conn), SharedString::default()),
                 Err(e) => (None, SharedString::from(format!("library db: {e}"))),
             };
         // Favourites is the one default playlist, so the heart always has
         // somewhere to write.
-        if let Some(conn) = &conn {
+        if let Some(conn) = &mut conn {
+            // Before the first load, so a source removed while rox was closed
+            // never shows.
+            crate::sources::depart_at_startup(conn);
             let _ = playlists::ensure_favourites(conn, now_secs());
             // Older builds could leave double rows in favourites.
             let _ = playlists::dedupe_favourites(conn, now_secs());

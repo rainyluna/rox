@@ -1184,6 +1184,42 @@ impl Player {
             .collect()
     }
 
+    /// The track a skip, jump or queue start is opening, while the open runs.
+    /// A gapless pre-decode never shows here: nobody is waiting on it.
+    pub fn opening(&self) -> Option<TrackKey> {
+        let session = self.session.as_ref()?;
+        let idx = session.shared.opening()?;
+
+        self.key_at(idx)
+    }
+
+    /// The audible track's download, while it lasts: a plugin stream or a
+    /// server's file being fetched whole. None for anything else.
+    pub fn buffered(&self) -> Option<Arc<dyn rox_playback::download::Buffered>> {
+        let session = self.session.as_ref()?;
+        let (track, _) = session.shared.position(session.device_rate)?;
+
+        session.shared.buffered(track)
+    }
+
+    /// The next `n` entries after the audible one, explicit or not: what the
+    /// engine will open next, for a source that wants to open them early.
+    pub fn upcoming_locators(&self, n: usize) -> Vec<Locator> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let snap = session.shared.queue_snapshot();
+        let start = self.audible_index(&snap).map(|i| i + 1).unwrap_or(0);
+
+        snap.entries
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .take(n)
+            .map(|e| e.locator.clone())
+            .collect()
+    }
+
     pub fn queued_count(&self) -> usize {
         self.queued().len()
     }

@@ -738,10 +738,12 @@ impl From<&SeekConfig> for StripLook {
 ///
 /// A dimmed look halves every alpha for a paused station. Nothing drops
 /// out: the tape behind the playhead can still be scrubbed while the
-/// station is hung up.
+/// station is hung up. `buffered` is what of a plugin track is downloaded,
+/// as fractions.
 #[allow(clippy::too_many_arguments)]
 fn paint_strip(
     progress: f32,
+    buffered: &[(f32, f32)],
     marker: Option<f32>,
     ab: Option<(f32, Option<f32>)>,
     marks: &[bookmark_ui::Mark],
@@ -771,6 +773,26 @@ fn paint_strip(
         )
         .corner_radii(px(radius)),
     );
+    // Downloaded ahead of the playhead, the way a streaming player shows it:
+    // between the bare line and the played side.
+    for (start, end) in buffered {
+        let from = start.clamp(0.0, 1.0) * w;
+        let width = end.clamp(0.0, 1.0) * w - from;
+        if width <= 0.0 {
+            continue;
+        }
+
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    point(bounds.origin.x + px(from), bounds.origin.y + px(line_y)),
+                    size(px(width), px(line_h)),
+                ),
+                palette::alpha(palette::accent(), if dim { 0x2a } else { 0x55 }),
+            )
+            .corner_radii(px(radius.min(width / 2.0))),
+        );
+    }
     window.paint_quad(
         fill(
             Bounds::new(
@@ -803,6 +825,21 @@ fn paint_strip(
     bookmark_ui::paint_marks(marks, 1.0, bounds, window);
     cue_ui::paint_marks(cues, 1.0, bounds, window);
     paint_playhead(head_x, look, bounds, window);
+}
+
+/// The audible track's download as fractions of its length. A file's bytes
+/// map to its time only roughly, which is how any player shows it.
+fn buffered_fractions(player: &Player) -> Vec<(f32, f32)> {
+    let Some(download) = player.buffered() else {
+        return Vec::new();
+    };
+    let length = download.length().max(1) as f64;
+
+    download
+        .ranges()
+        .into_iter()
+        .map(|(start, end)| ((start as f64 / length) as f32, (end as f64 / length) as f32))
+        .collect()
 }
 
 /// Full height, capped when configured, or the line's height when it
@@ -1676,7 +1713,14 @@ impl SeekStripPanel {
             && self.config.live_sweep
             && self.config.live_lead_in != LeadIn::Hidden
             && shift.as_ref().is_some_and(|shift| shift_held(shift) < 1.0);
-        if waiting || sweeping {
+        // What of a plugin track is downloaded. Frames while it fills, so the
+        // bar grows through a pause too.
+        let buffered = match live {
+            true => Vec::new(),
+            false => buffered_fractions(self.state.player.read(cx)),
+        };
+        let filling = !buffered.is_empty() && buffered != [(0.0, 1.0)];
+        if waiting || sweeping || filling {
             window.request_animation_frame();
         }
         let phase = self.epoch.elapsed().as_secs_f32();
@@ -1786,6 +1830,7 @@ impl SeekStripPanel {
                         let cues = cues.clone();
                         let songs = song_marks.clone();
                         let gaps = gap_marks.clone();
+                        let buffered = buffered.clone();
                         move |bounds, _, window, _| {
                             // Nothing held yet: the flat bar, and no drag to arm.
                             if live && shift.is_none() {
@@ -1801,7 +1846,8 @@ impl SeekStripPanel {
                                 }
 
                                 None => paint_strip(
-                                    progress, marker, ab, &marks, &cues, look, bounds, window,
+                                    progress, &buffered, marker, ab, &marks, &cues, look, bounds,
+                                    window,
                                 ),
                             }
 

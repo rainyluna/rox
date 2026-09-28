@@ -161,6 +161,19 @@ A failed open or read publishes a refusal naming the source through the same
 (`engine.rs:853-859`). A dead plugin ends its own track and never stops local playback.
 The host question this ADR left open is taken up by ADR 30.
 
+**Amended 2026-09-27: a failed read recovers before it refuses.** The paragraph above
+ends a plugin's track on its first failed read. A failed open still refuses at once, but
+a read that fails mid-track now reopens the stream through the opener with radio's
+backoff (`BACKOFF` in `rox-playback/src/http.rs`), and the transport shows Reconnecting
+on each attempt. A host restart after a crash counts as one of those attempts. A
+seekable stream of known length resumes at the byte it failed on, and only when the
+reopened stream has the same length: a different length is a different encode, and two
+encodes are never spliced. A live stream rejoins at the live edge and marks a gap in its
+buffer, as a station's reconnect does. The refusal naming the source goes out only when
+the attempts run out or the stream came back different, and then the track ends. A dead
+plugin still never stops local playback. Live plugin streams play from a station's feed
+thread and tape, so pause, timeshift and the idle hang-up behave as they do for radio.
+
 **Amended 2026-09-26: a third source shape, rows by membership.** This ADR covers two
 shapes: a catalog a client syncs whole (Subsonic), and rows with no client behind them
 (radio). A plugin source is a third. It has no whole catalog to list. Its rows come from

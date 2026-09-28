@@ -296,6 +296,30 @@ fn prune_for(conn: &mut Connection, accounts: &AccountsState) -> usize {
     drop_departed(conn, &kept_ids(accounts))
 }
 
+/// The departure pass, run once per launch on the library's own connection
+/// before its first projection. `accounts.json` can be edited by hand while
+/// rox is closed, and without this a library with no Subsonic server never
+/// prunes: a removed plugin's rows would sit hidden forever.
+pub fn depart_at_startup(conn: &mut Connection) -> usize {
+    static DONE: AtomicBool = AtomicBool::new(false);
+
+    depart_once(conn, &accounts_state(), &DONE)
+}
+
+fn depart_once(conn: &mut Connection, accounts: &AccountsState, done: &AtomicBool) -> usize {
+    // A sync prunes on its own, and two writers on one database is a busy error.
+    if syncing() || done.swap(true, Ordering::Relaxed) {
+        return 0;
+    }
+
+    let gone = prune_for(conn, accounts);
+    if gone > 0 {
+        log::info!("sources: {gone} rows of departed sources removed at startup");
+    }
+
+    gone
+}
+
 /// What the settings page calls after an address, login, or switch changes:
 /// the old address's rows go now, and the catalog reloads, since the
 /// switches decide which rows browse ([`hidden_sources`]).
@@ -689,8 +713,14 @@ fn fetch_cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
         Origin::Plugin => {
             let thumb = format!("{source}|{key}");
 
-            // Stored thumbs only. Fetching a miss is plugins::cover's job.
-            rox_library::thumbs::thumbnail(thumbs, Path::new(&thumb))
+            if let Some(stored) = rox_library::thumbs::thumbnail(thumbs, Path::new(&thumb)) {
+                return Some(stored);
+            }
+
+            let bytes = crate::plugins::cover(&source, key)?;
+            let thumbs = thumbs.lock().ok()?;
+
+            rox_library::thumbs::store_bytes(&thumbs, &bytes, &thumb)
         }
 
         Origin::Local | Origin::Radio => None,
@@ -1089,6 +1119,47 @@ mod tests {
         assert_eq!(count(&conn, "plugin:demo"), 0);
         assert_eq!(count(&conn, "plugin:other"), 2);
         assert_eq!(count(&conn, "local"), 1);
+    }
+
+    #[test]
+    fn a_record_removed_while_closed_departs_on_the_next_start() {
+        let mut conn = library(&["plugin:demo", "plugin:other"]);
+        let done = AtomicBool::new(false);
+
+        assert_eq!(
+            depart_once(&mut conn, &state(&[], &[plugin("other", true)]), &done),
+            2
+        );
+        assert_eq!(count(&conn, "plugin:demo"), 0);
+        assert_eq!(count(&conn, "plugin:other"), 2);
+
+        // Once per launch: a second library in the same run leaves it be.
+        let mut again = library(&["plugin:demo"]);
+        assert_eq!(
+            depart_once(&mut again, &state(&[], &[plugin("other", true)]), &done),
+            0
+        );
+        assert_eq!(count(&again, "plugin:demo"), 2);
+    }
+
+    #[test]
+    fn no_records_at_all_departs_nothing_under_plugins() {
+        let mut conn = library(&["plugin:demo"]);
+
+        assert_eq!(
+            depart_once(&mut conn, &state(&[], &[]), &AtomicBool::new(false)),
+            0
+        );
+        assert_eq!(count(&conn, "plugin:demo"), 2);
+    }
+
+    #[test]
+    fn a_disabled_records_rows_stay_through_the_start() {
+        let mut conn = library(&["plugin:demo"]);
+
+        let left = state(&[], &[plugin("demo", false)]);
+        assert_eq!(depart_once(&mut conn, &left, &AtomicBool::new(false)), 0);
+        assert_eq!(count(&conn, "plugin:demo"), 2);
     }
 
     #[test]

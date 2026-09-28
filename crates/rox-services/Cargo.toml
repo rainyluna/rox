@@ -11,6 +11,7 @@ rox-i18n = { path = "../rox-i18n" }
 rox-design = { path = "../rox-design" }
 rox-library = { path = "../rox-library" }
 rox-playback = { path = "../rox-playback" }
+rox-plugins = { path = "../rox-plugins" }
 rox-net = { path = "../rox-net" }
 rox-viz = { path = "../rox-viz" }
 gpui = { workspace = true }

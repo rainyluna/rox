@@ -148,14 +148,16 @@ fn remember_filed(filed: &mut VecDeque<(TrackKey, IcyTitle)>, song: (TrackKey, I
     filed.push_back(song);
 }
 
-/// ADR 30: a plugin row scrobbles only when its record allows it, and one
-/// with no record never does. Only a plugin row pays for the settings read.
+/// ADR 30: a plugin row scrobbles only when its manifest declares it and its
+/// record leaves it on. One with no record, or not loaded, never does. Only a
+/// plugin row pays for the settings read.
 fn may_scrobble(key: &TrackKey) -> bool {
     if key.origin() != Origin::Plugin {
         return true;
     }
 
     plugin_scrobbles(&Settings::load().accounts.plugins, &key.source)
+        && crate::plugins::declares_scrobble(&key.source)
 }
 
 fn plugin_scrobbles(records: &[PluginRecord], source: &str) -> bool {

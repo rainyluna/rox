@@ -3562,6 +3562,7 @@ transport-favourite-nothing = お気に入りにするものがありません
 transport-favourite-remove = お気に入りから削除
 transport-live = ライブ
 transport-live-opening = 局に接続中
+transport-opening-track = トラックを開いています
 transport-live-reconnecting = ストリームが切れました。再接続中
 transport-live-dropped = ストリームが失われました
 transport-live-jump = ライブに追いつく

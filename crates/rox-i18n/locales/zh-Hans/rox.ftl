@@ -3561,6 +3561,7 @@ transport-favourite-nothing = 没有可收藏的
 transport-favourite-remove = 从收藏移除
 transport-live = 直播
 transport-live-opening = 正在连接电台
+transport-opening-track = 正在打开曲目
 transport-live-reconnecting = 流已中断，正在重连
 transport-live-dropped = 流已断开
 transport-live-jump = 跳到直播

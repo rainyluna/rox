@@ -253,70 +253,6 @@ fn confirm_close_locked(
     });
 }
 
-/// A stand-in plugin host for debug builds: with `ROX_PLUGIN_FILES` naming a
-/// directory, a `plugin:` row plays `<dir>/<key>` off disk. WT-P4 deletes
-/// this when the real host installs its opener.
-#[cfg(debug_assertions)]
-fn install_plugin_files_opener() {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    use std::path::{Component, Path, PathBuf};
-    use std::sync::{Arc, Mutex};
-
-    use rox_playback::plugin::{Opened, ReadAt};
-
-    struct FileAt(Mutex<std::fs::File>);
-
-    impl ReadAt for FileAt {
-        fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-            let mut file = self.0.lock().map_err(|e| e.to_string())?;
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|e| e.to_string())?;
-
-            let mut out = Vec::with_capacity(len);
-            file.by_ref()
-                .take(len as u64)
-                .read_to_end(&mut out)
-                .map_err(|e| e.to_string())?;
-
-            Ok(out)
-        }
-    }
-
-    let Some(dir) = std::env::var_os("ROX_PLUGIN_FILES").map(PathBuf::from) else {
-        return;
-    };
-    if !dir.is_dir() {
-        log::warn!("ROX_PLUGIN_FILES is not a directory: {}", dir.display());
-        return;
-    }
-
-    log::info!("serving plugin streams from {}", dir.display());
-
-    rox_services::openers::install(Arc::new(move |stream| {
-        // A key is plugin data; this one never reads outside the directory.
-        let key = Path::new(&stream.key);
-        if !key.components().all(|c| matches!(c, Component::Normal(_))) {
-            return Err(format!("{} leaves the plugin files directory", stream.key));
-        }
-
-        let path = dir.join(key);
-        let file = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let length = file.metadata().map_err(|e| e.to_string())?.len();
-        let hint = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-            .to_string();
-
-        Ok(Opened {
-            reader: Box::new(FileAt(Mutex::new(file))),
-            hint,
-            length: Some(length),
-            seekable: true,
-        })
-    }));
-}
-
 /// Rein in glibc's malloc before the thread pools exist. The default arena
 /// per contending thread left a dozen arenas holding freed heap, about 50 MB
 /// idle, and made workspace applies look like a leak. Four arenas and 1 MB
@@ -475,8 +411,6 @@ fn main() {
         providers::set_lastfm_art_online(settings.accounts.providers.lastfm_art);
         providers::set_artist_online(settings.accounts.providers.artist);
         rox_services::sources::install_registry();
-        #[cfg(debug_assertions)]
-        install_plugin_files_opener();
         // Repoint the menu entry of an AppImage that moved.
         startup::desktop_integration::heal();
         // Inline, not spawned: the update check below may start a download whose

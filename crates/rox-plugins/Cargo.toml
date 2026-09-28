@@ -1,0 +1,30 @@
+[package]
+name = "rox-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The plugin host: manifest, folder hash, wire and subprocess (ADR 30). No
+# sibling rox crate, so the host tests on its own and the plugin wire versions
+# apart from the control socket's.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Folder hashes, same line as the rest of the workspace.
+sha2 = "0.10"
+# `source.read` and `source.cover` carry bytes as base64 on the wire.
+base64 = "0.22"
+log = "0.4"
+
+# Signals the plugin's process group at shutdown.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# A job object with kill-on-close, so a plugin's own children die with it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

@@ -3729,6 +3729,7 @@ transport-favourite-nothing = Немає чого додати в улюблен
 transport-favourite-remove = Прибрати з улюбленого
 transport-live = ЕФІР
 transport-live-opening = Підключення до станції
+transport-opening-track = Відкриваємо трек
 transport-live-reconnecting = Потік обірвався, триває перепідключення
 transport-live-dropped = Потік зник
 transport-live-jump = Перейти до ефіру
