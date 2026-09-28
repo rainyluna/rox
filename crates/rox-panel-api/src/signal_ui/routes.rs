@@ -524,9 +524,7 @@ mod tests {
 
     #[test]
     fn the_field_names_what_the_route_is_on() {
-        // Another test in this binary flips the locale under the lock.
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         let pool = vec![signal(1, "Kick")];
         let mut riding = route("slot0");
         riding.signal = 1;

@@ -135,8 +135,6 @@ mod tests {
     /// on a machine whose OS locale isn't English.
     #[test]
     fn spans_read_in_two_units() {
-        // Both sides resolve the locale separately, so hold the lock.
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
         assert_eq!(fmt_span(0), unit("span-seconds", 0));
         assert_eq!(fmt_span(45), unit("span-seconds", 45));
         assert_eq!(
@@ -160,20 +158,17 @@ mod tests {
 
     #[test]
     fn spans_read_like_english_in_english() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         assert_eq!(fmt_span(0), "0 seconds");
         assert_eq!(fmt_span(90), "1 minute, 30 seconds");
         assert_eq!(fmt_span(86_400 * 23), "3 weeks, 2 days");
-        rox_i18n::set_locale(Some("de"));
+        rox_i18n::pin_thread_locale("de");
         assert_eq!(fmt_span(90), "1 Minute, 30 Sekunden");
         assert_eq!(fmt_span(86_400 * 23), "3 Wochen, 2 Tage");
-        rox_i18n::set_locale(None);
     }
 
     #[test]
     fn ages_read_in_one_unit() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
         assert_eq!(fmt_ago(-5), rox_i18n::t!("ago-just-now"));
         assert_eq!(fmt_ago(59), rox_i18n::t!("ago-just-now"));
         assert_eq!(fmt_ago(60), rox_i18n::t!("ago-minutes", count = 1u64));

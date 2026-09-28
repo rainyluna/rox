@@ -142,7 +142,7 @@ fn create_context(
 
     #[cfg(target_os = "macos")]
     {
-        return Err(step_error("creating the OpenGL context", &core_error));
+        Err(step_error("creating the OpenGL context", &core_error))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -179,8 +179,8 @@ fn create_display(window_handle: Option<RawWindowHandle>) -> Result<Display, Str
         let handle = raw_window_handle::RawDisplayHandle::AppKit(
             raw_window_handle::AppKitDisplayHandle::new(),
         );
-        return unsafe { Display::new(handle, DisplayApiPreference::Cgl) }
-            .map_err(|e| step_error("opening the graphics display", &e));
+        unsafe { Display::new(handle, DisplayApiPreference::Cgl) }
+            .map_err(|e| step_error("opening the graphics display", &e))
     }
 
     // WGL takes the window's device context from this handle, not the one on
@@ -190,8 +190,8 @@ fn create_display(window_handle: Option<RawWindowHandle>) -> Result<Display, Str
         let handle = raw_window_handle::RawDisplayHandle::Windows(
             raw_window_handle::WindowsDisplayHandle::new(),
         );
-        return unsafe { Display::new(handle, DisplayApiPreference::Wgl(window_handle)) }
-            .map_err(|e| step_error("opening the graphics display", &e));
+        unsafe { Display::new(handle, DisplayApiPreference::Wgl(window_handle)) }
+            .map_err(|e| step_error("opening the graphics display", &e))
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]

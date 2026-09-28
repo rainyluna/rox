@@ -684,7 +684,6 @@ mod tests {
     /// the registry every frame, so without the reword the two disagree.
     #[test]
     fn a_language_switch_rewords_headers_without_moving_them() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
         let layout: Vec<ColumnSpec> = ["title", "artist", "year"]
             .iter()
             .map(|key| ColumnSpec {
@@ -693,14 +692,14 @@ mod tests {
                 label: None,
             })
             .collect();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         let sort = Some((SharedString::from("title"), true));
         let mut columns = track_columns(&layout, &sort, &HashMap::new());
         let english: Vec<String> = columns.iter().map(|c| c.name.to_string()).collect();
         let order: Vec<String> = columns.iter().map(|c| c.key.to_string()).collect();
         let sorts: Vec<Option<ColumnSort>> = columns.iter().map(|c| c.sort).collect();
 
-        rox_i18n::set_locale(Some("ja"));
+        rox_i18n::pin_thread_locale("ja");
         reword(&mut columns, &HashMap::new());
         let japanese: Vec<String> = columns.iter().map(|c| c.name.to_string()).collect();
         assert_ne!(english, japanese, "the headers should follow the language");
@@ -722,7 +721,7 @@ mod tests {
             "rewording must not resize the columns"
         );
 
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         reword(&mut columns, &HashMap::new());
         assert_eq!(
             english,
@@ -731,15 +730,13 @@ mod tests {
                 .map(|c| c.name.to_string())
                 .collect::<Vec<_>>()
         );
-        rox_i18n::set_locale(None);
     }
 
     /// Dropping `Some("")` to None would put the registry's label back on a
     /// header asked to draw nothing.
     #[test]
     fn a_renamed_header_survives_a_language_switch_and_a_save() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         let layout = vec![
             ColumnSpec {
                 key: "title".to_string(),
@@ -766,12 +763,11 @@ mod tests {
         assert_eq!(names(&columns)[1], "", "a blank header draws blank");
         let year = names(&columns)[2].clone();
 
-        rox_i18n::set_locale(Some("ja"));
+        rox_i18n::pin_thread_locale("ja");
         reword(&mut columns, &labels);
         assert_eq!(names(&columns)[0], "Song", "a typed name has no language");
         assert_eq!(names(&columns)[1], "");
         assert_ne!(names(&columns)[2], year, "the rest still follow the switch");
-        rox_i18n::set_locale(None);
 
         // Blank included, or a relaunch quietly undoes the rename.
         let saved = serde_json::to_string(&layout).unwrap();
@@ -954,8 +950,7 @@ mod tests {
 
     #[test]
     fn the_sort_columns_are_offered_and_sortable() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         let offered: Vec<&str> = super::offered().map(|def| def.key).collect();
         for (base, sort) in [
             ("title", "title_sort"),
@@ -989,7 +984,6 @@ mod tests {
                 "{sort} is a diagnostic column, off by default"
             );
         }
-        rox_i18n::set_locale(None);
     }
 
     /// A CJK name with a Latin sort tag sorts under its sort name, so a rail

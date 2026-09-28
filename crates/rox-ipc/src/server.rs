@@ -472,6 +472,11 @@ mod tests {
     fn slow_subscriber_is_cut_not_waited_on() {
         let (path, events) = serve("slow");
         let mut subscriber = UnixStream::connect(&path).unwrap();
+        // Before the flood: macOS refuses SO_RCVTIMEO with EINVAL once the
+        // server has cut and closed its end.
+        subscriber
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
         call(
             &mut subscriber,
             r#"{"id":1,"method":"hello","params":{"protocol":1}}"#,
@@ -487,9 +492,6 @@ mod tests {
             events.emit("event.flood", serde_json::json!({ "n": n, "pad": pad }));
         }
 
-        subscriber
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
         let mut reader = BufReader::new(subscriber);
         let mut drained = 0usize;
         let mut line = String::new();

@@ -3,6 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # nixpkgs 26.11 dropped x86_64-darwin and refuses to evaluate for it.
+    # 26.05 still builds it, with security fixes until the end of 2026.
+    nixpkgs-x86_64-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     # CI and releases build on rustup's stable channel, and nixpkgs trails it
     # by a release or two. The overlay ships the same latest stable, so a
     # clippy lint that lands upstream fails here before it fails on CI.
@@ -16,6 +19,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-x86_64-darwin,
       rust-overlay,
     }:
     let
@@ -26,7 +30,10 @@
         "x86_64-darwin"
         "aarch64-darwin"
       ];
-      forEachSystem = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      pkgsFor =
+        system:
+        (if system == "x86_64-darwin" then nixpkgs-x86_64-darwin else nixpkgs).legacyPackages.${system};
+      forEachSystem = f: lib.genAttrs systems (system: f (pkgsFor system));
 
       # gpui dlopens these at runtime on Linux (blade renders via Vulkan,
       # windowing via Wayland or X11), and so does glutin for the Milkdrop
@@ -284,6 +291,16 @@
                 echo "rox: no Xcode at $DEVELOPER_DIR; gpui needs 'xcrun metal' from full Xcode" >&2
               fi
               export PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v xcbuild | paste -sd: -)
+
+              # With the sysroot on Xcode's SDK, nix's clang wrapper stacks two
+              # libc++ header trees (its own and the SDK's), and <cstdint> loses
+              # the C integer types. libprojectM's std::filesystem probe dies on
+              # that and falls back to Boost. Compile and link with Xcode's clang
+              # instead, the toolchain the release job uses. The rust toolchain
+              # propagates the nix wrapper, so it stays on PATH, unused.
+              export CC=/usr/bin/clang CXX=/usr/bin/clang++
+              export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/clang
+              export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=/usr/bin/clang
             '';
           };
         }

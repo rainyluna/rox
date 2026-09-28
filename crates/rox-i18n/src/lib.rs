@@ -8,6 +8,7 @@
 
 pub mod format;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock, RwLock};
 
@@ -393,6 +394,26 @@ fn active() -> &'static RwLock<Vec<usize>> {
     ACTIVE.get_or_init(|| RwLock::new(negotiate(None)))
 }
 
+thread_local! {
+    /// A test's locale, seen by its own thread only. libtest runs every test
+    /// on a thread of its own, so one test's German never reaches another
+    /// test's English assertion.
+    static PINNED: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
+}
+
+/// The chain this thread resolves against: its pin if it has one.
+fn chain() -> Vec<usize> {
+    PINNED
+        .with_borrow(Clone::clone)
+        .unwrap_or_else(|| active().read().unwrap().clone())
+}
+
+fn primary() -> usize {
+    PINNED
+        .with_borrow(|pinned| pinned.as_ref().map(|chain| chain[0]))
+        .unwrap_or_else(|| active().read().unwrap()[0])
+}
+
 /// None asks the OS. The source locale always caps the chain.
 fn negotiate(pref: Option<&str>) -> Vec<usize> {
     let requested: Vec<LanguageIdentifier> = match pref {
@@ -427,9 +448,18 @@ pub fn set_locale(pref: Option<&str>) {
     *active().write().unwrap() = chain;
 }
 
+/// Tests switch locale through this instead of [`set_locale`], which every
+/// test in the binary shares. Negotiates exactly as [`set_locale`] does.
+#[doc(hidden)]
+pub fn pin_thread_locale(pref: &str) {
+    let chain = negotiate(Some(pref));
+    format::pin_thread(LOCALES[chain[0]].id);
+    PINNED.with_borrow_mut(|pinned| *pinned = Some(chain));
+}
+
 /// Resolved: while set to System, what System negotiated to.
 pub fn locale() -> &'static str {
-    LOCALES[active().read().unwrap()[0]].id
+    LOCALES[primary()].id
 }
 
 /// Walks the chain until a locale has the key. A `.` reaches into an
@@ -440,8 +470,7 @@ pub fn translate(key: &str, args: Option<&FluentArgs>) -> SharedString {
         None => (key, None),
     };
     let bundles = bundles();
-    let chain = active().read().unwrap().clone();
-    for index in chain {
+    for index in chain() {
         let (_, bundle) = &bundles[index];
         let Some(message) = bundle.get_message(id) else {
             continue;
@@ -470,8 +499,7 @@ pub fn try_translate(key: &str) -> Option<SharedString> {
         None => (key, None),
     };
     let bundles = bundles();
-    let chain = active().read().unwrap().clone();
-    for index in chain {
+    for index in chain() {
         let (_, bundle) = &bundles[index];
         let Some(message) = bundle.get_message(id) else {
             continue;
@@ -508,7 +536,7 @@ macro_rules! t {
 /// after which it moves to [`t!`].
 pub fn t_static(key: &str) -> &'static str {
     static INTERNED: Mutex<BTreeMap<(usize, String), &'static str>> = Mutex::new(BTreeMap::new());
-    let primary = active().read().unwrap()[0];
+    let primary = primary();
     let mut interned = INTERNED.lock().unwrap();
     if let Some(text) = interned.get(&(primary, key.to_string())) {
         return text;
@@ -540,14 +568,6 @@ fn missing(key: &str) {
         log::warn!("i18n: no locale defines {key}");
     }
 }
-
-/// Every test that flips the global locale takes this lock. Public because
-/// other crates (rox-core's spans and paces) format through the same statics.
-#[doc(hidden)]
-pub static LOCALE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-#[cfg(test)]
-pub(crate) use LOCALE_TEST_LOCK as TEST_LOCK;
 
 #[cfg(test)]
 mod tests {
@@ -780,8 +800,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_source_for_unknown_locale() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        set_locale(Some("sv-SE"));
+        pin_thread_locale("sv-SE");
         assert_eq!(locale(), SOURCE_LOCALE);
     }
 
@@ -789,7 +808,6 @@ mod tests {
     /// negotiation has to bridge that.
     #[test]
     fn os_spellings_reach_their_locale() {
-        let _guard = TEST_LOCK.lock().unwrap();
         for (reported, want) in [
             ("zh-CN", "zh-Hans"),
             ("zh-Hans-CN", "zh-Hans"),
@@ -800,15 +818,14 @@ mod tests {
             ("uk-UA", "uk"),
             ("ja-JP", "ja"),
         ] {
-            set_locale(Some(reported));
+            pin_thread_locale(reported);
             assert_eq!(locale(), want, "{reported} should land on {want}");
         }
     }
 
     #[test]
     fn attribute_lookup_reaches_into_messages() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        set_locale(Some("en-CA"));
+        pin_thread_locale("en-CA");
         let label = translate("settings-language", None);
         let description = translate("settings-language.description", None);
         assert_ne!(label, description);
@@ -818,11 +835,10 @@ mod tests {
     /// Each locale adds its own synonyms, or translated labels are unsearchable.
     #[test]
     fn keyword_lists_are_per_locale() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        set_locale(Some("en-CA"));
+        pin_thread_locale("en-CA");
         let english = try_translate("settings-audio-crossfade.keywords")
             .expect("the source locale defines the list");
-        set_locale(Some("de"));
+        pin_thread_locale("de");
         let german = try_translate("settings-audio-crossfade.keywords")
             .expect("German defines its own list");
         assert_ne!(english, german);
@@ -832,8 +848,7 @@ mod tests {
     /// No synonyms reads as absent, not as the missing marker.
     #[test]
     fn a_row_without_keywords_answers_none() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        set_locale(Some("en-CA"));
+        pin_thread_locale("en-CA");
         assert!(try_translate("settings-audio-crossfade.nonesuch").is_none());
     }
 
@@ -841,8 +856,7 @@ mod tests {
     /// render the literal message name.
     #[test]
     fn a_message_reference_carries_the_callers_args() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        set_locale(Some("en-CA"));
+        pin_thread_locale("en-CA");
         let mut args = FluentArgs::new();
         args.set("estimate", "about 2 hours");
         args.set("workers", "4 workers");
@@ -854,9 +868,8 @@ mod tests {
     /// here.
     #[test]
     fn every_locale_resolves_the_wrapped_estimate() {
-        let _guard = TEST_LOCK.lock().unwrap();
         for loc in LOCALES {
-            set_locale(Some(loc.id));
+            pin_thread_locale(loc.id);
             let mut args = FluentArgs::new();
             args.set("estimate", "ESTIMATE");
             args.set("workers", "WORKERS");
@@ -872,13 +885,11 @@ mod tests {
                 loc.id
             );
         }
-        set_locale(None);
     }
 
     #[test]
     fn plurals_select_per_locale() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        set_locale(Some("de"));
+        pin_thread_locale("de");
         let one = t!("bake-detail-writes", count = 1);
         let many = t!("bake-detail-writes", count = 2);
         assert_ne!(one, many);

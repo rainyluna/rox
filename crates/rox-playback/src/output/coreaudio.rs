@@ -374,16 +374,18 @@ unsafe fn claim(
     };
 
     // First: the step most likely to fail, before anything needs undoing.
-    take_hog(device)?;
+    // SAFETY: `device` is an id from the HAL's own device list (see `open`),
+    // the one thing every device helper in this function asks for.
+    unsafe { take_hog(device) }?;
     held.hogged = true;
 
-    let rate = set_rate(device, request.rate.unwrap_or(DEFAULT_RATE))?;
-    let frames = set_buffer_frames(device, rate, request.period_ms)?;
-    let channels = output_channels(device);
+    let rate = unsafe { set_rate(device, request.rate.unwrap_or(DEFAULT_RATE)) }?;
+    let frames = unsafe { set_buffer_frames(device, rate, request.period_ms) }?;
+    let channels = unsafe { output_channels(device) };
     if channels == 0 {
         return Err(format!("{} has no output channels", named.name));
     }
-    check_float_format(device, &named.name)?;
+    unsafe { check_float_format(device, &named.name) }?;
 
     let (ring_frames, producer, ring, tap_tx, tap) = rings(rate);
     let scratch = vec![0.0f32; (frames as usize).max(SCRATCH_FLOOR) * channels as usize];
@@ -395,7 +397,10 @@ unsafe fn claim(
     }));
     held.state = state;
 
-    let status = AudioDeviceCreateIOProcID(device, io_proc, state.cast(), &mut held.proc_id);
+    // SAFETY: `io_proc` reads `state` as a `State`, and `Claim::drop` destroys
+    // the IOProc before it frees the box.
+    let status =
+        unsafe { AudioDeviceCreateIOProcID(device, io_proc, state.cast(), &mut held.proc_id) };
     if status != 0 || held.proc_id.is_null() {
         return Err(format!("attaching to {}: {}", named.name, text(status)));
     }
@@ -404,13 +409,19 @@ unsafe fn claim(
     // reopen path on unplug.
     let listener = Box::into_raw(Box::new(shared.clone()));
     let alive = address(DEVICE_IS_ALIVE, SCOPE_GLOBAL);
-    if AudioObjectAddPropertyListener(device, &alive, alive_listener, listener.cast()) == 0 {
+    // SAFETY: `alive_listener` reads `listener` as an `Arc<Shared>`, and once
+    // it's registered `Claim::drop` leaks it rather than freeing it. A failed
+    // registration never handed it over, so the box is still ours to free.
+    if unsafe { AudioObjectAddPropertyListener(device, &alive, alive_listener, listener.cast()) }
+        == 0
+    {
         held.listener = listener;
     } else {
-        drop(Box::from_raw(listener));
+        drop(unsafe { Box::from_raw(listener) });
     }
 
-    let status = AudioDeviceStart(device, held.proc_id);
+    // SAFETY: `proc_id` is the IOProc just created on this device.
+    let status = unsafe { AudioDeviceStart(device, held.proc_id) };
     if status != 0 {
         return Err(format!("starting {}: {}", named.name, text(status)));
     }
@@ -478,14 +489,17 @@ unsafe fn property<T: Copy>(
 ) -> Result<T, String> {
     let mut value = MaybeUninit::<T>::uninit();
     let mut size = size_of::<T>() as u32;
-    let status = AudioObjectGetPropertyData(
-        object,
-        address,
-        0,
-        ptr::null(),
-        &mut size,
-        value.as_mut_ptr().cast(),
-    );
+    // SAFETY: `size` is the room `value` has, so the HAL can't write past it.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            address,
+            0,
+            ptr::null(),
+            &mut size,
+            value.as_mut_ptr().cast(),
+        )
+    };
     if status != 0 {
         return Err(format!("{what}: {}", text(status)));
     }
@@ -495,7 +509,9 @@ unsafe fn property<T: Copy>(
             size_of::<T>()
         ));
     }
-    Ok(value.assume_init())
+    // SAFETY: the HAL filled every byte (checked above), and the caller
+    // promised `T` is the property's type.
+    Ok(unsafe { value.assume_init() })
 }
 
 /// # Safety
@@ -506,7 +522,9 @@ unsafe fn property_array<T: Copy>(
     what: &str,
 ) -> Result<Vec<T>, String> {
     let mut bytes: u32 = 0;
-    let status = AudioObjectGetPropertyDataSize(object, address, 0, ptr::null(), &mut bytes);
+    // SAFETY: the one out parameter is `bytes`, a local u32.
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(object, address, 0, ptr::null(), &mut bytes) };
     if status != 0 {
         return Err(format!("{what} size: {}", text(status)));
     }
@@ -517,18 +535,24 @@ unsafe fn property_array<T: Copy>(
 
     let mut out: Vec<T> = Vec::with_capacity(count);
     let mut size = (count * size_of::<T>()) as u32;
-    let status = AudioObjectGetPropertyData(
-        object,
-        address,
-        0,
-        ptr::null(),
-        &mut size,
-        out.as_mut_ptr().cast(),
-    );
+    // SAFETY: `size` is the capacity `out` was allocated with, in bytes, so the
+    // HAL can't write past it.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            address,
+            0,
+            ptr::null(),
+            &mut size,
+            out.as_mut_ptr().cast(),
+        )
+    };
     if status != 0 {
         return Err(format!("{what}: {}", text(status)));
     }
-    out.set_len((size as usize / size_of::<T>()).min(count));
+    // SAFETY: the length is the whole elements the HAL wrote, capped at the
+    // capacity, and the caller promised `T` is the element type.
+    unsafe { out.set_len((size as usize / size_of::<T>()).min(count)) };
     Ok(out)
 }
 
@@ -538,28 +562,37 @@ unsafe fn property_array<T: Copy>(
 /// `selector` has to name a CFStringRef property on this object.
 unsafe fn cfstring_property(object: AudioObjectID, selector: u32) -> Option<String> {
     let address = address(selector, SCOPE_GLOBAL);
-    let string: *const c_void = property(object, &address, "name").ok()?;
+    // SAFETY: the caller promised a CFStringRef property, which is one pointer.
+    let string: *const c_void = unsafe { property(object, &address, "name") }.ok()?;
     if string.is_null() {
         return None;
     }
-    let out = cfstring_to_string(string);
-    CFRelease(string);
-    out
+    // SAFETY: a non-null CFStringRef the HAL handed over retained, released
+    // once after its last read.
+    unsafe {
+        let out = cfstring_to_string(string);
+        CFRelease(string);
+        out
+    }
 }
 
 /// # Safety
 /// `string` has to be a live CFStringRef.
 unsafe fn cfstring_to_string(string: *const c_void) -> Option<String> {
     // Four UTF-8 bytes per UTF-16 unit at most, plus the terminator.
-    let capacity = (CFStringGetLength(string).max(0) * 4 + 1) as usize;
+    // SAFETY: the caller promised a live CFStringRef.
+    let capacity = (unsafe { CFStringGetLength(string) }.max(0) * 4 + 1) as usize;
     let mut buffer = vec![0u8; capacity];
-    if CFStringGetCString(
-        string,
-        buffer.as_mut_ptr().cast::<c_char>(),
-        capacity as c_long,
-        CFSTRING_ENCODING_UTF8,
-    ) == 0
-    {
+    // SAFETY: `buffer` is `capacity` bytes, the size passed in.
+    let converted = unsafe {
+        CFStringGetCString(
+            string,
+            buffer.as_mut_ptr().cast::<c_char>(),
+            capacity as c_long,
+            CFSTRING_ENCODING_UTF8,
+        )
+    };
+    if converted == 0 {
         return None;
     }
     let end = buffer.iter().position(|&b| b == 0).unwrap_or(capacity);
@@ -571,7 +604,8 @@ unsafe fn cfstring_to_string(string: *const c_void) -> Option<String> {
 /// Nothing to hold; the system object is always there.
 unsafe fn default_output() -> Option<AudioObjectID> {
     let address = address(HARDWARE_DEFAULT_OUTPUT, SCOPE_GLOBAL);
-    property::<AudioObjectID>(SYSTEM_OBJECT, &address, "default output device").ok()
+    // SAFETY: the default output property is one AudioObjectID.
+    unsafe { property::<AudioObjectID>(SYSTEM_OBJECT, &address, "default output device") }.ok()
 }
 
 /// Total output channels across streams, from the IOProc's buffer layout.
@@ -583,7 +617,10 @@ unsafe fn output_channels(device: AudioObjectID) -> u32 {
     let address = address(DEVICE_STREAM_CONFIGURATION, SCOPE_OUTPUT);
     // Read as u64 for the 8-byte alignment the struct needs, which Vec<u8>
     // doesn't promise.
-    let Ok(words) = property_array::<u64>(device, &address, "stream configuration") else {
+    // SAFETY: every bit pattern is a valid u64, so the list's bytes read as
+    // words whatever they hold.
+    let words = unsafe { property_array::<u64>(device, &address, "stream configuration") };
+    let Ok(words) = words else {
         return 0;
     };
     let bytes = words.len() * size_of::<u64>();
@@ -591,13 +628,21 @@ unsafe fn output_channels(device: AudioObjectID) -> u32 {
         return 0;
     }
     let list = words.as_ptr().cast::<AudioBufferList>();
-    let count = (*list).number_buffers as usize;
-    let first = ptr::addr_of!((*list).buffers).cast::<AudioBuffer>();
+    // SAFETY: `words` holds at least one list header (checked above), at the
+    // u64 alignment the struct needs.
+    let (count, first) = unsafe {
+        (
+            (*list).number_buffers as usize,
+            ptr::addr_of!((*list).buffers).cast::<AudioBuffer>(),
+        )
+    };
     let header = first as usize - list as usize;
     if count == 0 || bytes < header + count * size_of::<AudioBuffer>() {
         return 0;
     }
-    std::slice::from_raw_parts(first, count)
+    // SAFETY: `count` buffers fit inside the bytes the HAL wrote, checked just
+    // above.
+    unsafe { std::slice::from_raw_parts(first, count) }
         .iter()
         .map(|buffer| buffer.number_channels)
         .sum()
@@ -611,14 +656,19 @@ unsafe fn output_channels(device: AudioObjectID) -> u32 {
 /// `device` has to be a live AudioObjectID.
 unsafe fn check_float_format(device: AudioObjectID, name: &str) -> Result<(), String> {
     let streams = address(DEVICE_STREAMS, SCOPE_OUTPUT);
-    let Ok(ids) = property_array::<AudioObjectID>(device, &streams, "output streams") else {
+    // SAFETY: the streams property is an array of AudioObjectID.
+    let ids = unsafe { property_array::<AudioObjectID>(device, &streams, "output streams") };
+    let Ok(ids) = ids else {
         return Ok(());
     };
     let Some(stream) = ids.first().copied() else {
         return Ok(());
     };
     let virtual_format = address(STREAM_VIRTUAL_FORMAT, SCOPE_GLOBAL);
-    let Ok(format) = property::<StreamFormat>(stream, &virtual_format, "virtual format") else {
+    // SAFETY: the virtual format is an AudioStreamBasicDescription, which
+    // `StreamFormat` mirrors field for field.
+    let format = unsafe { property::<StreamFormat>(stream, &virtual_format, "virtual format") };
+    let Ok(format) = format else {
         return Ok(());
     };
     if format.format_id == FORMAT_LINEAR_PCM
@@ -645,8 +695,10 @@ unsafe fn check_float_format(device: AudioObjectID, name: &str) -> Result<(), St
 /// `device` has to be a live AudioObjectID.
 unsafe fn take_hog(device: AudioObjectID) -> Result<(), String> {
     let address = address(DEVICE_HOG_MODE, SCOPE_GLOBAL);
-    let me = getpid();
-    let owner = property::<Pid>(device, &address, "hog mode")?;
+    // SAFETY: getpid has no preconditions.
+    let me = unsafe { getpid() };
+    // SAFETY: the hog mode property is a pid_t, here and in both calls below.
+    let owner = unsafe { property::<Pid>(device, &address, "hog mode") }?;
     if owner == me {
         // Ours already, from a claim whose Drop hasn't run. rox takes hog mode in
         // one place only.
@@ -656,18 +708,20 @@ unsafe fn take_hog(device: AudioObjectID) -> Result<(), String> {
         return Err(format!("another app (pid {owner}) has the device"));
     }
 
-    let status = AudioObjectSetPropertyData(
-        device,
-        &address,
-        0,
-        ptr::null(),
-        size_of::<Pid>() as u32,
-        ptr::addr_of!(me).cast(),
-    );
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            device,
+            &address,
+            0,
+            ptr::null(),
+            size_of::<Pid>() as u32,
+            ptr::addr_of!(me).cast(),
+        )
+    };
     if status != 0 {
         return Err(format!("taking hog mode: {}", text(status)));
     }
-    let owner = property::<Pid>(device, &address, "hog mode")?;
+    let owner = unsafe { property::<Pid>(device, &address, "hog mode") }?;
     if owner != me {
         return Err(format!("hog mode went to pid {owner} instead"));
     }
@@ -679,14 +733,17 @@ unsafe fn take_hog(device: AudioObjectID) -> Result<(), String> {
 unsafe fn release_hog(device: AudioObjectID) {
     let address = address(DEVICE_HOG_MODE, SCOPE_GLOBAL);
     let nobody = NOBODY;
-    let status = AudioObjectSetPropertyData(
-        device,
-        &address,
-        0,
-        ptr::null(),
-        size_of::<Pid>() as u32,
-        ptr::addr_of!(nobody).cast(),
-    );
+    // SAFETY: the hog mode property is a pid_t, and `nobody` is one.
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            device,
+            &address,
+            0,
+            ptr::null(),
+            size_of::<Pid>() as u32,
+            ptr::addr_of!(nobody).cast(),
+        )
+    };
     if status != 0 {
         // A device stuck hogged reads as "no other app has sound", so leave a trace.
         log::error!("exclusive output: releasing hog mode: {}", text(status));
@@ -703,20 +760,25 @@ unsafe fn release_hog(device: AudioObjectID) {
 unsafe fn set_rate(device: AudioObjectID, want: u32) -> Result<u32, String> {
     let nominal = address(DEVICE_NOMINAL_SAMPLE_RATE, SCOPE_GLOBAL);
     let available = address(DEVICE_AVAILABLE_SAMPLE_RATES, SCOPE_GLOBAL);
-    let ranges = property_array::<AudioValueRange>(device, &available, "available rates")
-        .unwrap_or_default();
+    // SAFETY: the available rates are an array of AudioValueRange.
+    let ranges =
+        unsafe { property_array::<AudioValueRange>(device, &available, "available rates") }
+            .unwrap_or_default();
     let target = pick_rate(&ranges, want as f64);
 
-    let current = property::<f64>(device, &nominal, "nominal sample rate")?;
+    // SAFETY: the nominal rate is a Float64, in every read and the set below.
+    let current = unsafe { property::<f64>(device, &nominal, "nominal sample rate") }?;
     if !same_rate(current, target) {
-        let status = AudioObjectSetPropertyData(
-            device,
-            &nominal,
-            0,
-            ptr::null(),
-            size_of::<f64>() as u32,
-            ptr::addr_of!(target).cast(),
-        );
+        let status = unsafe {
+            AudioObjectSetPropertyData(
+                device,
+                &nominal,
+                0,
+                ptr::null(),
+                size_of::<f64>() as u32,
+                ptr::addr_of!(target).cast(),
+            )
+        };
         if status != 0 {
             return Err(format!("setting rate {target}: {}", text(status)));
         }
@@ -724,7 +786,7 @@ unsafe fn set_rate(device: AudioObjectID, want: u32) -> Result<u32, String> {
         // caller, so it stops the moment the rate settles.
         for _ in 0..RATE_SETTLE_POLLS {
             std::thread::sleep(RATE_SETTLE_STEP);
-            match property::<f64>(device, &nominal, "nominal sample rate") {
+            match unsafe { property::<f64>(device, &nominal, "nominal sample rate") } {
                 Ok(now) if same_rate(now, target) => break,
                 Ok(_) => continue,
                 Err(e) => return Err(e),
@@ -732,7 +794,7 @@ unsafe fn set_rate(device: AudioObjectID, want: u32) -> Result<u32, String> {
         }
     }
 
-    let settled = property::<f64>(device, &nominal, "nominal sample rate")?;
+    let settled = unsafe { property::<f64>(device, &nominal, "nominal sample rate") }?;
     if settled < 1.0 {
         return Err(format!("device reports a {settled} Hz clock"));
     }
@@ -751,23 +813,29 @@ unsafe fn set_buffer_frames(
 ) -> Result<u32, String> {
     let size = address(DEVICE_BUFFER_FRAME_SIZE, SCOPE_GLOBAL);
     if let Some(period_ms) = period_ms {
-        let range = property::<AudioValueRange>(
-            device,
-            &address(DEVICE_BUFFER_FRAME_SIZE_RANGE, SCOPE_GLOBAL),
-            "buffer frame size range",
-        )
+        // SAFETY: the frame size range is one AudioValueRange.
+        let range = unsafe {
+            property::<AudioValueRange>(
+                device,
+                &address(DEVICE_BUFFER_FRAME_SIZE_RANGE, SCOPE_GLOBAL),
+                "buffer frame size range",
+            )
+        }
         .ok();
         let want = frames_for_period(rate, period_ms, range);
         // Not fatal: some drivers refuse a fixed buffer, and the read-back reports
         // what's running.
-        let status = AudioObjectSetPropertyData(
-            device,
-            &size,
-            0,
-            ptr::null(),
-            size_of::<u32>() as u32,
-            ptr::addr_of!(want).cast(),
-        );
+        // SAFETY: the frame size is a UInt32, here and in the read-back.
+        let status = unsafe {
+            AudioObjectSetPropertyData(
+                device,
+                &size,
+                0,
+                ptr::null(),
+                size_of::<u32>() as u32,
+                ptr::addr_of!(want).cast(),
+            )
+        };
         if status != 0 {
             log::warn!(
                 "exclusive output: buffer of {want} frames refused: {}",
@@ -775,7 +843,7 @@ unsafe fn set_buffer_frames(
             );
         }
     }
-    property::<u32>(device, &size, "buffer frame size")
+    unsafe { property::<u32>(device, &size, "buffer frame size") }
 }
 
 /// Discrete rates come back as zero-width ranges. No list passes the request through.
@@ -835,21 +903,28 @@ unsafe extern "C" fn io_proc(
     if output_data.is_null() || client_data.is_null() {
         return 0;
     }
-    render(&mut *client_data.cast::<State>(), output_data);
+    // SAFETY: `client_data` is the `State` box from `claim`, alive until
+    // `Claim::drop` destroys this IOProc, and nothing else dereferences it
+    // while the IOProc is attached.
+    unsafe { render(&mut *client_data.cast::<State>(), output_data) };
     0
 }
 
 /// # Safety
 /// `output` has to be the live AudioBufferList the HAL just handed us.
 unsafe fn render(state: &mut State, output: *mut AudioBufferList) {
-    let count = (*output).number_buffers as usize;
+    // SAFETY: the caller promised a live list, and the HAL sizes it for
+    // `number_buffers` entries.
+    let count = unsafe { (*output).number_buffers } as usize;
     if count == 0 {
         return;
     }
-    let buffers = std::slice::from_raw_parts_mut(
-        ptr::addr_of_mut!((*output).buffers).cast::<AudioBuffer>(),
-        count,
-    );
+    let buffers = unsafe {
+        std::slice::from_raw_parts_mut(
+            ptr::addr_of_mut!((*output).buffers).cast::<AudioBuffer>(),
+            count,
+        )
+    };
 
     // One interleaved buffer: every built-in output and nearly every USB DAC.
     if count == 1 {
@@ -863,7 +938,9 @@ unsafe fn render(state: &mut State, output: *mut AudioBufferList) {
         if samples == 0 {
             return;
         }
-        let data = std::slice::from_raw_parts_mut(buffer.data.cast::<f32>(), samples);
+        // SAFETY: a non-null buffer the HAL handed out, `samples` rounds its
+        // byte size down.
+        let data = unsafe { std::slice::from_raw_parts_mut(buffer.data.cast::<f32>(), samples) };
         fill(
             data,
             channels,
@@ -887,7 +964,8 @@ unsafe fn render(state: &mut State, output: *mut AudioBufferList) {
         }
         // Zero before judging, so a skipped buffer goes out silent.
         let samples = buffer.data_byte_size as usize / size_of::<f32>();
-        std::slice::from_raw_parts_mut(buffer.data.cast::<f32>(), samples).fill(0.0);
+        // SAFETY: as above, a non-null buffer and its byte size rounded down.
+        unsafe { std::slice::from_raw_parts_mut(buffer.data.cast::<f32>(), samples) }.fill(0.0);
         if channels == 0 {
             frames = 0;
             continue;
@@ -908,7 +986,10 @@ unsafe fn render(state: &mut State, output: *mut AudioBufferList) {
     let mut base = 0usize;
     for buffer in buffers.iter() {
         let channels = buffer.number_channels as usize;
-        let data = std::slice::from_raw_parts_mut(buffer.data.cast::<f32>(), frames * channels);
+        // SAFETY: the first pass returned early on any null buffer and capped
+        // `frames` at the shortest one.
+        let data =
+            unsafe { std::slice::from_raw_parts_mut(buffer.data.cast::<f32>(), frames * channels) };
         for frame in 0..frames {
             for channel in 0..channels {
                 data[frame * channels + channel] = mixed[frame * total + base + channel];
@@ -932,10 +1013,13 @@ unsafe extern "C" fn alive_listener(
     if client_data.is_null() {
         return 0;
     }
-    let shared = &*client_data.cast::<Arc<Shared>>();
+    // SAFETY: `client_data` is the boxed Arc from `claim`, leaked rather than
+    // freed once registered.
+    let shared = unsafe { &*client_data.cast::<Arc<Shared>>() };
     let address = address(DEVICE_IS_ALIVE, SCOPE_GLOBAL);
     // A failed read counts as death.
-    let alive = property::<u32>(device, &address, "device is alive").unwrap_or(0);
+    // SAFETY: the alive property is a UInt32.
+    let alive = unsafe { property::<u32>(device, &address, "device is alive") }.unwrap_or(0);
     if alive == 0 {
         log::error!("exclusive output: the device went away");
         shared.device_lost.store(true, Ordering::Release);

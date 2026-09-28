@@ -674,24 +674,21 @@ mod tests {
     #[test]
     fn a_rate_reads_as_khz() {
         // Pin the locale, since the decimal mark comes from it.
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         assert_eq!(khz(44100), "44.1");
         assert_eq!(khz(48000), "48");
         assert_eq!(khz(96000), "96");
         assert_eq!(khz(88200), "88.2");
         assert_eq!(khz(22050), "22.05");
         assert_eq!(khz(0), "");
-        rox_i18n::set_locale(Some("de"));
+        rox_i18n::pin_thread_locale("de");
         assert_eq!(khz(44100), "44,1");
         assert_eq!(khz(48000), "48");
-        rox_i18n::set_locale(None);
     }
 
     #[test]
     fn the_stream_shape_drops_what_it_lacks() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         assert_eq!(stream_format(16, 44100), "16/44.1 kHz");
         assert_eq!(stream_format(24, 96000), "24/96 kHz");
         assert_eq!(stream_format(0, 44100), "44.1 kHz");
@@ -701,8 +698,7 @@ mod tests {
 
     #[test]
     fn the_group_line_joins_what_agrees() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         assert_eq!(
             quality(Some("flac"), 1006, 1006, 16, 44100),
             "flac 16/44.1 kHz 1006 kbps"

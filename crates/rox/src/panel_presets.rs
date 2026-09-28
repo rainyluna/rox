@@ -132,8 +132,7 @@ mod tests {
 
     #[test]
     fn the_group_label_is_a_message_key() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some(rox_i18n::SOURCE_LOCALE));
+        rox_i18n::pin_thread_locale(rox_i18n::SOURCE_LOCALE);
         assert!(rox_i18n::try_translate(GROUP_LABEL).is_some());
     }
 

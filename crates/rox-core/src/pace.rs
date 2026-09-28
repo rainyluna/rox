@@ -124,14 +124,12 @@ mod tests {
     /// whose OS locale isn't English.
     #[test]
     fn workers_divide_the_wait() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         // 8 worker-seconds a track over 1,800 tracks: 4 hours on one worker.
         assert_eq!(estimate(8.0, 1_800, 1).unwrap(), "about 4 hours");
         assert_eq!(estimate(8.0, 1_800, 2).unwrap(), "about 2 hours");
         assert_eq!(estimate(8.0, 1_800, 4).unwrap(), "about an hour");
         assert_eq!(estimate(8.0, 1_800, 0), estimate(8.0, 1_800, 1));
-        rox_i18n::set_locale(None);
     }
 
     #[test]
@@ -157,8 +155,7 @@ mod tests {
     /// and a sibling test can flip it between them.
     #[test]
     fn one_worker_is_singular() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some("en-CA"));
+        rox_i18n::pin_thread_locale("en-CA");
         assert_eq!(
             workers_phrase(1),
             rox_i18n::t!("pace-workers", count = 1u64)
@@ -171,7 +168,6 @@ mod tests {
             workers_phrase(32),
             rox_i18n::t!("pace-workers", count = 32u64)
         );
-        rox_i18n::set_locale(None);
     }
 
     #[test]

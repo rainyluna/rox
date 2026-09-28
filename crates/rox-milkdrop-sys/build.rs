@@ -59,10 +59,19 @@ fn main() {
             dst.display()
         )
     });
-    println!("cargo:rustc-link-lib=static:+verbatim={archive}");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+
+    // Apple's ld has no `-l:file` form, so rustc hands it the verbatim name as
+    // `-llibprojectM-4.a` and the crate's own test binary fails to link. The
+    // plain name finds the same archive there.
+    if matches!(target_os.as_str(), "macos" | "ios") && archive == "libprojectM-4.a" {
+        println!("cargo:rustc-link-lib=static=projectM-4");
+    } else {
+        println!("cargo:rustc-link-lib=static:+verbatim={archive}");
+    }
+
     match target_os.as_str() {
         // projectM is C++, and rustc links neither standard library for us.
         "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),

@@ -1300,6 +1300,7 @@ mod tests {
 
     #[test]
     fn a_config_lands_on_the_picker_entry_it_came_from() {
+        rox_i18n::pin_thread_locale("en-CA");
         assert_eq!(pick(None, None, None), Pick::Empty);
         assert_eq!(pick(None, None, Some("  \n ")), Pick::Empty);
         assert_eq!(pick_label(&Pick::Empty), rox_i18n::t!("shader-pick-none"));

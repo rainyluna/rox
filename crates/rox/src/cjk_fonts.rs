@@ -50,6 +50,7 @@ pub fn library_scripts(projection: &Projection) -> CjkScripts {
 
 /// cosmic-text 0.14's Han family, matched on the whole locale string: "ja"
 /// gets Japanese forms, "ja-JP" gets Simplified Chinese.
+#[cfg(any(target_os = "linux", test))]
 fn han_family(locale: &str) -> &'static str {
     match locale {
         "ja" => "Noto Sans CJK JP",
@@ -60,6 +61,7 @@ fn han_family(locale: &str) -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn families(scripts: CjkScripts, locale: &str) -> Vec<&'static str> {
     let mut families = Vec::new();
 

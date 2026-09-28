@@ -778,7 +778,7 @@ FILE "Urban Hymns.flac" WAVE
         assert_eq!(Origin::of("subsonic:9f2a1c"), Origin::Subsonic);
         assert_eq!(Origin::of("plugin:demo"), Origin::Plugin);
 
-        assert_eq!(Origin::of("tidal:abc"), Origin::Local);
+        assert_eq!(Origin::of("unknown:abc"), Origin::Local);
         assert_eq!(Origin::of(""), Origin::Local);
 
         assert_eq!(Origin::of("subsonic"), Origin::Local);

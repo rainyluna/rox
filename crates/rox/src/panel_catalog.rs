@@ -693,8 +693,7 @@ mod tests {
     /// other languages, so the check resolves every label in the source locale.
     #[test]
     fn every_label_is_a_message_key() {
-        let _guard = rox_i18n::LOCALE_TEST_LOCK.lock().unwrap();
-        rox_i18n::set_locale(Some(rox_i18n::SOURCE_LOCALE));
+        rox_i18n::pin_thread_locale(rox_i18n::SOURCE_LOCALE);
         for section in CATALOG {
             if let Some((group, _)) = section.group {
                 assert!(
@@ -711,7 +710,6 @@ mod tests {
                 );
             }
         }
-        rox_i18n::set_locale(None);
     }
 
     /// Rendering a label raw puts the key on screen, and it only shows in a

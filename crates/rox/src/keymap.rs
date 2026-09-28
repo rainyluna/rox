@@ -1635,10 +1635,14 @@ mod tests {
             .iter()
             .find(|c| c.id == "seek_forward")
             .expect("seek_forward is bound");
+        let focus = COMMANDS
+            .iter()
+            .find(|c| c.id == "focus_search")
+            .expect("focus_search is bound");
         let overrides = BTreeMap::new();
         assert_eq!(
-            clash(seek, "ctrl-l", &overrides),
-            Some(rox_i18n::t_static("keymap-focus-search")),
+            clash(seek, focus.defaults[0], &overrides),
+            Some(focus.label),
             "a modified playback chord binds where Focus Search lives"
         );
         assert_eq!(

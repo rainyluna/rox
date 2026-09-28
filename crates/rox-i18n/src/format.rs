@@ -2,6 +2,7 @@
 //! behind a lock, rebuilt on locale switch; the data is compiled in, so a
 //! shipped locale can't fail to load.
 
+use std::cell::RefCell;
 use std::sync::{OnceLock, RwLock};
 
 use fixed_decimal::{Decimal, FloatPrecision};
@@ -22,6 +23,11 @@ struct Formatters {
 
 static FORMATTERS: OnceLock<RwLock<Formatters>> = OnceLock::new();
 
+thread_local! {
+    /// The formatters for a test's pinned locale, beside its message chain.
+    static PINNED: RefCell<Option<Formatters>> = const { RefCell::new(None) };
+}
+
 fn build(id: &str) -> Formatters {
     let locale: Locale = id.parse().unwrap_or_else(|_| {
         log::error!("i18n: {id} is not a parseable locale, formatting from root data");
@@ -38,8 +44,13 @@ fn build(id: &str) -> Formatters {
 }
 
 fn with<T>(f: impl FnOnce(&Formatters) -> T) -> T {
-    let lock = FORMATTERS.get_or_init(|| RwLock::new(build(crate::locale())));
-    f(&lock.read().unwrap())
+    PINNED.with_borrow(|pinned| match pinned {
+        Some(formatters) => f(formatters),
+        None => {
+            let lock = FORMATTERS.get_or_init(|| RwLock::new(build(crate::locale())));
+            f(&lock.read().unwrap())
+        }
+    })
 }
 
 /// Called by the setter before it swaps the chain, so a repaint never mixes
@@ -47,6 +58,11 @@ fn with<T>(f: impl FnOnce(&Formatters) -> T) -> T {
 pub(crate) fn retarget(id: &str) {
     let lock = FORMATTERS.get_or_init(|| RwLock::new(build(id)));
     *lock.write().unwrap() = build(id);
+}
+
+pub(crate) fn pin_thread(id: &str) {
+    let formatters = build(id);
+    PINNED.with_borrow_mut(|pinned| *pinned = Some(formatters));
 }
 
 pub fn format_int(n: i64) -> String {
@@ -132,42 +148,37 @@ mod tests {
 
     #[test]
     fn grouping_follows_locale() {
-        let _guard = crate::TEST_LOCK.lock().unwrap();
-        crate::set_locale(Some("de"));
+        crate::pin_thread_locale("de");
         assert_eq!(format_int(12345), "12.345");
-        crate::set_locale(Some("en-CA"));
+        crate::pin_thread_locale("en-CA");
         assert_eq!(format_int(12345), "12,345");
     }
 
     #[test]
     fn units_localize_the_number_and_leave_the_symbol() {
-        let _guard = crate::TEST_LOCK.lock().unwrap();
-        crate::set_locale(Some("de"));
+        crate::pin_thread_locale("de");
         assert_eq!(format_unit(44.1, 1, "kHz"), "44,1 kHz");
-        crate::set_locale(Some("en-CA"));
+        crate::pin_thread_locale("en-CA");
         assert_eq!(format_unit(44.1, 1, "kHz"), "44.1 kHz");
     }
 
     #[test]
     fn percent_placement_is_the_locales_call() {
-        let _guard = crate::TEST_LOCK.lock().unwrap();
-        crate::set_locale(Some("fr"));
+        crate::pin_thread_locale("fr");
         assert_eq!(format_percent(50.0), "50 %");
-        crate::set_locale(Some("en-CA"));
+        crate::pin_thread_locale("en-CA");
         assert_eq!(format_percent(50.0), "50%");
     }
 
     #[test]
     fn iso_dates_render_in_the_locale() {
-        let _guard = crate::TEST_LOCK.lock().unwrap();
-        crate::set_locale(Some("en-CA"));
+        crate::pin_thread_locale("en-CA");
         assert_eq!(format_iso_date("2026-01-02"), format_date(2026, 1, 2));
     }
 
     #[test]
     fn hand_typed_dates_pass_through_untouched() {
-        let _guard = crate::TEST_LOCK.lock().unwrap();
-        crate::set_locale(Some("en-CA"));
+        crate::pin_thread_locale("en-CA");
         assert_eq!(format_iso_date("spring 2019"), "spring 2019");
         assert_eq!(format_iso_date(""), "");
         assert_eq!(format_iso_date("2026-13-45"), "2026-13-45");
@@ -175,10 +186,9 @@ mod tests {
 
     #[test]
     fn dates_follow_locale() {
-        let _guard = crate::TEST_LOCK.lock().unwrap();
-        crate::set_locale(Some("it"));
+        crate::pin_thread_locale("it");
         let it = format_date(2026, 8, 25);
-        crate::set_locale(Some("en-CA"));
+        crate::pin_thread_locale("en-CA");
         let en = format_date(2026, 8, 25);
         assert_ne!(it, en);
         assert!(en.contains("2026"));
