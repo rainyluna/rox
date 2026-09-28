@@ -18,6 +18,7 @@ pub mod lyrics;
 pub mod openers;
 pub mod peaks;
 pub mod player;
+pub mod plugins;
 pub mod portraits;
 pub mod radio;
 pub mod radio_art;
