@@ -1202,14 +1202,25 @@ impl Player {
         session.shared.buffered(track)
     }
 
-    /// The next `n` entries after the audible one, explicit or not: what the
-    /// engine will open next, for a source that wants to open them early.
+    /// The next `n` entries after the one the engine is opening or adopted
+    /// last, explicit or not: what the engine will open next, for a source
+    /// that wants to open them early. Counting from the audible entry instead
+    /// reopens the track a skip is opening or already opened, while the clock
+    /// still reads the one before it.
     pub fn upcoming_locators(&self, n: usize) -> Vec<Locator> {
         let Some(session) = self.session.as_ref() else {
             return Vec::new();
         };
         let snap = session.shared.queue_snapshot();
-        let start = self.audible_index(&snap).map(|i| i + 1).unwrap_or(0);
+        let opening = session
+            .shared
+            .opening()
+            .and_then(|idx| snap.entries.iter().position(|e| e.idx == idx));
+        let start = opening
+            .or_else(|| self.adopted_index(&snap))
+            .or_else(|| self.audible_index(&snap))
+            .map(|i| i + 1)
+            .unwrap_or(0);
 
         snap.entries
             .get(start..)
