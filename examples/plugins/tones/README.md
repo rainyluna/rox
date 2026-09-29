@@ -4,7 +4,7 @@ An example rox source plugin, written to be copied. It makes its own audio: six 
 tones and four chords, each generated as a WAV the first time it's opened. It needs no
 network, no account and nothing beyond Python 3's standard library.
 
-The protocol it speaks is in the [plugin guide](../../../docs/03-implementation/10-plugins.md).
+The protocol it speaks is in the [plugin guide](../../../README_PLUGINS.md).
 
 ## Trying it
 

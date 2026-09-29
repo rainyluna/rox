@@ -194,7 +194,7 @@ A plugin brings a source from outside rox into the library: rox browses, searche
 and plays it through a program the plugin supplies. Each plugin is a folder in the
 `plugins` folder of rox's data directory, and nothing in it runs until you switch it on
 on the Plugins settings page. rox doesn't publish plugins for any service. It publishes
-the protocol in the [plugin guide](docs/03-implementation/10-plugins.md) and an example
+the protocol in the [plugin guide](README_PLUGINS.md) and an example
 to copy in [`examples/plugins/tones`](examples/plugins/tones/).
 
 ## Development

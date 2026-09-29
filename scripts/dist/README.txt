@@ -283,8 +283,7 @@ Plugins
 
 A plugin brings a source from outside rox into your library: rox browses,
 searches, syncs and plays it through a program the plugin supplies. rox
-doesn't ship plugins for any service. The protocol and an example plugin
-to copy are in the repository.
+doesn't ship plugins for any service.
 
 To add one:
 
@@ -300,8 +299,8 @@ To add one:
 
 A plugin runs as a program on this computer with your permissions. rox
 doesn't sandbox it. Switching it on approves exactly the files in its
-folder; if any of them change, it switches off until you switch it on
-again, and the card shows what changed.
+folder. If any of them change, it switches off until you switch it on
+again. The card then shows what changed.
 
 Browse and search a plugin's source in the External Sources panel (Add
 Panel > Experimental). Keep in the library on a collection syncs it into
@@ -309,9 +308,9 @@ your library, and playing or queueing a track adds just that track.
 Remove on the Plugins page drops the plugin's tracks, synced collections
 and settings, and leaves its folder where it is.
 
-The plugin guide, with the protocol for writing one, is behind the Plugin
-Guide button on the Plugins page and at
-https://github.com/zealsprince/rox/blob/main/docs/03-implementation/10-plugins.md
+The Plugin Guide button on the Plugins page opens the guide to writing a
+plugin, with the protocol and an example to copy. It's also at
+https://github.com/zealsprince/rox/blob/main/README_PLUGINS.md
 
 
 License

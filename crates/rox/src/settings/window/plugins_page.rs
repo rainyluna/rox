@@ -24,7 +24,7 @@ const PLUGIN_ACTION_W: Pixels = px(72.);
 const GUIDE_URL: &str = concat!(
     "https://github.com/zealsprince/rox/blob/v",
     env!("CARGO_PKG_VERSION"),
-    "/docs/03-implementation/10-plugins.md"
+    "/README_PLUGINS.md"
 );
 
 /// The page's own state, re-read when the host's generation moves.

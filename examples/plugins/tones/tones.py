@@ -3,7 +3,7 @@
 rox starts this file as a subprocess and speaks newline-delimited JSON-RPC 2.0
 with it: one request per line on stdin, one answer per line on stdout. stderr
 is free text that lands in rox's log. The protocol is written down in
-docs/03-implementation/10-plugins.md in the rox repository.
+README_PLUGINS.md in the rox repository.
 
 The source makes its own audio, so it needs no network and no service. Every
 track is a sine tone or a chord, generated as a 16-bit mono WAV the first time

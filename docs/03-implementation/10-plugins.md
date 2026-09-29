@@ -18,7 +18,8 @@ watch is notify-debouncer-full 0.7, and the Windows job object is windows-sys 0.
 ## Using a plugin
 
 The README in the Linux and Windows release archives gives a user these same steps, and
-the Plugins page links to this document.
+the Plugins page links to [README_PLUGINS.md](../../README_PLUGINS.md), the author-facing
+guide drawn from this document.
 
 1. Plugins are behind two switches. Settings > Development > Experimental Panels reveals
    the Plugins section on Settings > Application, and Enable Plugins there reveals the
@@ -38,7 +39,7 @@ the Plugins page links to this document.
 7. Remove on the Plugins page drops the plugin's tracks, synced collections, settings
    and approval. Its folder is left alone.
 
-The Plugins page links to this document at the running build's release tag
+The Plugins page links to that guide at the running build's release tag
 (`GUIDE_URL`, `rox/src/settings/window/plugins_page.rs:24-28`).
 
 ## The folder
