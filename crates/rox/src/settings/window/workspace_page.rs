@@ -877,6 +877,14 @@ impl SettingsWindow {
         };
         let shaders = card.and_then(|card| card.shader_line());
         let screen = card.and_then(|card| card.screen_shader.clone());
+        // A plugin's card reads out what it is, what it may do and what
+        // changed, around the line saying it runs as a program.
+        let plugin = match self.pending.as_ref()? {
+            Pending::EnablePlugin(card) => Some(card),
+            _ => None,
+        };
+        let plugin_lead = plugin.map(|card| card.lead.clone()).unwrap_or_default();
+        let plugin_lines = plugin.map(|card| card.lines.clone()).unwrap_or_default();
         let split = self.splits_yes(self.pending.as_ref()?);
         let listens = self.listens();
         let (title, body, confirm, second): (
@@ -949,6 +957,18 @@ impl SettingsWindow {
                 rox_i18n::t!("settings-common-remove"),
                 None,
             ),
+            Pending::EnablePlugin(card) => (
+                rox_i18n::t!("settings-plugins-card-title", name = card.name.as_str()),
+                rox_i18n::t!("settings-plugins-card-runs"),
+                rox_i18n::t!("settings-plugins-switch-on"),
+                None,
+            ),
+            Pending::RemovePlugin(id) => (
+                rox_i18n::t!("settings-plugins-remove-title", name = self.plugin_name(id)),
+                rox_i18n::t!("settings-plugins-remove-body"),
+                rox_i18n::t!("settings-common-remove"),
+                None,
+            ),
             Pending::ClearListens => (
                 rox_i18n::t!("listens-clear-title"),
                 rox_i18n::t!(
@@ -991,7 +1011,7 @@ impl SettingsWindow {
                         .flex_col()
                         .gap(tokens::SPACE_MD)
                         // The shader list and the hotkey line need the room.
-                        .w(px(if split || screen.is_some() {
+                        .w(px(if split || screen.is_some() || plugin.is_some() {
                             380.
                         } else {
                             320.
@@ -1005,7 +1025,9 @@ impl SettingsWindow {
                         .child(div().child(title))
                         .children(card.and_then(|card| card.byline.clone()).map(line))
                         .children(card.and_then(|card| card.description.clone()).map(line))
+                        .children(plugin_lead.into_iter().map(line))
                         .child(line(body))
+                        .children(plugin_lines.into_iter().map(line))
                         // A screen shader covers the window, so say so before the
                         // apply, with the way back off.
                         .children(screen.clone().map(line))
@@ -1085,6 +1107,8 @@ impl SettingsWindow {
             Some(Pending::ClearEmbeddings(model)) => self.clear_embeddings(&model, cx),
             Some(Pending::ClearMeasuredBpm) => self.clear_measured_bpm(cx),
             Some(Pending::RemoveSubsonic(id)) => self.remove_subsonic(id, cx),
+            Some(Pending::EnablePlugin(card)) => self.confirm_enable_plugin(card, cx),
+            Some(Pending::RemovePlugin(id)) => self.remove_plugin(id, cx),
             Some(Pending::ClearListens) => {
                 // The first yes means imported only where the dialog offered
                 // both.

@@ -15,6 +15,8 @@ sha2 = "0.10"
 # `source.read` and `source.cover` carry bytes as base64 on the wire.
 base64 = "0.22"
 log = "0.4"
+# Follows the plugins folder, the same line as the library's watch.
+notify-debouncer-full = "0.7"
 
 # Signals the plugin's process group at shutdown.
 [target.'cfg(unix)'.dependencies]

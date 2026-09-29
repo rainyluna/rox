@@ -84,6 +84,7 @@ mod library_page;
 mod mcp_page;
 mod ml_models_page;
 mod playback_page;
+mod plugins_page;
 mod providers_page;
 mod radio_page;
 mod shader_page;
@@ -162,6 +163,7 @@ enum Page {
     Mcp,
     MlModels,
     Playback,
+    Plugins,
     Providers,
     Radio,
     Shader,
@@ -190,6 +192,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Mcp, "settings-page-mcp", icons::LINK),
     (Page::MlModels, "settings-page-ml-models", icons::LAYERS),
     (Page::Playback, "settings-page-playback", icons::PLAY),
+    (Page::Plugins, "settings-page-plugins", icons::PLUG),
     (Page::Providers, "settings-page-providers", icons::DOWNLOAD),
     (Page::Radio, "settings-page-radio", icons::RADIO),
     (Page::Shader, "settings-page-shader", icons::BLEND),
@@ -225,6 +228,12 @@ enum Pending {
     /// Asked for because the catalog only comes back by syncing again; the
     /// switch is the non-destructive way to stop using a server.
     RemoveSubsonic(u64),
+    /// The enable card: switching a plugin on is the approving act, and this
+    /// is the one dialog in front of it (ADR 30).
+    EnablePlugin(Box<plugins_page::EnableCard>),
+    /// Asked for for the same reason as a server: rows and synced
+    /// collections only come back by syncing again.
+    RemovePlugin(String),
 }
 
 struct SettingsWindow {
@@ -368,8 +377,10 @@ struct SettingsWindow {
     /// Held so the work survives its callback, and a second one replaces the
     /// first rather than racing it.
     subsonic_follow: Option<Task<()>>,
-    /// The Sources table's plugin rows, read at open.
+    /// The Sources table's plugin rows, read at open and whenever the plugin
+    /// host moves.
     plugins: Vec<(PluginRecord, Stats)>,
+    plugin_page: plugins_page::PluginsPage,
     /// Re-read at open and on every catalog write.
     stations: Vec<Station>,
     station_url: Entity<InputState>,
@@ -419,6 +430,7 @@ struct SettingsWindow {
     prerelease_updates: bool,
     download_updates: bool,
     ai_enabled: bool,
+    plugins_enabled: bool,
     mcp_enabled: bool,
     experimental: bool,
     acoustic_analysis: bool,
@@ -1067,6 +1079,7 @@ impl SettingsWindow {
             subsonic_editing: None,
             subsonic_follow: None,
             plugins,
+            plugin_page: Default::default(),
             stations,
             station_url,
             station_name,
@@ -1101,6 +1114,7 @@ impl SettingsWindow {
             prerelease_updates: settings.prerelease_updates,
             download_updates: settings.download_updates,
             ai_enabled: settings.ai_enabled,
+            plugins_enabled: settings.plugins_enabled,
             mcp_enabled: settings.mcp_enabled,
             experimental: settings.experimental,
             acoustic_analysis: settings.acoustic_analysis,
@@ -1192,6 +1206,7 @@ impl SettingsWindow {
     /// Returns the Subsonic prune; the quit hook drops it (see there).
     fn flush_pending_edits(&mut self, this: WeakEntity<Self>, cx: &mut App) -> Task<()> {
         self.broadcast_moved();
+        self.commit_plugin_config(cx);
 
         self.subsonic_commit(this, cx).unwrap_or(Task::ready(()))
     }
@@ -1259,6 +1274,7 @@ impl SettingsWindow {
             Page::Mcp => self.mcp_page(q, window, cx),
             Page::MlModels => self.ml_models_page(q, cx),
             Page::Playback => self.playback_page(q, cx),
+            Page::Plugins => self.plugins_page(q, cx),
             Page::Providers => self.providers_page(q, cx),
             Page::Shader => self.shader_page(q, window, cx),
             Page::Radio => self.radio_page(q, cx),
@@ -1448,6 +1464,9 @@ impl Render for SettingsWindow {
         // Read at render so a window that was already up jumps too.
         self.sync_requested_page(window, cx);
 
+        // A rescan or a switch elsewhere moves what the Plugins page shows.
+        self.sync_plugins(window, cx);
+
         // Here rather than in the page: the Shader page builds from `&self`,
         // and search builds every page per keystroke.
         self.post_shader_route_ui
@@ -1456,11 +1475,13 @@ impl Render for SettingsWindow {
         let text = self.search.read(cx).query().trim().to_string();
         let q = Query::parse(&text);
         let scoped = self.search_scoped;
-        // The AI toggle hides the MCP and ML Models pages from search too.
+        // The AI toggle hides the MCP and ML Models pages from search too, and
+        // the Plugins switch its page.
         let pages: Vec<(Page, &str, &str)> = PAGES
             .iter()
             .copied()
             .filter(|&(page, ..)| self.ai_enabled || !matches!(page, Page::Mcp | Page::MlModels))
+            .filter(|&(page, ..)| page != Page::Plugins || self.plugins_visible())
             .collect();
         let results: Option<Vec<_>> = (q.active() && !scoped).then(|| {
             pages
@@ -1637,6 +1658,7 @@ mod tests {
             Page::Mcp => "settings-page-mcp",
             Page::MlModels => "settings-page-ml-models",
             Page::Playback => "settings-page-playback",
+            Page::Plugins => "settings-page-plugins",
             Page::Providers => "settings-page-providers",
             Page::Radio => "settings-page-radio",
             Page::Shader => "settings-page-shader",
@@ -1656,6 +1678,7 @@ mod tests {
         Page::Mcp,
         Page::MlModels,
         Page::Playback,
+        Page::Plugins,
         Page::Providers,
         Page::Radio,
         Page::Shader,

@@ -17,7 +17,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 /// The `api` values this host speaks.
-pub const SUPPORTED_API: RangeInclusive<u32> = 0..=0;
+pub const SUPPORTED_API: RangeInclusive<u32> = 1..=1;
 
 pub const FILE: &str = "plugin.json";
 
@@ -212,6 +212,13 @@ fn aliases(name: &str) -> Vec<(&str, &'static [&'static str])> {
     }
 }
 
+/// Whether a program the manifest lists is on PATH. Information for the
+/// Plugins page; nothing is enforced with it.
+pub fn program_found(program: &str) -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    on_path(program, &path).is_some()
+}
+
 fn interpreter(name: &str, path_var: &OsStr) -> Option<(PathBuf, Vec<&'static str>)> {
     aliases(name)
         .into_iter()
@@ -289,7 +296,7 @@ mod tests {
                 "id": "example-tones",
                 "name": "Tones",
                 "version": "0.1.0",
-                "api": 0,
+                "api": 1,
                 "entry": {{ "script": {{ "path": "tones.py", "interpreter": "python3" }} }},
                 "meta": {{ "author": "", "description": "", "website": "", "license": "" }},
                 "capabilities": {{ "source": {{ "label": "Tones", "scrobble": false }} }},
@@ -301,7 +308,7 @@ mod tests {
     }
 
     fn with_entry(entry: &str) -> String {
-        format!(r#"{{ "id": "tones", "name": "T", "version": "1", "api": 0, "entry": {entry} }}"#)
+        format!(r#"{{ "id": "tones", "name": "T", "version": "1", "api": 1, "entry": {entry} }}"#)
     }
 
     #[test]
@@ -373,11 +380,14 @@ mod tests {
 
     #[test]
     fn an_api_out_of_range_is_refused() {
-        let text = script_manifest("").replace(r#""api": 0"#, r#""api": 1"#);
-        let err = parse(&text).unwrap_err();
-        assert!(err.contains("api 1"), "{err}");
+        // The prototype's version is refused too, now that version 1 is fixed.
+        for api in [0, 2] {
+            let text = script_manifest("").replace(r#""api": 1"#, &format!(r#""api": {api}"#));
+            let err = parse(&text).unwrap_err();
+            assert!(err.contains(&format!("api {api}")), "{err}");
+        }
 
-        let negative = script_manifest("").replace(r#""api": 0"#, r#""api": -1"#);
+        let negative = script_manifest("").replace(r#""api": 1"#, r#""api": -1"#);
         assert!(parse(&negative).is_err());
     }
 

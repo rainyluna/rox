@@ -52,6 +52,8 @@ rox-panel-kit = { path = "../rox-panel-kit" }
 # The nine panels that call into the workspace stay in crate::panels.
 rox-panels = { path = "../rox-panels" }
 rox-playback = { path = "../rox-playback" }
+# The Plugins page reads scanned manifests and host status (ADR 30).
+rox-plugins = { path = "../rox-plugins" }
 rox-romanize = { path = "../rox-romanize" }
 rox-services = { path = "../rox-services" }
 rox-viz = { path = "../rox-viz" }

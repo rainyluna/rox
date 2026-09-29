@@ -1,0 +1,377 @@
+//! The plugins folder (ADR 30): one subfolder per plugin, named after its id.
+//! A scan reads each manifest, hashes each folder and looks for the programs
+//! it lists. It runs nothing. A folder that doesn't load still comes back,
+//! with its reason, so the Plugins page can say what's wrong with it.
+//!
+//! The watch follows the folder so a plugin dropped in or edited shows up
+//! without a restart. Events are hints to scan again, never a diff.
+
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use notify_debouncer_full::notify::{EventKind, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+
+use crate::hash;
+use crate::manifest::{self, Manifest};
+
+const DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// One folder under the plugins folder, as the last scan found it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loaded {
+    /// The folder's name, which a manifest has to match.
+    pub id: String,
+    pub dir: PathBuf,
+    /// None when `plugin.json` is missing or doesn't parse.
+    pub manifest: Option<Manifest>,
+    /// `plugin.json` as written, which an approval stores for the next diff.
+    pub document: serde_json::Value,
+    /// Empty when the folder couldn't be hashed.
+    pub hash: String,
+    /// Each program the manifest lists, and whether it's on PATH.
+    pub programs: Vec<(String, bool)>,
+    /// Why this folder can't run, if it can't.
+    pub error: Option<String>,
+}
+
+impl Loaded {
+    /// Whether the host may start it, approval aside.
+    pub fn runs(&self) -> bool {
+        self.manifest.is_some() && self.error.is_none()
+    }
+
+    fn failed(id: String, dir: PathBuf, error: String) -> Loaded {
+        Loaded {
+            id,
+            dir,
+            manifest: None,
+            document: serde_json::Value::Null,
+            hash: String::new(),
+            programs: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+/// Every plugin folder under `dir`, sorted by id. A missing `dir` scans to
+/// nothing; stray files beside the folders are skipped.
+pub fn scan(dir: &Path) -> Vec<Loaded> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<Loaded> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+
+            // `file_type` doesn't follow links, so a linked folder shows as one.
+            let kind = entry.file_type().ok()?;
+            if kind.is_symlink() {
+                return Some(Loaded::failed(id, path, "the folder is a symlink".into()));
+            }
+
+            kind.is_dir().then(|| load(id, path))
+        })
+        .collect();
+
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+    found
+}
+
+fn load(id: String, dir: PathBuf) -> Loaded {
+    let manifest = match manifest::load(&dir) {
+        Ok(manifest) => manifest,
+        Err(e) => return Loaded::failed(id, dir, e),
+    };
+
+    // A second parse of a file just read whole, kept apart from the typed
+    // one so the stored copy has every key the author wrote.
+    let document = std::fs::read_to_string(dir.join(manifest::FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let programs = manifest
+        .programs
+        .iter()
+        .map(|program| (program.clone(), manifest::program_found(program)))
+        .collect();
+
+    let (hash, hash_error) = match hash::folder_hash(&dir) {
+        Ok(hash) => (hash, None),
+        Err(e) => (String::new(), Some(e)),
+    };
+
+    // The source id is fixed by the manifest, and the host finds a plugin by
+    // its folder, so the two have to agree.
+    let error = match manifest.id == id {
+        false => Some(format!(
+            "the folder is named {id} but holds plugin {}",
+            manifest.id
+        )),
+        true => hash_error.or_else(|| manifest::entry_for(&manifest, &dir).err()),
+    };
+
+    Loaded {
+        id,
+        dir,
+        manifest: Some(manifest),
+        document,
+        hash,
+        programs,
+        error,
+    }
+}
+
+/// Follows the plugins folder, and its parent until the folder exists: rox
+/// never creates it on its own. Dropping this stops the watch.
+pub struct Watch {
+    dir: PathBuf,
+    debouncer: Mutex<Debouncer<RecommendedWatcher, RecommendedCache>>,
+    /// Whether the folder itself is watched.
+    armed: Mutex<bool>,
+}
+
+impl Watch {
+    /// `changed` runs on the watcher's thread after each settled burst. Call
+    /// [`Watch::arm`] from it, or after anything that creates the folder.
+    pub fn new(dir: &Path, changed: impl Fn() + Send + 'static) -> Result<Watch, String> {
+        let parent = dir
+            .parent()
+            .ok_or_else(|| format!("{} has no parent", dir.display()))?
+            .to_path_buf();
+        // FSEvents reports paths with symlinks resolved, inotify as watched,
+        // so an event can name the folder either way. The folder may not
+        // exist yet, so its parent is what resolves.
+        let resolved = parent
+            .canonicalize()
+            .ok()
+            .zip(dir.file_name())
+            .map(|(parent, name)| parent.join(name));
+        let own: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(resolved).collect();
+
+        let mut debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
+            let Ok(batch) = result else {
+                return;
+            };
+
+            // A scan opens every file to hash it, which inotify reports as an
+            // access; answering those would scan forever.
+            let ours = batch.iter().any(|event| {
+                !matches!(event.kind, EventKind::Access(_))
+                    && event
+                        .paths
+                        .iter()
+                        .any(|path| own.iter().any(|own| path.starts_with(own)))
+            });
+            if ours {
+                changed();
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+        debouncer
+            .watch(&parent, RecursiveMode::NonRecursive)
+            .map_err(|e| format!("{}: {e}", parent.display()))?;
+
+        let watch = Watch {
+            dir: dir.to_path_buf(),
+            debouncer: Mutex::new(debouncer),
+            armed: Mutex::new(false),
+        };
+        watch.arm();
+
+        Ok(watch)
+    }
+
+    /// Watches the folder itself once it exists, and notes when it's gone so
+    /// a new one is picked up.
+    pub fn arm(&self) {
+        let (Ok(mut armed), Ok(mut debouncer)) = (self.armed.lock(), self.debouncer.lock()) else {
+            return;
+        };
+
+        let exists = self.dir.is_dir();
+        if exists && !*armed {
+            match debouncer.watch(&self.dir, RecursiveMode::Recursive) {
+                Ok(()) => *armed = true,
+                Err(e) => log::warn!("plugins: not watching {}: {e}", self.dir.display()),
+            }
+        } else if !exists && *armed {
+            let _ = debouncer.unwatch(&self.dir);
+            *armed = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let dir = std::env::temp_dir()
+                .join(format!("rox-plugins-loader-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            Scratch(dir)
+        }
+
+        fn write(&self, rel: &str, text: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+
+            path
+        }
+
+        /// A plugin whose entry is a native build for whatever runs the test,
+        /// so nothing has to be on PATH.
+        fn plugin(&self, id: &str) {
+            let manifest = format!(
+                r#"{{
+                    "id": "{id}",
+                    "name": "Tones",
+                    "version": "0.1.0",
+                    "api": 1,
+                    "entry": {{ "native": {{ "{}": "bin/tones" }} }},
+                    "programs": ["rox-no-such-program"]
+                }}"#,
+                manifest::platform()
+            );
+            self.write(&format!("{id}/plugin.json"), &manifest);
+            self.write(&format!("{id}/bin/tones"), "binary");
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_good_folder_loads_with_its_hash_and_programs() {
+        let scratch = Scratch::new("good");
+        scratch.plugin("tones");
+
+        let found = scan(&scratch.0);
+        assert_eq!(found.len(), 1);
+
+        let tones = &found[0];
+        assert!(tones.runs(), "{:?}", tones.error);
+        assert_eq!(tones.id, "tones");
+        assert_eq!(
+            tones.hash,
+            hash::folder_hash(&scratch.0.join("tones")).unwrap()
+        );
+        assert_eq!(tones.document["name"], "Tones");
+        assert_eq!(tones.programs, vec![("rox-no-such-program".into(), false)]);
+    }
+
+    #[test]
+    fn a_bad_manifest_still_shows_with_its_reason() {
+        let scratch = Scratch::new("bad");
+        scratch.write("broken/plugin.json", r#"{ "id": "broken", "tools": [] }"#);
+        scratch.write("empty/readme.txt", "no manifest here");
+
+        let found = scan(&scratch.0);
+        let ids: Vec<&str> = found.iter().map(|loaded| loaded.id.as_str()).collect();
+        assert_eq!(ids, ["broken", "empty"]);
+
+        for loaded in &found {
+            assert!(!loaded.runs());
+            assert!(loaded.manifest.is_none());
+            assert!(loaded.error.is_some());
+        }
+    }
+
+    #[test]
+    fn a_folder_named_for_another_id_is_refused() {
+        let scratch = Scratch::new("renamed");
+        scratch.plugin("tones");
+        std::fs::rename(scratch.0.join("tones"), scratch.0.join("other")).unwrap();
+
+        let found = scan(&scratch.0);
+        let error = found[0].error.as_deref().unwrap_or_default();
+        assert!(error.contains("holds plugin tones"), "{error}");
+    }
+
+    #[test]
+    fn stray_files_are_skipped() {
+        let scratch = Scratch::new("stray");
+        scratch.plugin("tones");
+        scratch.write("notes.txt", "not a plugin");
+        scratch.write(".DS_Store", "");
+
+        let ids: Vec<String> = scan(&scratch.0).into_iter().map(|l| l.id).collect();
+        assert_eq!(ids, ["tones"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_refused_not_followed() {
+        let scratch = Scratch::new("symlink");
+        scratch.plugin("tones");
+        std::os::unix::fs::symlink(scratch.0.join("tones"), scratch.0.join("linked")).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", scratch.0.join("tones/hosts")).unwrap();
+
+        let found = scan(&scratch.0);
+        let linked = found.iter().find(|l| l.id == "linked").unwrap();
+        assert!(linked.manifest.is_none());
+        assert_eq!(linked.error.as_deref(), Some("the folder is a symlink"));
+
+        let tones = found.iter().find(|l| l.id == "tones").unwrap();
+        assert!(!tones.runs(), "a link inside the folder refuses it too");
+        assert!(tones.hash.is_empty());
+    }
+
+    #[test]
+    fn a_changed_byte_changes_the_hash() {
+        let scratch = Scratch::new("changed");
+        scratch.plugin("tones");
+        let before = scan(&scratch.0)[0].hash.clone();
+
+        scratch.write("tones/bin/tones", "binarY");
+        let after = scan(&scratch.0)[0].hash.clone();
+
+        assert!(!before.is_empty());
+        assert_ne!(before, after);
+    }
+
+    /// The data folder reached through a link, as a portable install or
+    /// macOS's `/tmp` can be: the folder appearing later still wakes it.
+    #[cfg(unix)]
+    #[test]
+    fn the_watch_sees_a_folder_made_under_a_linked_parent() {
+        let scratch = Scratch::new("watch");
+        std::fs::create_dir_all(scratch.0.join("real")).unwrap();
+        std::os::unix::fs::symlink(scratch.0.join("real"), scratch.0.join("link")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = scratch.0.join("link/plugins");
+        let watch = Watch::new(&dir, move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+
+        scratch.plugin("link/plugins/tones");
+        let woke = rx.recv_timeout(Duration::from_secs(10));
+        assert!(woke.is_ok(), "no event for a folder made under the link");
+
+        drop(watch);
+    }
+
+    #[test]
+    fn a_missing_folder_scans_to_nothing() {
+        let scratch = Scratch::new("missing");
+        assert!(scan(&scratch.0.join("plugins")).is_empty());
+    }
+}

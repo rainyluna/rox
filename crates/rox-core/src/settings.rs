@@ -644,6 +644,11 @@ pub struct SessionState {
     /// file can't carry someone else's trust decision.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub approved_shaders: BTreeSet<String>,
+    /// Plugin id to the folder hash this machine agreed to run (ADR 30).
+    /// Machine-local like the shaders, so a copied settings file can't carry
+    /// someone else's trust decision.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub approved_plugins: BTreeMap<String, String>,
 }
 
 fn is_zero(value: &f32) -> bool {
@@ -706,6 +711,7 @@ impl Default for SessionState {
             tempo_pace: 0.0,
             romanize_pace: 0.0,
             approved_shaders: BTreeSet::new(),
+            approved_plugins: BTreeMap::new(),
         }
     }
 }
@@ -1470,6 +1476,48 @@ pub fn approve_shader(fingerprint: &str) {
 /// Test cleanup; nothing in the UI revokes an approval.
 pub fn forget_approved(fingerprint: &str) {
     APPROVED_SHADERS.write().unwrap().remove(fingerprint);
+}
+
+/// Cached like [`APPROVED_SHADERS`]: the Plugins page asks per render. Every
+/// write goes through [`approve_plugin`] or [`revoke_plugin`].
+static APPROVED_PLUGINS: LazyLock<RwLock<BTreeMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(Settings::load().session.approved_plugins));
+
+/// Whether this exact folder was approved. Any other hash, an empty one
+/// included, is a plugin nobody agreed to run.
+pub fn plugin_approved(id: &str, hash: &str) -> bool {
+    !hash.is_empty()
+        && APPROVED_PLUGINS
+            .read()
+            .unwrap()
+            .get(id)
+            .is_some_and(|approved| approved == hash)
+}
+
+/// Only a direct user action calls this: switching the plugin on is the
+/// approving act.
+pub fn approve_plugin(id: &str, hash: &str) {
+    APPROVED_PLUGINS
+        .write()
+        .unwrap()
+        .insert(id.to_string(), hash.to_string());
+
+    let (id, hash) = (id.to_string(), hash.to_string());
+    Settings::update(move |s| {
+        s.session.approved_plugins.insert(id, hash);
+    });
+}
+
+/// Removing a plugin forgets its approval, so adding it back asks again.
+pub fn revoke_plugin(id: &str) {
+    if APPROVED_PLUGINS.write().unwrap().remove(id).is_none() {
+        return;
+    }
+
+    let id = id.to_string();
+    Settings::update(move |s| {
+        s.session.approved_plugins.remove(&id);
+    });
 }
 
 /// Cached like [`APPROVED_SHADERS`]; writes go through [`set_shader_pool`].
@@ -4915,6 +4963,55 @@ mod tests {
         // The trust list must never travel in a shared bundle.
         let bundle = serde_json::to_value(WorkspaceBundle::default()).expect("dump");
         assert!(bundle.get("approved_shaders").is_none());
+    }
+
+    #[test]
+    fn approved_plugins_ride_the_session_shard() {
+        let mut session = SessionState::default();
+        let written = serde_json::to_value(&session).expect("dump");
+        assert!(
+            written.get("approved_plugins").is_none(),
+            "an empty map writes no key"
+        );
+
+        session
+            .approved_plugins
+            .insert("tones".to_string(), "beef".to_string());
+        let written = serde_json::to_value(&session).expect("dump");
+        let read: SessionState = serde_json::from_value(written.clone()).expect("read back");
+        assert_eq!(
+            read.approved_plugins.get("tones").map(String::as_str),
+            Some("beef")
+        );
+        assert_eq!(
+            written["approved_plugins"],
+            serde_json::json!({ "tones": "beef" })
+        );
+
+        let older: SessionState =
+            serde_json::from_value(serde_json::json!({ "volume": 0.4 })).expect("read");
+        assert!(older.approved_plugins.is_empty());
+
+        // Nor in the settings people share, nor a bundle.
+        let settings = serde_json::to_value(Settings::default()).expect("dump");
+        assert!(settings.get("approved_plugins").is_none());
+        let bundle = serde_json::to_value(WorkspaceBundle::default()).expect("dump");
+        assert!(bundle.get("approved_plugins").is_none());
+    }
+
+    #[test]
+    fn a_plugin_is_approved_for_one_hash_only() {
+        APPROVED_PLUGINS
+            .write()
+            .unwrap()
+            .insert("rox-test-plugin".to_string(), "beef".to_string());
+
+        assert!(plugin_approved("rox-test-plugin", "beef"));
+        assert!(!plugin_approved("rox-test-plugin", "cafe"));
+        assert!(!plugin_approved("rox-test-plugin", ""));
+        assert!(!plugin_approved("rox-other-plugin", "beef"));
+
+        APPROVED_PLUGINS.write().unwrap().remove("rox-test-plugin");
     }
 
     #[test]

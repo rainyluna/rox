@@ -736,6 +736,7 @@ settings-page-library = Library
 settings-page-mcp = MCP
 settings-page-ml-models = ML Models
 settings-page-playback = Playback
+settings-page-plugins = Plugins
 settings-page-providers = Providers
 settings-page-radio = Radio
 settings-page-shader = Shader
@@ -849,6 +850,8 @@ settings-application-download-updates = Download Updates
     .description = When a check finds a newer release, download and stage it in the background; the next start runs it
 settings-application-enable-ai = Enable AI Features
     .description = Let AI tooling talk to rox: adds MCP support, and the ML model downloads, with their pages joining the sidebar.
+settings-application-enable-plugins = Enable Plugins
+    .description = Show the Plugins page, where each plugin dropped into the plugins folder gets its own switch. A plugin runs as a program on this computer with your permissions
 settings-application-lock-panel-resize = Lock Panel Resize
     .description = Panel splits only resize while Design Mode is on, so a drag near a seam can't nudge a finished layout
 settings-application-menu-entry = App Menu Entry
@@ -861,6 +864,7 @@ settings-application-portable-restart-note = Applies on the next launch; this ru
 settings-application-remain-in-tray = Remain in Tray
     .description = Keep the music playing when the last window closes, with the tray icon (the dock on macOS) as the way back in
 settings-application-section-ai = AI
+settings-application-section-plugins = Plugins
 settings-application-section-control-socket = Control Socket
 settings-application-section-data = Data
 settings-application-section-desktop = Desktop
@@ -1243,6 +1247,41 @@ settings-playback-shuffle-similar = Similar
     .description = Nearest first by sound. What's coming is sorted by how much it resembles the track that was playing when you turned it on, and re-sorted on every skip. Needs the library described on the Library page
 settings-playback-unrated-dots = Unrated Dots
     .description = Mark unfilled star slots with a faint dot instead of leaving them empty
+
+## Settings: plugins
+
+settings-plugins-intro = Each folder in the plugins folder is one plugin. Nothing in it runs until you switch it on, and one that changes on disk switches off until you switch it on again
+settings-plugins-reveal = Reveal Folder
+settings-plugins-empty = No plugins yet. Drop a plugin's folder into the plugins folder
+settings-plugins-standing-missing = Missing
+settings-plugins-standing-failed = Failed
+settings-plugins-standing-changed = Changed on disk
+settings-plugins-standing-stopped = Stopped after repeated crashes
+settings-plugins-standing-needs = Needs { $programs }
+settings-plugins-failed-title = This plugin can't run
+settings-plugins-sync-failed = The last sync failed
+settings-plugins-scrobble = Scrobble Plays
+    .description = Send what this plugin plays to your scrobblers. Offered because the plugin asks for it
+settings-plugins-synced = Synced Collections
+settings-plugins-synced-none = Nothing synced yet. Switch sync on for a collection in the plugin's source browser
+settings-plugins-sync-now = Sync Now
+settings-plugins-card-title = Switch on "{ $name }"?
+settings-plugins-card-runs = It runs as a program on this computer with your permissions. rox doesn't sandbox it.
+settings-plugins-card-source = Adds { $label } as a source: rox browses, searches, syncs and plays it through the plugin.
+settings-plugins-card-scrobbles = Asks to scrobble what it plays.
+settings-plugins-card-program-found = Uses { $program }, found on this computer.
+settings-plugins-card-program-missing = Uses { $program }, which isn't on this computer's PATH.
+settings-plugins-card-changed = Changed since you last switched it on:
+settings-plugins-card-unchanged = The manifest is the same as last time. Other files in the folder changed.
+settings-plugins-change-capability-added = New capability: { $name }
+settings-plugins-change-capability-removed = Dropped capability: { $name }
+settings-plugins-change-program = New program: { $program }
+settings-plugins-change-scrobble-on = Now asks to scrobble
+settings-plugins-change-scrobble-off = No longer asks to scrobble
+settings-plugins-change-entry = Starts a different way
+settings-plugins-switch-on = Switch On
+settings-plugins-remove-title = Remove "{ $name }"?
+settings-plugins-remove-body = Its tracks, synced collections and settings go. Its folder stays in the plugins folder, so delete it there to stop it showing here.
 
 ## Settings: providers
 

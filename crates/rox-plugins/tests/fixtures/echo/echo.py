@@ -177,7 +177,7 @@ def main():
             config.update(params.get("config") or {})
             if config.get("hello_crash"):
                 os._exit(4)
-            send({"jsonrpc": "2.0", "id": rid, "result": {"name": "Echo", "version": "0.1.0", "api": 0}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"name": "Echo", "version": "0.1.0", "api": 1}})
             continue
 
         if method == "shutdown":

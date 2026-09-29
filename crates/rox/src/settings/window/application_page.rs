@@ -1,5 +1,5 @@
-//! The Application settings page: the AI gate, launch and updates, layout,
-//! window residency, the data folder and the control socket.
+//! The Application settings page: the AI and plugin gates, launch and
+//! updates, layout, window residency, the data folder and the control socket.
 
 use super::*;
 
@@ -113,6 +113,24 @@ impl SettingsWindow {
                     )
                 },
             ))
+            // Experimental until the opt-in ships, so a release build carries
+            // the plugin host dark. Drop the `experimental()` gate here and in
+            // `plugins_visible` to lift it.
+            .when(settings::experimental(), |page| {
+                page.section(Section::new(
+                    q,
+                    icons::PLUG,
+                    rox_i18n::t!("settings-application-section-plugins"),
+                    None,
+                    |rows| {
+                        rows.keyed(
+                            "settings-application-enable-plugins",
+                            &["plugin", "extension", "source", "addon"],
+                            panel::toggle(self.plugins_enabled, Self::set_plugins_enabled, cx),
+                        )
+                    },
+                ))
+            })
             .section(Section::new(
                 q,
                 icons::PLAY,
@@ -322,6 +340,20 @@ impl SettingsWindow {
     fn set_download_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         self.download_updates = on;
         Settings::update(move |s| s.download_updates = on);
+        cx.notify();
+    }
+
+    /// Off stops every plugin and hides the page; each plugin keeps its own
+    /// switch for when it comes back on.
+    fn set_plugins_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.plugins_enabled = on;
+        Settings::update(move |s| s.plugins_enabled = on);
+        settings::set_plugins_enabled(on, cx);
+        rox_services::plugins::apply(cx);
+        // Leave a page the toggle just hid.
+        if !on && self.page == Page::Plugins {
+            self.page = Page::Application;
+        }
         cx.notify();
     }
 

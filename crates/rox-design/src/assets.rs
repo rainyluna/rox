@@ -135,6 +135,8 @@ pub mod icons {
     pub const MOVE: &str = "icons/move.svg";
     pub const COLUMNS_2: &str = "icons/columns-2.svg";
     pub const LAYERS: &str = "icons/layers-2.svg";
+    /// Plugins (ADR 30).
+    pub const PLUG: &str = "icons/plug.svg";
     pub const PANEL_BOTTOM: &str = "icons/panel-bottom.svg";
     pub const PANEL_TOP: &str = "icons/panel-top.svg";
     pub const PANEL_LEFT: &str = "icons/panel-left.svg";
@@ -253,6 +255,7 @@ pub mod icons {
         APP_WINDOW,
         USER,
         LAYERS,
+        PLUG,
         LOCK,
         LOCK_OPEN,
         PIN,

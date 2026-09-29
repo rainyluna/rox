@@ -10,11 +10,13 @@
 
 pub mod hash;
 pub mod host;
+pub mod loader;
 pub mod manifest;
 pub mod process;
 pub mod stream;
 pub mod wire;
 
 pub use host::{Host, HostConfig, Status, Timeouts};
+pub use loader::Loaded;
 pub use manifest::Manifest;
 pub use stream::{Options, Stats, Stream};

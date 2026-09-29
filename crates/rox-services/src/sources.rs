@@ -25,6 +25,7 @@ use gpui::{App, Entity, Task};
 use rox_core::settings::{AccountsState, PluginRecord, Settings, SubsonicAccount};
 use rox_library::TrackRow;
 use rox_library::cue::{Origin, PLUGIN_PREFIX};
+use rox_library::members;
 use rox_library::playlists;
 use rox_library::replaygain::ReplayGain;
 use rox_library::rusqlite::Connection;
@@ -205,8 +206,10 @@ pub fn install_registry() {
     }
 }
 
-/// Switched-on Subsonic accounts in list order, then switched-on plugins.
-fn live_in_order(accounts: &AccountsState) -> Vec<String> {
+/// Switched-on Subsonic accounts in list order, then switched-on plugins
+/// whose folder `present` finds. A Missing plugin's rows hide like a
+/// switched-off one's.
+fn live_in_order(accounts: &AccountsState, present: &dyn Fn(&str) -> bool) -> Vec<String> {
     let servers = accounts
         .subsonic_servers
         .iter()
@@ -216,15 +219,20 @@ fn live_in_order(accounts: &AccountsState) -> Vec<String> {
     let plugins = accounts
         .plugins
         .iter()
-        .filter(|record| record.enabled)
+        .filter(|record| record.enabled && present(&record.id))
         .map(plugin_source);
 
     servers.chain(plugins).collect()
 }
 
-/// The non-local ids whose rows browse.
+/// The non-local ids whose rows browse, against the last scan of the
+/// plugins folder.
 pub fn live_ids(accounts: &AccountsState) -> HashSet<String> {
-    live_in_order(accounts).into_iter().collect()
+    live_ids_in(accounts, &crate::plugins::present)
+}
+
+fn live_ids_in(accounts: &AccountsState, present: &dyn Fn(&str) -> bool) -> HashSet<String> {
+    live_in_order(accounts, present).into_iter().collect()
 }
 
 /// What an everyday prune keeps, one set per namespace. None leaves that
@@ -288,7 +296,12 @@ fn drop_departed(conn: &mut Connection, kept: &Kept) -> usize {
     let nothing = HashSet::new();
     departed
         .iter()
-        .filter_map(|source| store::prune_source(conn, source, &nothing).ok())
+        .filter_map(|source| match source.starts_with(PLUGIN_PREFIX) {
+            // Membership goes with the rows, or a leftover would hold a
+            // collection for a plugin nobody has.
+            true => members::remove_source(conn, source).ok(),
+            false => store::prune_source(conn, source, &nothing).ok(),
+        })
         .sum()
 }
 
@@ -679,7 +692,7 @@ pub fn cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
 /// store answers.
 fn fetch_cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
     let accounts = accounts_state();
-    let live = live_in_order(&accounts);
+    let live = live_in_order(&accounts, &crate::plugins::present);
     if live.is_empty() {
         return None;
     }
@@ -1082,7 +1095,10 @@ mod tests {
     #[test]
     fn only_switched_on_servers_browse() {
         let (home, work) = (id(HOME), id(WORK));
-        let live = live_ids(&servers(&[account(true, HOME), account(false, WORK)]));
+        let live = live_ids_in(
+            &servers(&[account(true, HOME), account(false, WORK)]),
+            &|_| true,
+        );
 
         assert!(!hides(&live, &home));
         assert!(hides(&live, &work));
@@ -1099,13 +1115,13 @@ mod tests {
         let mut conn = library(&["plugin:demo"]);
 
         let off = state(&[], &[plugin("demo", false)]);
-        assert!(hides(&live_ids(&off), "plugin:demo"));
+        assert!(hides(&live_ids_in(&off, &|_| true), "plugin:demo"));
 
         assert_eq!(prune_for(&mut conn, &off), 0);
         assert_eq!(count(&conn, "plugin:demo"), 2);
 
         let on = state(&[], &[plugin("demo", true)]);
-        assert!(!hides(&live_ids(&on), "plugin:demo"));
+        assert!(!hides(&live_ids_in(&on, &|_| true), "plugin:demo"));
     }
 
     #[test]
@@ -1113,12 +1129,59 @@ mod tests {
         let mut conn = library(&["plugin:demo", "plugin:other"]);
         let left = state(&[], &[plugin("other", true)]);
 
-        assert!(hides(&live_ids(&left), "plugin:demo"));
+        assert!(hides(&live_ids_in(&left, &|_| true), "plugin:demo"));
 
         assert_eq!(prune_for(&mut conn, &left), 2);
         assert_eq!(count(&conn, "plugin:demo"), 0);
         assert_eq!(count(&conn, "plugin:other"), 2);
         assert_eq!(count(&conn, "local"), 1);
+    }
+
+    #[test]
+    fn a_missing_plugins_rows_hide_and_stay() {
+        let mut conn = library(&["plugin:demo"]);
+        let on = state(&[], &[plugin("demo", true)]);
+
+        assert!(hides(&live_ids_in(&on, &|_| false), "plugin:demo"));
+        assert!(!hides(&live_ids_in(&on, &|id| id == "demo"), "plugin:demo"));
+
+        assert_eq!(prune_for(&mut conn, &on), 0);
+        assert_eq!(
+            depart_once(&mut conn, &on, &AtomicBool::new(false)),
+            0,
+            "deleting the folder is how many people update a plugin"
+        );
+        assert_eq!(count(&conn, "plugin:demo"), 2);
+    }
+
+    #[test]
+    fn a_departing_plugin_takes_its_membership_with_its_rows() {
+        let mut conn = library(&[]);
+        let tracks: Vec<members::PluginTrack> = ["a", "b"]
+            .map(|key| members::PluginTrack {
+                key: key.into(),
+                title: key.into(),
+                ..Default::default()
+            })
+            .into();
+        members::set_collection(&mut conn, "plugin:demo", "liked", &tracks).unwrap();
+        members::pick(&mut conn, "plugin:demo", &tracks[..1]).unwrap();
+        members::pick(&mut conn, "plugin:other", &tracks[..1]).unwrap();
+
+        let left = state(&[], &[plugin("other", true)]);
+        assert_eq!(prune_for(&mut conn, &left), 2);
+
+        assert_eq!(count(&conn, "plugin:demo"), 0);
+        assert!(
+            members::collections(&conn, "plugin:demo")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(count(&conn, "plugin:other"), 1);
+        assert_eq!(
+            members::collections(&conn, "plugin:other").unwrap().len(),
+            1
+        );
     }
 
     #[test]

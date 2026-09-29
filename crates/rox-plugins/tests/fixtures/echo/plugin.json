@@ -2,7 +2,7 @@
   "id": "echo",
   "name": "Echo",
   "version": "0.1.0",
-  "api": 0,
+  "api": 1,
   "entry": {
     "script": { "path": "echo.py", "interpreter": "python3" }
   },
