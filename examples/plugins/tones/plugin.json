@@ -1,0 +1,31 @@
+{
+  "id": "tones",
+  "name": "Tones",
+  "version": "0.1.0",
+  "api": 1,
+  "entry": {
+    "script": { "path": "tones.py", "interpreter": "python3" }
+  },
+  "meta": {
+    "author": "rox",
+    "description": "An example source plugin. It makes sine tones and chords as WAV files on the fly, so it needs no network and ships no recordings.",
+    "website": "https://github.com/zealsprince/rox",
+    "license": "AGPL-3.0-only"
+  },
+  "capabilities": {
+    "source": { "label": "Tones", "scrobble": false }
+  },
+  "programs": [],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "volume": {
+        "type": "integer",
+        "title": "Volume",
+        "description": "Peak level of every tone, in percent of full scale. Changing it restarts the plugin.",
+        "minimum": 1,
+        "maximum": 100
+      }
+    }
+  }
+}

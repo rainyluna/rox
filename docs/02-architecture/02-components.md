@@ -223,3 +223,27 @@ network never blocks the UI, the audio path, or a browse query.
   identification (`rusty-chromaprint` plus an AcoustID lookup) covers the files whose
   tags are missing or wrong. None of this is load-bearing for the core, so it stays a
   thin, isolated domain.
+
+## Plugin host
+
+Responsibility: running the plugins the user switched on, and turning what they serve into
+library rows and playable streams ([ADR 30](decisions/30-adr-plugins.md)). The detail is
+in [implementation 10](../03-implementation/10-plugins.md).
+
+Boundary: a plugin is a subprocess in its own folder, spoken to over its stdin and stdout
+with JSON-RPC. The host crate knows the manifest, the folder hash, the wire and the
+process, and nothing of the library, the player or the UI. The services layer turns a
+running plugin into a source: browse and search for the External Sources panel, sync and
+pick into the library, covers, and a stream opener for the engine.
+
+Contract:
+- Nothing runs until the user switches it on, and switching on approves the folder's exact
+  contents. A changed folder switches the plugin off until it's approved again.
+- Every call runs off the UI thread and has a timeout. A plugin's answer is untrusted
+  input: typed, capped, and never a panic. A dead or slow plugin fails its own calls and
+  its own tracks, never local playback.
+- A plugin serves audio as container bytes the engine decodes like a file. It never hands
+  rox a URL, never reaches the engine, the ring or the UI, and never calls rox back.
+- A plugin's rows are held by membership in the collections the user keeps and the
+  tracks they pick ([ADR 29](decisions/29-adr-source-contract.md)), filed under
+  `plugin:<id>` for good.

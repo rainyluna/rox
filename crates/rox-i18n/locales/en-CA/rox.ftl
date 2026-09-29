@@ -1252,6 +1252,7 @@ settings-playback-unrated-dots = Unrated Dots
 
 settings-plugins-intro = Each folder in the plugins folder is one plugin. Nothing in it runs until you switch it on, and one that changes on disk switches off until you switch it on again
 settings-plugins-reveal = Reveal Folder
+settings-plugins-guide = Plugin Guide
 settings-plugins-empty = No plugins yet. Drop a plugin's folder into the plugins folder
 settings-plugins-standing-missing = Missing
 settings-plugins-standing-failed = Failed
@@ -1282,6 +1283,7 @@ settings-plugins-change-entry = Starts a different way
 settings-plugins-switch-on = Switch On
 settings-plugins-remove-title = Remove "{ $name }"?
 settings-plugins-remove-body = Its tracks, synced collections and settings go. Its folder stays in the plugins folder, so delete it there to stop it showing here.
+settings-plugins-remove-body-missing = Its tracks, synced collections and settings go. Its folder is already gone from the plugins folder, so it won't show here again.
 
 ## Settings: providers
 

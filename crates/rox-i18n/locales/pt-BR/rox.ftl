@@ -1200,6 +1200,7 @@ settings-playback-unrated-dots = Pontos para o não avaliado
 ## Settings: plugins
 settings-plugins-intro = Cada pasta dentro da pasta de plugins é um plugin. Nada nela roda até você ligá-lo, e um que muda no disco se desliga até você ligá-lo de novo
 settings-plugins-reveal = Mostrar pasta
+settings-plugins-guide = Guia de plugins
 settings-plugins-empty = Nenhum plugin ainda. Coloque a pasta de um plugin na pasta de plugins
 settings-plugins-standing-missing = Ausente
 settings-plugins-standing-failed = Falhou
@@ -1230,6 +1231,7 @@ settings-plugins-change-entry = Inicia de outro jeito
 settings-plugins-switch-on = Ligar
 settings-plugins-remove-title = Remover "{ $name }"?
 settings-plugins-remove-body = Suas faixas, coleções sincronizadas e configurações vão embora. A pasta fica na pasta de plugins; apague-a lá para que ele deixe de aparecer aqui.
+settings-plugins-remove-body-missing = Suas faixas, coleções sincronizadas e configurações vão embora. A pasta já não está na pasta de plugins, então ele não volta a aparecer aqui.
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

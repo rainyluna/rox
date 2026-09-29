@@ -30,3 +30,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+# The tones example's test probes the WAV it serves the way the engine does.
+# Same pin as rox-playback's, trimmed to the one container and codec.
+[dev-dependencies]
+symphonia = { version = "0.6", default-features = false, features = ["pcm", "wav"] }

@@ -32,3 +32,7 @@ speculated ahead of the code. The set, one per domain:
 - [09-i18n.md](09-i18n.md) - key conventions and the ftl layout, the extraction moves
   per kind of string, ICU formatting helpers, adding a locale, and the pseudo-locale
   check
+- [10-plugins.md](10-plugins.md) - the plugin folder and its hash, the manifest and what
+  refuses one, the wire with each method's request and answer, timeouts and caps, the
+  process lifecycle and per-OS spawn, how a plugin's streams reach the engine and its
+  rows enter the library, and the approval switch

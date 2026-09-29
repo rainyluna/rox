@@ -1194,6 +1194,7 @@ settings-playback-unrated-dots = Punkte für Unbewertetes
 ## Settings: plugins
 settings-plugins-intro = Jeder Ordner im Plugin-Ordner ist ein Plugin. Nichts darin läuft, bevor du es einschaltest, und eines, das sich auf der Festplatte ändert, schaltet sich aus, bis du es wieder einschaltest
 settings-plugins-reveal = Ordner zeigen
+settings-plugins-guide = Plugin-Anleitung
 settings-plugins-empty = Noch keine Plugins. Leg den Ordner eines Plugins in den Plugin-Ordner
 settings-plugins-standing-missing = Fehlt
 settings-plugins-standing-failed = Fehlgeschlagen
@@ -1224,6 +1225,7 @@ settings-plugins-change-entry = Startet auf andere Weise
 settings-plugins-switch-on = Einschalten
 settings-plugins-remove-title = "{ $name }" entfernen?
 settings-plugins-remove-body = Seine Titel, abgeglichenen Sammlungen und Einstellungen gehen. Sein Ordner bleibt im Plugin-Ordner; lösch ihn dort, damit er hier nicht mehr erscheint.
+settings-plugins-remove-body-missing = Seine Titel, abgeglichenen Sammlungen und Einstellungen gehen. Sein Ordner ist schon nicht mehr im Plugin-Ordner, also erscheint er hier danach nicht mehr.
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

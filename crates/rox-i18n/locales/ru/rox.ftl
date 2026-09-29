@@ -1204,6 +1204,7 @@ settings-playback-unrated-dots = Точки без оценки
 ## Settings: plugins
 settings-plugins-intro = Каждая папка в папке плагинов это один плагин. Ничего из неё не запускается, пока вы его не включите, а изменившийся на диске плагин выключается, пока вы не включите его снова
 settings-plugins-reveal = Показать папку
+settings-plugins-guide = Руководство по плагинам
 settings-plugins-empty = Плагинов пока нет. Положите папку плагина в папку плагинов
 settings-plugins-standing-missing = Не найден
 settings-plugins-standing-failed = Ошибка
@@ -1234,6 +1235,7 @@ settings-plugins-change-entry = Запускается по-другому
 settings-plugins-switch-on = Включить
 settings-plugins-remove-title = Удалить «{ $name }»?
 settings-plugins-remove-body = Его треки, синхронизируемые коллекции и настройки удаляются. Папка остаётся в папке плагинов; удалите её там, чтобы он перестал здесь появляться.
+settings-plugins-remove-body-missing = Его треки, синхронизируемые коллекции и настройки удаляются. Его папки в папке плагинов уже нет, так что здесь он больше не появится.
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

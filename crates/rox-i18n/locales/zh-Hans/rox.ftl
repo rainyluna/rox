@@ -1181,6 +1181,7 @@ settings-playback-unrated-dots = 未评分小点
 ## Settings: plugins
 settings-plugins-intro = 插件文件夹里的每个文件夹就是一个插件。打开开关之前其中什么都不会运行，在磁盘上有改动的插件会关闭，直到你再次打开
 settings-plugins-reveal = 显示文件夹
+settings-plugins-guide = 插件指南
 settings-plugins-empty = 还没有插件。把插件的文件夹放进插件文件夹
 settings-plugins-standing-missing = 缺失
 settings-plugins-standing-failed = 失败
@@ -1211,6 +1212,7 @@ settings-plugins-change-entry = 启动方式变了
 settings-plugins-switch-on = 打开
 settings-plugins-remove-title = 移除“{ $name }”？
 settings-plugins-remove-body = 它的曲目、已同步的收藏和设置都会删除。它的文件夹留在插件文件夹里，要让它不再出现在这里，请在那里删除。
+settings-plugins-remove-body-missing = 它的曲目、已同步的收藏和设置都会删除。它的文件夹已经不在插件文件夹里，所以不会再出现在这里。
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

@@ -1207,6 +1207,7 @@ settings-playback-unrated-dots = Punti per le non valutate
 ## Settings: plugins
 settings-plugins-intro = Ogni cartella dentro la cartella dei plugin è un plugin. Niente parte finché non lo attivi, e uno che cambia sul disco si spegne finché non lo riattivi
 settings-plugins-reveal = Mostra cartella
+settings-plugins-guide = Guida ai plugin
 settings-plugins-empty = Ancora nessun plugin. Metti la cartella di un plugin nella cartella dei plugin
 settings-plugins-standing-missing = Mancante
 settings-plugins-standing-failed = Non riuscito
@@ -1237,6 +1238,7 @@ settings-plugins-change-entry = Si avvia in un altro modo
 settings-plugins-switch-on = Attiva
 settings-plugins-remove-title = Rimuovere "{ $name }"?
 settings-plugins-remove-body = Se ne vanno i suoi brani, le raccolte sincronizzate e le impostazioni. La sua cartella resta nella cartella dei plugin; cancellala lì perché non compaia più qui.
+settings-plugins-remove-body-missing = Se ne vanno i suoi brani, le raccolte sincronizzate e le impostazioni. La sua cartella non è già più nella cartella dei plugin, quindi non comparirà più qui.
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

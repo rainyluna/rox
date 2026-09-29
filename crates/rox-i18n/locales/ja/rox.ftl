@@ -1181,6 +1181,7 @@ settings-playback-unrated-dots = 未評価の点
 ## Settings: plugins
 settings-plugins-intro = プラグインフォルダー内のフォルダー一つが一つのプラグイン。オンにするまでは何も動かず、ディスク上で変わったものはもう一度オンにするまでオフになる
 settings-plugins-reveal = フォルダーを表示
+settings-plugins-guide = プラグインガイド
 settings-plugins-empty = プラグインはまだありません。プラグインのフォルダーをプラグインフォルダーに置いてください
 settings-plugins-standing-missing = 見つからない
 settings-plugins-standing-failed = 失敗
@@ -1211,6 +1212,7 @@ settings-plugins-change-entry = 起動のしかたが変わった
 settings-plugins-switch-on = オンにする
 settings-plugins-remove-title = "{ $name }" を削除しますか?
 settings-plugins-remove-body = 曲、同期中のコレクション、設定が消えます。フォルダーはプラグインフォルダーに残るので、ここに表示されないようにするにはそちらで削除してください。
+settings-plugins-remove-body-missing = 曲、同期中のコレクション、設定が消えます。フォルダーはすでにプラグインフォルダーにないので、ここにはもう表示されません。
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

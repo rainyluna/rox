@@ -278,6 +278,42 @@ The socket does everything the tools do and more. Queue edits, seeking,
 volume, artwork, and the event stream are socket-only.
 
 
+Plugins
+-------
+
+A plugin brings a source from outside rox into your library: rox browses,
+searches, syncs and plays it through a program the plugin supplies. rox
+doesn't ship plugins for any service. The protocol and an example plugin
+to copy are in the repository.
+
+To add one:
+
+  1. Turn on Experimental Panels in Settings > Development, then Enable
+     Plugins in Settings > Application. That shows the Plugins page.
+  2. Press Reveal Folder on the Plugins page. It opens the plugins folder,
+     creating it the first time. In portable mode that's rox-data/plugins
+     beside the executable.
+  3. Drop the plugin's folder in. The folder's name has to be the plugin's
+     id.
+  4. Switch it on. The card that opens says what the plugin declares and
+     which programs it runs, and asks you to confirm.
+
+A plugin runs as a program on this computer with your permissions. rox
+doesn't sandbox it. Switching it on approves exactly the files in its
+folder; if any of them change, it switches off until you switch it on
+again, and the card shows what changed.
+
+Browse and search a plugin's source in the External Sources panel (Add
+Panel > Experimental). Keep in the library on a collection syncs it into
+your library, and playing or queueing a track adds just that track.
+Remove on the Plugins page drops the plugin's tracks, synced collections
+and settings, and leaves its folder where it is.
+
+The plugin guide, with the protocol for writing one, is behind the Plugin
+Guide button on the Plugins page and at
+https://github.com/zealsprince/rox/blob/main/docs/03-implementation/10-plugins.md
+
+
 License
 -------
 

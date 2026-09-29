@@ -1235,6 +1235,7 @@ settings-playback-unrated-dots = Points sans note
 ## Settings: plugins
 settings-plugins-intro = Chaque dossier du dossier des plugins est un plugin. Rien ne s'exécute avant que vous ne l'activiez, et un plugin modifié sur le disque se désactive jusqu'à ce que vous le réactiviez
 settings-plugins-reveal = Afficher le dossier
+settings-plugins-guide = Guide des plugins
 settings-plugins-empty = Aucun plugin pour l'instant. Déposez le dossier d'un plugin dans le dossier des plugins
 settings-plugins-standing-missing = Introuvable
 settings-plugins-standing-failed = Échec
@@ -1265,6 +1266,7 @@ settings-plugins-change-entry = Démarre autrement
 settings-plugins-switch-on = Activer
 settings-plugins-remove-title = Retirer « { $name } » ?
 settings-plugins-remove-body = Ses morceaux, ses collections synchronisées et ses réglages disparaissent. Son dossier reste dans le dossier des plugins ; supprimez-le là-bas pour qu'il n'apparaisse plus ici.
+settings-plugins-remove-body-missing = Ses morceaux, ses collections synchronisées et ses réglages disparaissent. Son dossier n'est déjà plus dans le dossier des plugins, il n'apparaîtra donc plus ici.
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

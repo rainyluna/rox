@@ -1209,6 +1209,7 @@ settings-playback-unrated-dots = Крапки замість порожніх з
 ## Settings: plugins
 settings-plugins-intro = Кожна тека в теці плагінів це один плагін. Нічого з неї не запускається, доки ви його не ввімкнете, а плагін, що змінився на диску, вимикається, доки ви не ввімкнете його знову
 settings-plugins-reveal = Показати теку
+settings-plugins-guide = Посібник із плагінів
 settings-plugins-empty = Плагінів поки немає. Покладіть теку плагіна в теку плагінів
 settings-plugins-standing-missing = Не знайдено
 settings-plugins-standing-failed = Помилка
@@ -1239,6 +1240,7 @@ settings-plugins-change-entry = Запускається інакше
 settings-plugins-switch-on = Увімкнути
 settings-plugins-remove-title = Прибрати «{ $name }»?
 settings-plugins-remove-body = Його треки, синхронізовані колекції та налаштування зникають. Тека лишається в теці плагінів; видаліть її там, щоб він більше тут не з'являвся.
+settings-plugins-remove-body-missing = Його треки, синхронізовані колекції та налаштування зникають. Його теки в теці плагінів уже немає, тож тут він більше не з'явиться.
 
 ## Settings: providers
 settings-providers-acoustid = AcoustID

@@ -19,6 +19,14 @@ use super::*;
 /// The action cell here holds Remove beside the switch.
 const PLUGIN_ACTION_W: Pixels = px(72.);
 
+/// The guide as of this build's release, so it describes the host that's
+/// running rather than whatever main has moved on to.
+const GUIDE_URL: &str = concat!(
+    "https://github.com/zealsprince/rox/blob/v",
+    env!("CARGO_PKG_VERSION"),
+    "/docs/03-implementation/10-plugins.md"
+);
+
 /// The page's own state, re-read when the host's generation moves.
 #[derive(Default)]
 pub(super) struct PluginsPage {
@@ -451,6 +459,15 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    /// Whether the plugin's folder is still in the plugins folder, loadable
+    /// or not.
+    pub(super) fn plugin_folder_present(&self, id: &str) -> bool {
+        self.plugin_page
+            .folders
+            .iter()
+            .any(|folder| folder.id == id)
+    }
+
     pub(super) fn plugin_name(&self, id: &str) -> String {
         let manifest_name = self
             .plugin_page
@@ -523,6 +540,12 @@ impl SettingsWindow {
                 icons::REFRESH_CW,
                 false,
                 |_, _, cx| host::rescan(cx),
+            ))
+            .child(small_button(
+                rox_i18n::t!("settings-plugins-guide"),
+                icons::EXTERNAL_LINK,
+                false,
+                |_, _, cx| cx.open_url(GUIDE_URL),
             ));
 
         // One row per folder, then one per record whose folder is gone.
@@ -675,12 +698,15 @@ impl SettingsWindow {
             _ => None,
         };
         let sync_error = self.plugin_page.errors.get(id).cloned();
+        let below = on || failure.is_some() || sync_error.is_some();
 
         div()
             .id(SharedString::from(format!("plugin-{id}")))
             .flex()
             .flex_col()
             .gap(tokens::SPACE_XS)
+            // Whatever hangs under the line keeps clear of the next row's.
+            .when(below, |d| d.pb(tokens::SPACE_MD))
             .child(line)
             .when_some(failure, |d, reason| {
                 d.child(panel::banner(

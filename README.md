@@ -188,6 +188,15 @@ fallback, so add `noto-fonts-cjk-sans-static` or `google-noto-sans-cjk-fonts`.
   the executable for this run. To stay portable across launches, drop an empty file named
   `portable` next to the executable, or flip the toggle under Settings > Application.
 
+## Plugins
+
+A plugin brings a source from outside rox into the library: rox browses, searches, syncs
+and plays it through a program the plugin supplies. Each plugin is a folder in the
+`plugins` folder of rox's data directory, and nothing in it runs until you switch it on
+on the Plugins settings page. rox doesn't publish plugins for any service. It publishes
+the protocol in the [plugin guide](docs/03-implementation/10-plugins.md) and an example
+to copy in [`examples/plugins/tones`](examples/plugins/tones/).
+
 ## Development
 
 With Nix:
