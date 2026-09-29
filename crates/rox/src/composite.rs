@@ -241,7 +241,8 @@ pub fn pick_items(
     on_pick: impl Fn(Arc<dyn PanelView>, &mut Window, &mut App) + Clone + 'static,
 ) -> PopupMenu {
     // Presets lead here too, grayed by the same no-nesting rule.
-    if let Some(dock) = workspace.upgrade().map(|ws| ws.read(cx).dock().downgrade()) {
+    let dock = workspace.upgrade().map(|ws| ws.read(cx).dock().downgrade());
+    if let Some(dock) = dock.clone() {
         menu = crate::panel_presets::pick_submenu(menu, dock, true, window, cx, on_pick.clone());
     }
     for section in catalog::sections() {
@@ -285,6 +286,10 @@ pub fn pick_items(
                 );
             }
         }
+    }
+    // Plugin panels trail the catalog they're presets of.
+    if let Some(dock) = dock {
+        menu = crate::panel_presets::plugins_submenu(menu, dock, true, window, cx, on_pick);
     }
     menu
 }

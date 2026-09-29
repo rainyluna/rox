@@ -1,7 +1,8 @@
 //! The Plugins settings page (ADR 30): every folder in the plugins folder and
-//! every plugin record, each with its switch. Under a switched-on plugin sit
-//! its config, its synced collections and, when it asks for it, scrobbling.
-//! Shown only while the Plugins switch on the Application page is on.
+//! every plugin record, each with its switch, and Developer mode beside a
+//! switched-on one. Under a switched-on plugin sit its config, its synced
+//! collections and, when it asks for it, scrobbling. The Plugins switch at the head of the page lets any of
+//! them run, and the list shows only while it's on.
 //!
 //! The switch is the approving act. Turning on a folder this machine hasn't
 //! approved opens the enable card first, and confirming it is the only way
@@ -9,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use gpui_component::tooltip::Tooltip;
 use rox_plugins::host::STOPPED_AFTER_CRASHES;
 use rox_plugins::{Loaded, Status};
 use rox_services::plugins::{self as host, Change};
@@ -16,8 +18,8 @@ use serde_json::Value;
 
 use super::*;
 
-/// The action cell here holds Remove beside the switch.
-const PLUGIN_ACTION_W: Pixels = px(72.);
+/// The action cell here holds Developer mode and Remove beside the switch.
+const PLUGIN_ACTION_W: Pixels = px(100.);
 
 /// The guide as of this build's release, so it describes the host that's
 /// running rather than whatever main has moved on to.
@@ -294,15 +296,20 @@ fn read_collections(library: &Entity<Library>, id: &str, cx: &App) -> Vec<(Strin
 }
 
 impl SettingsWindow {
-    /// The page is visible only with both switches on, and search follows.
-    pub(super) fn plugins_visible(&self) -> bool {
-        self.plugins_enabled && settings::experimental()
+    /// Off stops every plugin; each keeps its own switch for when this comes
+    /// back on.
+    fn set_plugins_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.plugins_enabled = on;
+        Settings::update(move |s| s.plugins_enabled = on);
+        settings::set_plugins_enabled(on, cx);
+        host::apply(cx);
+        cx.notify();
     }
 
     /// From render: re-read when the host moved, and give every text field a
     /// switched-on plugin's config shows an input to hold it.
     pub(super) fn sync_plugins(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.plugins_visible() {
+        if !self.plugins_enabled {
             return;
         }
 
@@ -562,7 +569,14 @@ impl SettingsWindow {
                 .filter(|id| !self.plugin_page.folders.iter().any(|f| f.id == *id)),
         );
 
-        let mut keywords = vec!["plugin", "extension", "source", "folder", "approve"];
+        let mut keywords = vec![
+            "plugin",
+            "extension",
+            "source",
+            "folder",
+            "approve",
+            "developer",
+        ];
         keywords.extend(ids.iter().copied());
 
         let intro = div()
@@ -590,8 +604,15 @@ impl SettingsWindow {
             rox_i18n::t!("settings-page-plugins"),
             Some(controls.into_any_element()),
             |rows| {
-                rows.custom(&keywords, || intro.into_any_element())
-                    .custom(&keywords, || table.into_any_element())
+                rows.keyed(
+                    "settings-plugins-enable",
+                    &["plugin", "extension", "source", "addon"],
+                    panel::toggle(self.plugins_enabled, Self::set_plugins_enabled, cx),
+                )
+                .when(self.plugins_enabled, |rows| {
+                    rows.custom(&keywords, || intro.into_any_element())
+                        .custom(&keywords, || table.into_any_element())
+                })
             },
         ))
     }
@@ -654,6 +675,29 @@ impl SettingsWindow {
             .keyed(key)
         });
 
+        let developer = on.then(|| {
+            let developing = host::developing(id);
+            let plugin = id.to_string();
+            div()
+                .id(SharedString::from(format!("plugin-developer-{id}")))
+                .child(
+                    icon_button(
+                        icons::SQUARE_TERMINAL,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            host::set_developing(&plugin, !developing);
+                            this.refresh_plugins(cx);
+                            cx.notify();
+                        }),
+                    )
+                    .keyed(SharedString::from(format!("plugin-developer-button-{id}")))
+                    .when(developing, |d| d.bg(palette::bg_control_active())),
+                )
+                .tooltip(|window, cx| {
+                    Tooltip::new(rox_i18n::t!("settings-plugins-developer")).build(window, cx)
+                })
+        });
+
         let switch: Option<AnyElement> = match folder {
             Some(folder) if folder.runs() => {
                 let id = id.to_string();
@@ -689,6 +733,7 @@ impl SettingsWindow {
                     .items_center()
                     .justify_end()
                     .gap(tokens::SPACE_XS)
+                    .children(developer)
                     .children(remove)
                     .children(switch),
             );

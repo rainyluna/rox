@@ -74,6 +74,7 @@ pub struct Meta {
 #[serde(default)]
 pub struct Capabilities {
     pub source: Option<SourceCap>,
+    pub panels: Vec<DeclaredPanel>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -83,6 +84,25 @@ pub struct SourceCap {
     #[serde(default)]
     pub scrobble: bool,
 }
+
+/// A preset of a core panel kind, listed under the plugin in Add Panel.
+/// Nothing in it executes: it's the same dump a saved panel preset holds.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct DeclaredPanel {
+    /// The Add Panel entry.
+    pub name: String,
+    /// A dock `PanelState`: `panel_name`, and `info` as `{ "panel": config }`.
+    pub preset: serde_json::Value,
+}
+
+impl DeclaredPanel {
+    pub fn panel_name(&self) -> Option<&str> {
+        self.preset.get("panel_name")?.as_str()
+    }
+}
+
+/// What a panel's `source` has to be when it names one.
+pub const SOURCE_PREFIX: &str = "plugin:";
 
 /// `^[a-z0-9][a-z0-9-]{1,63}$`, spelled out rather than pulling in a regex
 /// engine for one pattern.
@@ -128,8 +148,60 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             SUPPORTED_API.end()
         ));
     }
+    check_panels(&manifest)?;
 
     Ok(manifest)
+}
+
+/// The shape a declared panel can take. Whether its kind exists is the
+/// app's call, since only the app has the catalog: a kind this rox doesn't
+/// know is skipped there, not refused here, so a plugin written for a
+/// later rox still runs.
+fn check_panels(manifest: &Manifest) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for panel in &manifest.capabilities.panels {
+        let refuse = |why: &str| Err(format!("{FILE}: panel {:?} {why}", panel.name));
+
+        if panel.name.trim().is_empty() {
+            return Err(format!("{FILE}: a declared panel has no name"));
+        }
+        if !names.insert(panel.name.as_str()) {
+            return refuse("is declared twice");
+        }
+
+        let Some(kind) = panel.panel_name().filter(|kind| !kind.is_empty()) else {
+            return refuse("has no panel_name");
+        };
+
+        // One panel, not an arrangement: a container would carry panels of
+        // any kind inside it, past the check below.
+        let no_children = match panel.preset.get("children") {
+            None => true,
+            Some(children) => children.as_array().is_some_and(|c| c.is_empty()),
+        };
+        if !no_children {
+            return refuse("has children; a declared panel is a single panel");
+        }
+
+        let info = panel.preset.get("info").and_then(|info| info.as_object());
+        let config = match info {
+            Some(info) if info.len() == 1 => info.get("panel").and_then(|c| c.as_object()),
+            _ => None,
+        };
+        let Some(config) = config else {
+            return refuse("needs info as { \"panel\": { ... } }");
+        };
+
+        // A plugin's panel shows its own source, never another plugin's.
+        if kind == "source browser" {
+            let own = format!("{SOURCE_PREFIX}{}", manifest.id);
+            if config.get("source").and_then(|s| s.as_str()) != Some(own.as_str()) {
+                return refuse(&format!("has to name its own source, {own}"));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The key a native entry is looked up under, `<os>-<arch>`. Rust's own
@@ -352,7 +424,7 @@ mod tests {
         let text = script_manifest("")
             .replace(r#""scrobble": false"#, r#""scrobble": false, "later": 1"#)
             .replace(r#""license": """#, r#""license": "", "funding": "x""#)
-            .replace(r#""source": {"#, r#""panels": [], "source": {"#);
+            .replace(r#""source": {"#, r#""lyrics": [], "source": {"#);
 
         let manifest = parse(&text).expect("additions below the top level are additive");
         assert!(manifest.capabilities.source.is_some());
@@ -447,6 +519,99 @@ mod tests {
 
         let err = entry_with(&manifest, &scratch.0, "linux-x86_64", OsStr::new("")).unwrap_err();
         assert_eq!(err, "interpreter python3 not found");
+    }
+
+    fn with_panels(panels: &str) -> String {
+        script_manifest("").replace(
+            r#""capabilities": {"#,
+            &format!(r#""capabilities": {{ "panels": {panels},"#),
+        )
+    }
+
+    fn source_browser(name: &str, source: &str) -> String {
+        format!(
+            r#"{{ "name": {name:?}, "preset": {{ "panel_name": "source browser", "children": [], "info": {{ "panel": {{ "source": {source:?} }} }} }} }}"#
+        )
+    }
+
+    #[test]
+    fn declared_panels_parse() {
+        let text = with_panels(&format!(
+            r#"[{}, {{ "name": "Scope", "preset": {{ "panel_name": "oscilloscope", "info": {{ "panel": {{}} }} }} }}]"#,
+            source_browser("Tones", "plugin:example-tones")
+        ));
+        let manifest = parse(&text).expect("both are single panels of a known shape");
+
+        let panels = &manifest.capabilities.panels;
+        assert_eq!(panels.len(), 2);
+        assert_eq!(panels[0].name, "Tones");
+        assert_eq!(panels[0].panel_name(), Some("source browser"));
+        assert_eq!(panels[1].panel_name(), Some("oscilloscope"));
+    }
+
+    #[test]
+    fn a_source_browser_on_another_source_is_refused() {
+        for source in ["plugin:someone-else", "", "local"] {
+            let text = with_panels(&format!("[{}]", source_browser("Tones", source)));
+            let err = parse(&text).unwrap_err();
+            assert!(err.contains("its own source"), "{source:?}: {err}");
+        }
+
+        let missing = with_panels(
+            r#"[{ "name": "Tones", "preset": { "panel_name": "source browser", "info": { "panel": {} } } }]"#,
+        );
+        assert!(parse(&missing).is_err(), "no source at all");
+    }
+
+    #[test]
+    fn a_declared_panel_with_children_is_refused() {
+        let text = with_panels(
+            r#"[{ "name": "Pair", "preset": { "panel_name": "group", "children": [{ "panel_name": "library", "children": [], "info": { "panel": {} } }], "info": { "panel": {} } } }]"#,
+        );
+        let err = parse(&text).unwrap_err();
+        assert!(err.contains("single panel"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_panel_that_isnt_a_panel_is_refused() {
+        for preset in [
+            r#"{ "info": { "panel": {} } }"#,
+            r#"{ "panel_name": "", "info": { "panel": {} } }"#,
+            r#"{ "panel_name": "library" }"#,
+            r#"{ "panel_name": "library", "info": { "tabs": { "active_index": 0 } } }"#,
+            r#"{ "panel_name": "library", "info": { "panel": {}, "tabs": {} } }"#,
+            r#"{ "panel_name": "library", "info": { "panel": 3 } }"#,
+        ] {
+            let text = with_panels(&format!(r#"[{{ "name": "X", "preset": {preset} }}]"#));
+            assert!(parse(&text).is_err(), "{preset} should be refused");
+        }
+    }
+
+    #[test]
+    fn declared_panel_names_are_present_and_unique() {
+        let blank = with_panels(&format!(
+            "[{}]",
+            source_browser(" ", "plugin:example-tones")
+        ));
+        assert!(parse(&blank).is_err());
+
+        let twice = with_panels(&format!(
+            "[{0}, {0}]",
+            source_browser("Tones", "plugin:example-tones")
+        ));
+        let err = parse(&twice).unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn a_kind_the_host_doesnt_know_still_parses() {
+        let text = with_panels(
+            r#"[{ "name": "Later", "preset": { "panel_name": "hologram", "info": { "panel": {} } } }]"#,
+        );
+        assert!(
+            parse(&text).is_ok(),
+            "the app skips it; the plugin still runs"
+        );
     }
 
     #[test]

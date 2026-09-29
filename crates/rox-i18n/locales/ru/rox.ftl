@@ -827,8 +827,6 @@ settings-application-download-updates = Скачивать обновления
     .description = Когда проверка находит более новый выпуск, скачивать и готовить его в фоне; следующий запуск пойдёт уже с ним
 settings-application-enable-ai = Включить возможности ИИ
     .description = Разрешить ИИ-инструментам говорить с rox: добавляет поддержку MCP и загрузку ML-моделей, а их страницы появляются в боковой панели.
-settings-application-enable-plugins = Включить плагины
-    .description = Показывает страницу «Плагины», где у каждого плагина из папки плагинов свой переключатель. Плагин работает как программа на этом компьютере с вашими правами
 settings-application-lock-panel-resize = Запретить изменение размера панелей
     .description = Разделители панелей двигаются только при включённом режиме дизайна, чтобы перетаскивание у шва не сбило готовый макет
 settings-application-menu-entry = Пункт в меню приложений
@@ -841,7 +839,6 @@ settings-application-portable-restart-note = Применится при сле�
 settings-application-remain-in-tray = Оставаться в трее
     .description = Не останавливать музыку, когда закрыто последнее окно; вернуться можно через значок в трее, на macOS через док
 settings-application-section-ai = ИИ
-settings-application-section-plugins = Плагины
 settings-application-section-control-socket = Управляющий сокет
 settings-application-section-data = Данные
 settings-application-section-desktop = Рабочий стол
@@ -1202,6 +1199,8 @@ settings-playback-unrated-dots = Точки без оценки
     .description = Отмечать незаполненные звёзды бледной точкой, а не оставлять их пустыми
 
 ## Settings: plugins
+settings-plugins-enable = Включить плагины
+    .description = Разрешает запуск плагинов из папки плагинов. У каждого по-прежнему свой переключатель ниже, и каждый работает как программа на этом компьютере с вашими правами
 settings-plugins-intro = Каждая папка в папке плагинов это один плагин. Ничего из неё не запускается, пока вы его не включите, а изменившийся на диске плагин выключается, пока вы не включите его снова
 settings-plugins-reveal = Показать папку
 settings-plugins-guide = Руководство по плагинам
@@ -1215,6 +1214,7 @@ settings-plugins-failed-title = Этот плагин не может работ
 settings-plugins-sync-failed = Последняя синхронизация не удалась
 settings-plugins-scrobble = Скробблить прослушивания
     .description = Отправлять то, что играет этот плагин, в ваши скробблеры. Предлагается, потому что плагин об этом просит
+settings-plugins-developer = Режим разработчика: пока rox не закрыт, изменение в папке этого плагина одобряется само и перезапускает его. Изменение того, что объявляет его манифест, по-прежнему выключает его
 settings-plugins-synced = Синхронизируемые коллекции
 settings-plugins-synced-none = Пока ничего не синхронизировано. Включите синхронизацию коллекции в обозревателе источника плагина
 settings-plugins-sync-now = Синхронизировать
@@ -1507,6 +1507,12 @@ workspace-apply-shader-count = { $count ->
     [few] Включает { $count } шейдера: { $names }
     [many] Включает { $count } шейдеров: { $names }
    *[other] Включает { $count } шейдера: { $names }
+}
+workspace-requires-missing = { $count ->
+    [one] Использует { $count } плагин, который не запущен: { $plugins }
+    [few] Использует { $count } плагина, которые не запущены: { $plugins }
+    [many] Использует { $count } плагинов, которые не запущены: { $plugins }
+   *[other] Использует { $count } плагина, которые не запущены: { $plugins }
 }
 workspace-apply-shaders-approve-body = Подтверждение позволит им работать на этой машине. Если применить без них, внешний вид останется голым, а шейдеры останутся в его пуле.
 workspace-apply-shaders-plain-body = Если применить без них, внешний вид останется голым, а шейдеры останутся в его пуле.
@@ -2174,6 +2180,7 @@ panel-catalog-group-catalogue = Каталог
 panel-catalog-group-controls = Управление
 panel-catalog-group-details = Детали
 panel-catalog-group-experimental = Экспериментальные
+panel-catalog-group-plugins = Плагины
 panel-catalog-group-visualizers = Визуализация
 panel-catalog-group-widgets = Виджеты
 panel-catalog-history = История
@@ -4020,7 +4027,18 @@ source-browser-empty = Здесь ничего нет
 source-browser-pick = Выберите источник
 source-browser-no-sources = Ни один источник-плагин не запущен.
 source-browser-failed = { $source } не ответил
-source-browser-pick-failed = Не удалось добавить эти треки в медиатеку
+source-browser-plugins-off = Плагины выключены
+source-browser-switched-off = { $source } выключен
+source-browser-changed = { $source } изменился на диске. Включите его снова, чтобы одобрить изменение
+source-browser-missing = { $source } больше нет в папке плагинов
+source-browser-cant-load = { $source } не загружается. Причина указана на странице «Плагины»
+source-browser-stopped = { $source } остановлен после повторяющихся сбоев. Выключите и снова включите его
+source-browser-open-plugins = Открыть «Плагины»
+source-browser-pick-failed = Не удалось подготовить эти треки к воспроизведению
+source-browser-add-to-library = Добавить в медиатеку
+source-browser-remove-from-library = Убрать из медиатеки
+source-browser-save-failed = Не удалось добавить эти треки в медиатеку
+source-browser-unsave-failed = Не удалось убрать эти треки из медиатеки
 source-browser-sync-failed = Не удалось синхронизировать { $title }
 source-browser-sync = Хранить в медиатеке
 source-browser-members = { $count ->

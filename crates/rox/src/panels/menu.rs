@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::panel_catalog::PanelDef;
 use crate::workspace::menubar::{
-    NavRow, NavSlot, menu_entry_rows, nav_lit, nav_row_at, step_index, subgroup_rows, submenu_rows,
+    NavRow, NavSlot, menu_entry_rows, nav_lit, nav_row_at, plugins_group, step_index,
+    subgroup_rows, submenu_rows,
 };
 use crate::workspace::{
-    LayoutTarget, MENUS, Menu, MenuAction, MenuEntry, MenuItem, PanelTarget, Workspace,
-    WorkspaceTarget, flyout_leftward, flyout_side, menu_item_display, menu_section,
-    panel_menu_item, section_shows, shortcut_for, signal_marked,
+    LayoutTarget, MENUS, Menu, MenuAction, MenuEntry, MenuItem, PanelTarget, PluginPanel,
+    Workspace, WorkspaceTarget, flyout_leftward, flyout_side, menu_item_display, menu_section,
+    panel_menu_item, plugin_panels, plugins_show, section_shows, shortcut_for, signal_marked,
 };
 use rox_core::settings::{self, Settings};
 use rox_design::assets::icons;
@@ -409,24 +410,36 @@ impl MenuPanel {
                     MenuEntry::Panels(section) if !section_shows(section) => {
                         div().into_any_element()
                     }
-                    MenuEntry::Panels(section) => match section.group {
+                    MenuEntry::Panels(section) => match crate::panel_catalog::live(section).group {
                         None => div()
                             .flex()
                             .flex_col()
-                            .children(section.panels.iter().enumerate().map(|(j, def)| {
-                                self.action_row(panel_menu_item(def), cx)
-                                    .id(("panel-entry", j))
-                                    .when(self.nav_on(i, Some(j)), nav_lit)
-                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                        if *hovered && this.open_sub.is_some() {
-                                            this.open_flyout(None);
-                                            cx.notify();
-                                        }
-                                    }))
-                            }))
+                            .children(
+                                crate::panel_catalog::live(section)
+                                    .panels
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(j, def)| {
+                                        self.action_row(panel_menu_item(def), cx)
+                                            .id(("panel-entry", j))
+                                            .when(self.nav_on(i, Some(j)), nav_lit)
+                                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                if *hovered && this.open_sub.is_some() {
+                                                    this.open_flyout(None);
+                                                    cx.notify();
+                                                }
+                                            }))
+                                    }),
+                            )
                             .into_any_element(),
                         Some((label, icon)) => self
-                            .group_row(i, label, icon, section.panels, cx)
+                            .group_row(
+                                i,
+                                label,
+                                icon,
+                                crate::panel_catalog::live(section).panels,
+                                cx,
+                            )
                             .into_any_element(),
                     },
                     MenuEntry::LayoutsSubmenu {
@@ -454,6 +467,16 @@ impl MenuPanel {
                         .into_any_element(),
                     MenuEntry::PanelWindowsSubmenu { label, icon } => self
                         .panel_windows_row(i, label, icon, cx)
+                        .into_any_element(),
+                    // An empty stand-in keeps the children in step with the
+                    // entries, as the gated catalog section above does.
+                    MenuEntry::PluginsSubmenu { .. } if !plugins_show() => div().into_any_element(),
+                    MenuEntry::PluginsSubmenu {
+                        label,
+                        icon,
+                        target,
+                    } => self
+                        .plugins_row(i, label, icon, *target, cx)
                         .into_any_element(),
                 }
             }))
@@ -664,6 +687,28 @@ impl MenuPanel {
             })
     }
 
+    fn plugins_row(
+        &self,
+        index: usize,
+        label: &'static str,
+        icon_path: &'static str,
+        target: PanelTarget,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let open = self.open_sub == Some(index);
+        self.sub_row(index, label, icon_path, open, cx)
+            .when(open, |d| {
+                let flyout =
+                    flyout_side(dropdown(px(200.)).absolute(), self.flyout_left(1)).top(px(-5.));
+                d.child(flyout.children(plugin_panels().into_iter().enumerate().map(
+                    |(row, panel)| {
+                        self.plugin_panel_row(panel, target, cx)
+                            .when(self.nav_on_sub(row), nav_lit)
+                    },
+                )))
+            })
+    }
+
     fn panel_windows_row(
         &self,
         index: usize,
@@ -714,6 +759,25 @@ impl MenuPanel {
                             flyout.child(self.panel_window_group(i + 1, label, icon_path, rows, cx))
                         }
                     };
+                }
+                let plugins = plugin_panels();
+                if !plugins.is_empty() {
+                    let group = plugins_group();
+                    let rows = plugins
+                        .into_iter()
+                        .enumerate()
+                        .map(|(row, panel)| {
+                            self.plugin_panel_row(panel, PanelTarget::NewWindow, cx)
+                                .when(self.nav_in_group(group, row), nav_lit)
+                        })
+                        .collect();
+                    flyout = flyout.child(self.panel_window_group(
+                        group,
+                        crate::panel_catalog::PLUGINS_LABEL,
+                        crate::panel_catalog::PLUGINS_ICON,
+                        rows,
+                        cx,
+                    ));
                 }
                 d.child(flyout)
             })
@@ -790,6 +854,38 @@ impl MenuPanel {
             )
             .child(icon(icon_path))
             .child(label)
+    }
+
+    /// From a plugin that branches, it trails the plugin's name: the flyout
+    /// lists every plugin's entries in one run.
+    fn plugin_panel_row(
+        &self,
+        panel: PluginPanel,
+        target: PanelTarget,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (plugin, key) = (panel.plugin, panel.key);
+        row()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.close(cx);
+                    let Some(ws) = this.workspace.upgrade() else {
+                        return;
+                    };
+                    ws.update(cx, |ws, cx| {
+                        ws.run_plugin_panel(&plugin, &key, target, window, cx)
+                    });
+                }),
+            )
+            .child(icon(panel.icon))
+            .child(div().flex_1().child(panel.label))
+            .children(panel.trailing.map(|name| {
+                div()
+                    .text_xs()
+                    .text_color(palette::text_faint())
+                    .child(name)
+            }))
     }
 
     fn sub_row(

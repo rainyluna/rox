@@ -8,12 +8,11 @@ The protocol it speaks is in the [plugin guide](../../../README_PLUGINS.md).
 
 ## Trying it
 
-1. Show the Plugins page: Settings > Development > Experimental Panels, then Settings >
-   Application > Enable Plugins.
+1. Turn on Enable Plugins at the top of Settings > Plugins.
 2. Press Reveal Folder on the Plugins page and copy this `tones` folder into it.
 3. Switch Tones on and confirm the card.
-4. Open the External Sources panel from Add Panel > Experimental. Tones and Chords are
-   both collections: Keep in the library puts one in your library.
+4. Pick Add Panel > Plugins > Tones, which opens the External Sources panel on Tones.
+   Tones and Chords are both collections: Keep in the library puts one in your library.
 
 Python 3 has to be on PATH as `python3` or `python`, or as `py` on Windows.
 
@@ -34,6 +33,9 @@ for every plugin, since any new file in the folder changes its hash and switches
 
 ## Making it yours
 
+- Turn on Developer mode, the terminal button beside the plugin's switch, while you
+  work on it.
+  Otherwise every save switches the plugin off until you approve it again.
 - Change `id` in `plugin.json` and rename the folder to match. The id is fixed once your
   plugin has users: their rows are filed under it.
 - Keep `key`s stable. A track's key becomes its row's path in the library, so changing

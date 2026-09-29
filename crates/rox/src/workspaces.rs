@@ -370,6 +370,28 @@ pub struct ApplyCard {
     pub screen_shader: Option<SharedString>,
     /// Splits the dialog's yes in two, every time. See [`wears_shaders`].
     pub wears_shaders: bool,
+    /// The plugins the look's panels came from that aren't running here.
+    pub requires: Option<SharedString>,
+}
+
+/// Informational: the look applies either way, and its plugin panels restore
+/// with their rows hidden until the plugin runs again.
+fn requires_line(bundle: &WorkspaceBundle) -> Option<SharedString> {
+    let missing: Vec<&str> = bundle
+        .requires
+        .iter()
+        .filter(|id| !rox_services::plugins::is_running(id))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+
+    Some(rox_i18n::t!(
+        "workspace-requires-missing",
+        count = missing.len() as u64,
+        plugins = missing.join(", ")
+    ))
 }
 
 impl ApplyCard {
@@ -384,6 +406,7 @@ impl ApplyCard {
                 shaders: Vec::new(),
                 screen_shader: None,
                 wears_shaders: false,
+                requires: None,
             },
         }
     }
@@ -408,6 +431,7 @@ impl ApplyCard {
             shaders: unapproved_shaders(bundle),
             screen_shader: screen_shader_line(bundle),
             wears_shaders: wears_shaders(bundle),
+            requires: requires_line(bundle),
         }
     }
 

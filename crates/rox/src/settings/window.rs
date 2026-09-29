@@ -1475,13 +1475,11 @@ impl Render for SettingsWindow {
         let text = self.search.read(cx).query().trim().to_string();
         let q = Query::parse(&text);
         let scoped = self.search_scoped;
-        // The AI toggle hides the MCP and ML Models pages from search too, and
-        // the Plugins switch its page.
+        // The AI toggle hides the MCP and ML Models pages from search too.
         let pages: Vec<(Page, &str, &str)> = PAGES
             .iter()
             .copied()
             .filter(|&(page, ..)| self.ai_enabled || !matches!(page, Page::Mcp | Page::MlModels))
-            .filter(|&(page, ..)| page != Page::Plugins || self.plugins_visible())
             .collect();
         let results: Option<Vec<_>> = (q.active() && !scoped).then(|| {
             pages

@@ -1,6 +1,6 @@
 # ADR 30: Plugins are subprocesses that bring something external in
 
-**Status:** Decided 2026-09-28, on the numbers in [research 04](../../0R-research/04-plugin-host.md)
+**Status:** Decided 2026-09-28, on the numbers in [research 04](../../0R-research/04-plugin-host.md); amended below
 
 Decision: a plugin is a folder the user drops into rox's data directory, holding a
 manifest and an entry program. rox runs it as a subprocess and talks to it over its
@@ -356,3 +356,31 @@ new host crate owns the manifest, the wire, the process lifecycle, and the per-O
 The settings window gets a Plugins page behind the switch, Add Panel gets the Plugins
 section and the source browser, panel chrome gets the owner field, and the bundle gets
 `requires`. All of it stays behind the experimental gate until the opt-in ships.
+
+**Amended 2026-09-29: one switch opts in, and an author can approve their own saves.**
+The switch that lets plugins run moves to the head of the Plugins page, and the page is
+always listed. It replaces the two layers above: Experimental Panels on one page, then
+Enable Plugins on another, before the Plugins page appeared at all, made plugins hard to
+find. The experimental gate is gone with it. The Plugins switch is the opt-in the last
+paragraph was waiting on, and it's off by default.
+
+Every save an author makes changes the folder's hash, which switched their plugin off
+and put the card in front of them each time. Developer mode, a per-plugin toggle beside a
+switched-on plugin's switch, approves those changes on its own for the rest of the session, as
+long as the manifest's diff against the last approval is empty. A diff that isn't empty
+still goes to the card, so a plugin can't gain a capability, a program, scrobbling or a
+new entry without the user seeing it. The toggle is never saved, so a launch approves
+nothing by itself. This narrows "any change turns the plugin off" and keeps the shader
+gate's rule: turning the toggle on is the direct user action, and it approves the saves
+that follow it. There's still no second dialog.
+
+A browse or search page can carry a notice: a line of the plugin's own text, marked
+`info` or `setup`, which rox shows above the page with a way to the plugin's settings for
+`setup`. Before it, a plugin with nothing to list until the user set something up could
+only answer an empty page or an error, and neither says what to do. It joins API 1
+rather than starting API 2, since a plugin that doesn't send one is unchanged. A host
+from before it refuses a page that carries one, so `hello` now lists the optional
+features the host reads, and a plugin sends a notice only when `notice` is among them. When the source itself
+can't answer, rox says why in its own words (plugins off, the plugin switched off,
+changed on disk, gone, failing to load, stopped after crashes) and offers the Plugins
+page, rather than passing on the host's internal error.

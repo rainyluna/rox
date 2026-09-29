@@ -24,7 +24,7 @@ use rox_core::settings::{Settings, SyncedCollection};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::{PLUGIN_PREFIX, TrackKey, source_id};
 use rox_library::members::{self, PluginTrack};
-use rox_services::plugins::{self, Entry, Page};
+use rox_services::plugins::{self, Entry, Notice, Page, Unavailable};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -121,6 +121,11 @@ struct Listing {
     entries: Vec<Entry>,
     cursor: Option<String>,
     error: Option<String>,
+    /// Why the source couldn't answer, when rox knows. Said in place of the
+    /// raw error, and the list asks again once the source is back.
+    unavailable: Option<Unavailable>,
+    /// The plugin's own line over the place shown, from its first page.
+    notice: Option<Notice>,
     pending: Option<Pending>,
     generation: u64,
 }
@@ -153,12 +158,14 @@ impl Listing {
 
         self.cursor = page.cursor;
         self.error = None;
+        self.unavailable = None;
 
         match pending.place {
             Some(place) => {
                 let moved = place != self.place;
                 self.place = place;
                 self.entries = page.entries;
+                self.notice = page.notice;
                 Landed::Replaced { moved }
             }
 
@@ -464,6 +471,7 @@ impl SourceBrowserPanel {
         root: bool,
         cx: &mut Context<Self>,
     ) {
+        let failed = result.is_err();
         let landed = match result {
             Err(e) if root => {
                 let fallback = self.synced_page();
@@ -479,6 +487,10 @@ impl SourceBrowserPanel {
 
         if landed == Landed::Stale {
             return;
+        }
+
+        if failed {
+            self.listing.unavailable = plugins::unavailable(self.source());
         }
 
         if landed == (Landed::Replaced { moved: true }) {
@@ -505,6 +517,7 @@ impl SourceBrowserPanel {
         Page {
             entries,
             cursor: None,
+            notice: None,
         }
     }
 
@@ -541,6 +554,7 @@ impl SourceBrowserPanel {
         Page {
             entries,
             cursor: None,
+            notice: None,
         }
     }
 
@@ -576,6 +590,10 @@ impl SourceBrowserPanel {
 
         self.read_record(cx);
         self.resolve_ids(cx);
+        if self.retry_if_back(cx) {
+            cx.notify();
+            return;
+        }
 
         let place = self.listing.place.clone();
         let shows_synced = place.node().is_some_and(|node| self.is_synced(&node.id));
@@ -584,6 +602,22 @@ impl SourceBrowserPanel {
         }
 
         cx.notify();
+    }
+
+    /// Asks again for the place shown when the source that couldn't answer
+    /// is back. Answers whether it asked.
+    fn retry_if_back(&mut self, cx: &mut Context<Self>) -> bool {
+        let back = self.listing.unavailable.is_some()
+            && !self.listing.loading()
+            && plugins::answers(self.source());
+        if !back {
+            return false;
+        }
+
+        let place = self.listing.place.clone();
+        self.go(place, cx);
+
+        true
     }
 
     fn set_synced(&mut self, node: String, title: String, on: bool, cx: &mut Context<Self>) {
@@ -956,25 +990,34 @@ impl SourceBrowserPanel {
             return root.child(self.picker(cx));
         }
 
-        let banners = [
-            self.listing.error.clone().map(|reason| {
-                (
+        // Switching a plugin on from Settings redraws this window.
+        self.retry_if_back(cx);
+
+        let failed = match self.listing.unavailable {
+            Some(reason) => Some(self.unavailable_banner(reason)),
+
+            None => self.listing.error.clone().map(|reason| {
+                panel::banner(
+                    Tone::Bad,
                     rox_i18n::t!("source-browser-failed", source = self.label.to_string()),
-                    reason,
+                    vec![reason.into()],
                 )
             }),
-            self.failure.clone(),
-        ];
+        };
+        let picked = self
+            .failure
+            .clone()
+            .map(|(headline, reason)| panel::banner(Tone::Bad, headline, vec![reason.into()]));
+        let notice = self.listing.notice.as_ref().map(notice_banner);
 
         root.child(self.header(cx))
             .children(self.breadcrumb(cx))
-            .children(banners.into_iter().flatten().map(|(headline, reason)| {
-                div().flex_none().p(tokens::SPACE_SM).child(panel::banner(
-                    Tone::Bad,
-                    headline,
-                    vec![reason.into()],
-                ))
-            }))
+            .children(
+                [failed, picked, notice]
+                    .into_iter()
+                    .flatten()
+                    .map(|banner| div().flex_none().p(tokens::SPACE_SM).child(banner)),
+            )
             // One menu over the whole list. A menu per row shares one element
             // state across the rows and never opens.
             .child(self.list(cx).context_menu({
@@ -1372,8 +1415,25 @@ impl SourceBrowserPanel {
         }
     }
 
+    fn unavailable_banner(&self, reason: Unavailable) -> Div {
+        let source = self.label.to_string();
+        let headline = match reason {
+            Unavailable::PluginsOff => rox_i18n::t!("source-browser-plugins-off"),
+            Unavailable::SwitchedOff => {
+                rox_i18n::t!("source-browser-switched-off", source = source)
+            }
+            Unavailable::Changed => rox_i18n::t!("source-browser-changed", source = source),
+            Unavailable::Missing => rox_i18n::t!("source-browser-missing", source = source),
+            Unavailable::Failed => rox_i18n::t!("source-browser-cant-load", source = source),
+            Unavailable::Stopped => rox_i18n::t!("source-browser-stopped", source = source),
+        };
+
+        panel::banner(Tone::Warn, headline, Vec::new()).child(open_plugins_button())
+    }
+
+    /// Blank while a notice already says why the place is empty.
     fn empty_state(&self) -> Div {
-        let text = match self.listing.loading() {
+        let text = match self.listing.loading() || self.listing.notice.is_some() {
             true => SharedString::default(),
             false => rox_i18n::t!("source-browser-empty"),
         };
@@ -1480,10 +1540,90 @@ impl SourceBrowserPanel {
                 on_play,
             ),
 
-            None => self.unpicked_menu(menu, tracks, play_label, on_play, window, cx),
+            None => self.unpicked_menu(menu, tracks.clone(), play_label, on_play, window, cx),
         };
+        let menu = self.library_item(menu, tracks, cx);
 
         self.dropdown_menu(menu.separator(), window, cx)
+    }
+
+    /// Playing a track doesn't add it (ADR 29), so adding is its own item.
+    /// Tracks added one at a time can be taken back out; a kept collection's
+    /// tracks follow its switch instead, so they get neither.
+    fn library_item(
+        &self,
+        menu: PopupMenu,
+        tracks: Vec<PluginTrack>,
+        cx: &mut Context<Self>,
+    ) -> PopupMenu {
+        let library = self.state.library.read(cx);
+        let id = |track: &PluginTrack| self.ids.get(&track.key).copied();
+        let missing: Vec<PluginTrack> = tracks
+            .iter()
+            .filter(|track| !id(track).is_some_and(|id| library.in_library(id)))
+            .cloned()
+            .collect();
+        let all_saved = tracks
+            .iter()
+            .all(|track| id(track).is_some_and(|id| library.is_saved(id)));
+
+        let panel = cx.entity().downgrade();
+        if !missing.is_empty() {
+            return menu.separator().item(
+                PopupMenuItem::new(rox_i18n::t!("source-browser-add-to-library"))
+                    .icon(Icon::default().path(icons::PLUS))
+                    .on_click(move |_, _, cx| {
+                        let tracks = missing.clone();
+                        panel.update(cx, |this, cx| this.save(tracks, cx)).ok();
+                    }),
+            );
+        }
+        if !all_saved {
+            return menu;
+        }
+
+        let paths: Vec<String> = tracks.into_iter().map(|track| track.key).collect();
+        menu.separator().item(
+            PopupMenuItem::new(rox_i18n::t!("source-browser-remove-from-library"))
+                .icon(Icon::default().path(icons::MINUS))
+                .on_click(move |_, _, cx| {
+                    let paths = paths.clone();
+                    panel.update(cx, |this, cx| this.unsave(paths, cx)).ok();
+                }),
+        )
+    }
+
+    fn save(&mut self, tracks: Vec<PluginTrack>, cx: &mut Context<Self>) {
+        self.failure = None;
+        let task = plugins::save(self.state.library.clone(), self.source(), tracks, cx);
+        self.after_write(task, "source-browser-save-failed", cx);
+    }
+
+    fn unsave(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        self.failure = None;
+        let task = plugins::unsave(self.state.library.clone(), self.source(), paths, cx);
+        self.after_write(task, "source-browser-unsave-failed", cx);
+    }
+
+    /// The rows may have come or gone, so the ids are read again.
+    fn after_write<T: 'static>(
+        &mut self,
+        task: Task<Result<T, String>>,
+        failed: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => this.resolve_ids(cx),
+                    Err(e) => this.failure = Some((rox_i18n::t!(failed), e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn unpicked_menu(
@@ -1689,9 +1829,49 @@ impl gpui::Render for SourceBrowserPanel {
     }
 }
 
+const PLUGINS_PAGE: &str = "settings-page-plugins";
+
+fn open_plugins_button() -> impl IntoElement {
+    crate::settings::ui::small_button(
+        rox_i18n::t!("source-browser-open-plugins"),
+        icons::PLUG,
+        false,
+        |_, window, cx| panel_settings::open_app_page(PLUGINS_PAGE, window, cx),
+    )
+}
+
+/// A setup notice offers the settings it's asking for.
+fn notice_banner(notice: &Notice) -> Div {
+    let tone = match notice.setup {
+        true => Tone::Warn,
+        false => Tone::Info,
+    };
+
+    panel::banner(tone, notice.text.clone(), Vec::new())
+        .when(notice.setup, |banner| banner.child(open_plugins_button()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner rides in the flattened chrome, so a plugin panel's dump
+    /// keeps naming its plugin through a save and a restore.
+    #[test]
+    fn a_plugin_panel_keeps_its_owner_through_a_dump() {
+        let info = rox_dock::PanelInfo::Panel(serde_json::json!({
+            "source": "plugin:example-tones",
+            "owner": "plugin:example-tones",
+        }));
+        let config: SourceBrowserConfig = rox_panel_api::panel::config_from_info(&info);
+        assert_eq!(config.chrome.owner, "plugin:example-tones");
+
+        let dumped = serde_json::to_value(&config).unwrap();
+        assert_eq!(dumped["owner"], "plugin:example-tones");
+
+        let plain = serde_json::to_value(SourceBrowserConfig::default()).unwrap();
+        assert!(plain.get("owner").is_none(), "a core panel writes no owner");
+    }
 
     fn node(id: &str) -> Entry {
         Entry::Node {
@@ -1706,6 +1886,7 @@ mod tests {
         Page {
             entries: ids.iter().map(|id| node(id)).collect(),
             cursor: cursor.map(str::to_string),
+            notice: None,
         }
     }
 

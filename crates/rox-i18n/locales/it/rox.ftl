@@ -822,8 +822,6 @@ settings-application-download-updates = Scarica gli aggiornamenti
     .description = Quando un controllo trova una versione più recente, scaricala e preparala in background; il prossimo avvio la esegue
 settings-application-enable-ai = Attiva le funzioni AI
     .description = Lascia che gli strumenti AI parlino con rox: aggiunge il supporto MCP e i download dei modelli ML, con le loro pagine nella barra laterale.
-settings-application-enable-plugins = Attiva i plugin
-    .description = Mostra la pagina Plugin, dove ogni plugin messo nella cartella dei plugin ha il suo interruttore. Un plugin gira come programma su questo computer, con i tuoi permessi
 settings-application-lock-panel-resize = Blocca il ridimensionamento dei pannelli
     .description = Le divisioni dei pannelli si ridimensionano solo con la modalità progettazione attiva, così un trascinamento vicino a una giunzione non può spostare un layout finito
 settings-application-menu-entry = Voce nel menu delle applicazioni
@@ -836,7 +834,6 @@ settings-application-portable-restart-note = Vale dal prossimo avvio; questa ses
 settings-application-remain-in-tray = Resta nell'area di notifica
     .description = Tieni la musica in riproduzione quando si chiude l'ultima finestra, con l'icona nell'area di notifica (il dock su macOS) come via di ritorno
 settings-application-section-ai = AI
-settings-application-section-plugins = Plugin
 settings-application-section-control-socket = Socket di controllo
 settings-application-section-data = Dati
 settings-application-section-desktop = Desktop
@@ -1205,6 +1202,8 @@ settings-playback-unrated-dots = Punti per le non valutate
     .description = Segna le stelle vuote con un punto tenue invece di lasciarle vuote
 
 ## Settings: plugins
+settings-plugins-enable = Attiva i plugin
+    .description = Lascia girare i plugin nella cartella dei plugin. Ognuno ha comunque il suo interruttore qui sotto e gira come programma su questo computer, con i tuoi permessi
 settings-plugins-intro = Ogni cartella dentro la cartella dei plugin è un plugin. Niente parte finché non lo attivi, e uno che cambia sul disco si spegne finché non lo riattivi
 settings-plugins-reveal = Mostra cartella
 settings-plugins-guide = Guida ai plugin
@@ -1218,6 +1217,7 @@ settings-plugins-failed-title = Questo plugin non può girare
 settings-plugins-sync-failed = L'ultima sincronizzazione non è riuscita
 settings-plugins-scrobble = Scrobbla gli ascolti
     .description = Invia ai tuoi servizi di scrobbling ciò che questo plugin riproduce. Offerto perché il plugin lo chiede
+settings-plugins-developer = Modalità sviluppatore: finché rox resta aperto, una modifica alla cartella di questo plugin viene approvata da sola e lo riavvia. Una modifica a ciò che dichiara il suo manifest lo spegne comunque
 settings-plugins-synced = Raccolte sincronizzate
 settings-plugins-synced-none = Ancora niente di sincronizzato. Attiva la sincronizzazione di una raccolta nel browser della fonte del plugin
 settings-plugins-sync-now = Sincronizza ora
@@ -1511,6 +1511,10 @@ workspace-apply-screen-shader-plain = Applica uno shader di overlay su tutta la 
 workspace-apply-shader-count = { $count ->
     [one] Include { $count } shader: { $names }
    *[other] Include { $count } shader: { $names }
+}
+workspace-requires-missing = { $count ->
+    [one] Usa un plugin non in esecuzione: { $plugins }
+   *[other] Usa { $count } plugin non in esecuzione: { $plugins }
 }
 workspace-apply-shaders-approve-body = Approvarli li lascia girare su questa macchina. Applicarlo senza di loro lascia il look spoglio, con gli shader comunque nel suo pool.
 workspace-apply-shaders-plain-body = Applicarlo senza di loro lascia il look spoglio, con gli shader comunque nel suo pool.
@@ -2182,6 +2186,7 @@ panel-catalog-group-catalogue = Catalogo
 panel-catalog-group-controls = Controlli
 panel-catalog-group-details = Dettagli
 panel-catalog-group-experimental = Sperimentali
+panel-catalog-group-plugins = Plugin
 panel-catalog-group-visualizers = Visualizzatori
 panel-catalog-group-widgets = Widget
 panel-catalog-history = Cronologia
@@ -4030,7 +4035,18 @@ source-browser-empty = Qui non c'è niente
 source-browser-pick = Scegli una sorgente
 source-browser-no-sources = Nessuna sorgente plugin è in esecuzione.
 source-browser-failed = { $source } non ha risposto
-source-browser-pick-failed = Impossibile aggiungere queste tracce alla libreria
+source-browser-plugins-off = I plugin sono spenti
+source-browser-switched-off = { $source } è spento
+source-browser-changed = { $source } è cambiato sul disco. Riattivalo per approvare la modifica
+source-browser-missing = { $source } non è più nella cartella dei plugin
+source-browser-cant-load = { $source } non si carica. La pagina Plugin dice perché
+source-browser-stopped = { $source } si è fermato dopo ripetuti crash. Spegnilo e riaccendilo
+source-browser-open-plugins = Apri Plugin
+source-browser-pick-failed = Impossibile preparare queste tracce per la riproduzione
+source-browser-add-to-library = Aggiungi alla libreria
+source-browser-remove-from-library = Rimuovi dalla libreria
+source-browser-save-failed = Impossibile aggiungere queste tracce alla libreria
+source-browser-unsave-failed = Impossibile rimuovere queste tracce dalla libreria
 source-browser-sync-failed = Impossibile sincronizzare { $title }
 source-browser-sync = Tieni nella libreria
 source-browser-members = { $count ->

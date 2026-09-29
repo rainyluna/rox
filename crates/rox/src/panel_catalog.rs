@@ -4,8 +4,10 @@
 
 use std::sync::Arc;
 
-use gpui::{App, AppContext as _, WeakEntity, Window};
+use gpui::{App, AppContext as _, SharedString, WeakEntity, Window};
+use rox_core::settings::PanelPreset;
 use rox_dock::PanelView;
+use rox_plugins::manifest::{DeclaredPanel, SOURCE_PREFIX};
 
 use crate::panels::controls::{ControlsConfig, ControlsPanel};
 use crate::panels::drawer::{DrawerConfig, DrawerPanel};
@@ -81,6 +83,7 @@ pub(crate) struct PanelSection {
     pub panels: &'static [PanelDef],
 }
 
+/// External Sources stays last: [`CATALOGUE_BARE`] is this minus it.
 pub(crate) static CATALOGUE: PanelSection =
     PanelSection {
         group: Some(("panel-catalog-group-catalogue", icons::DISC)),
@@ -227,6 +230,22 @@ pub(crate) static CATALOGUE: PanelSection =
                 build: |state, _, window, cx| {
                     Arc::new(cx.new(|cx| {
                         StationsPanel::new(state.clone(), StationsConfig::default(), window, cx)
+                    }))
+                },
+            },
+            PanelDef {
+                label: "panel-catalog-source-browser",
+                name: "source browser",
+                icon: icons::PLUG,
+                placement: PanelPlacement::Center,
+                build: |state, _, window, cx| {
+                    Arc::new(cx.new(|cx| {
+                        SourceBrowserPanel::new(
+                            state.clone(),
+                            SourceBrowserConfig::default(),
+                            window,
+                            cx,
+                        )
                     }))
                 },
             },
@@ -597,36 +616,38 @@ pub(crate) static VISUALIZERS: PanelSection = PanelSection {
 /// Hidden unless the Development page turns experimental features on.
 pub(crate) static EXPERIMENTAL: PanelSection = PanelSection {
     group: Some(("panel-catalog-group-experimental", icons::FLASK)),
-    panels: &[
-        PanelDef {
-            label: "panel-catalog-particles",
-            name: "particles",
-            icon: icons::STAR,
-            placement: PanelPlacement::Bottom,
-            build: |state, _, _, cx| {
-                Arc::new(
-                    cx.new(|cx| ParticlesPanel::new(state.clone(), ParticlesConfig::default(), cx)),
-                )
-            },
+    panels: &[PanelDef {
+        label: "panel-catalog-particles",
+        name: "particles",
+        icon: icons::STAR,
+        placement: PanelPlacement::Bottom,
+        build: |state, _, _, cx| {
+            Arc::new(
+                cx.new(|cx| ParticlesPanel::new(state.clone(), ParticlesConfig::default(), cx)),
+            )
         },
-        PanelDef {
-            label: "panel-catalog-source-browser",
-            name: "source browser",
-            icon: icons::GLOBE,
-            placement: PanelPlacement::Center,
-            build: |state, _, window, cx| {
-                Arc::new(cx.new(|cx| {
-                    SourceBrowserPanel::new(
-                        state.clone(),
-                        SourceBrowserConfig::default(),
-                        window,
-                        cx,
-                    )
-                }))
-            },
-        },
-    ],
+    }],
 };
+
+/// Catalogue while plugins can't run, when External Sources would have
+/// nothing to browse. Only discovery drops it, through [`live`]: the
+/// restore builder and [`def_for`] still see it, so a saved one comes back.
+static CATALOGUE_BARE: PanelSection = PanelSection {
+    group: CATALOGUE.group,
+    panels: match CATALOGUE.panels.split_last() {
+        Some((_, rest)) => rest,
+        None => &[],
+    },
+};
+
+/// The section as the pickers show it right now.
+pub(crate) fn live(section: &'static PanelSection) -> &'static PanelSection {
+    if std::ptr::eq(section, &CATALOGUE) && !rox_services::plugins::allowed() {
+        &CATALOGUE_BARE
+    } else {
+        section
+    }
+}
 
 /// A composite can't go inside another composite's slot.
 pub(crate) fn is_arrangement(section: &PanelSection) -> bool {
@@ -661,11 +682,13 @@ static CATALOG: &[&PanelSection] = &[
 
 /// Only discovery is gated: the restore builders stay registered, so a layout
 /// holding an experimental panel keeps it.
-pub(crate) fn sections() -> impl Iterator<Item = &'static &'static PanelSection> {
+pub(crate) fn sections() -> impl Iterator<Item = &'static PanelSection> {
     let experimental = rox_core::settings::experimental();
     CATALOG
         .iter()
+        .copied()
         .filter(move |section| experimental || !is_experimental(section))
+        .map(live)
 }
 
 /// Ungated: the experimental flag doesn't unmake a preset already saved.
@@ -681,6 +704,137 @@ pub(crate) fn section_for(name: &str) -> Option<&'static PanelSection> {
         .iter()
         .copied()
         .find(|section| section.panels.iter().any(|def| def.name == name))
+}
+
+/// The Plugins group every picker leads its plugins with.
+pub(crate) const PLUGINS_LABEL: &str = "panel-catalog-group-plugins";
+pub(crate) const PLUGINS_ICON: &str = icons::PLUG;
+
+/// One running plugin in the Plugins group: its External Sources panel, then
+/// any panels it declares. Built at open time and kept out of [`CATALOG`]:
+/// the labels are the plugin's own text, not message keys, and the presets
+/// aren't `'static`.
+pub(crate) struct PluginSection {
+    pub plugin: String,
+    pub label: SharedString,
+    /// The External Sources entry first, always there.
+    pub presets: Vec<PanelPreset>,
+}
+
+impl PluginSection {
+    /// A plugin with nothing declared is one entry that opens its External
+    /// Sources panel. Anything more and it branches.
+    pub(crate) fn single(&self) -> bool {
+        self.presets.len() == 1
+    }
+}
+
+/// The key of the External Sources entry every plugin gets. No declared
+/// panel can take it, since the manifest refuses a blank name.
+pub(crate) const BROWSER_ENTRY: &str = "";
+
+/// What an entry shows in a plugin's branch.
+pub(crate) fn entry_label(preset: &PanelPreset) -> SharedString {
+    if preset.name == BROWSER_ENTRY {
+        rox_i18n::t!("panel-catalog-source-browser")
+    } else {
+        preset.name.clone().into()
+    }
+}
+
+/// Empty unless plugins run, so every picker's Plugins group hides with them.
+pub(crate) fn plugin_sections() -> Vec<PluginSection> {
+    rox_services::plugins::running_plugins()
+        .into_iter()
+        .map(|plugin| PluginSection {
+            presets: plugin_entries(&plugin.id, &plugin.panels),
+            plugin: plugin.id,
+            label: plugin.name.into(),
+        })
+        .collect()
+}
+
+/// External Sources first, then the declared panels. A declared External
+/// Sources takes the first slot instead of listing twice, since the
+/// manifest check already holds it to the plugin's own source.
+fn plugin_entries(plugin: &str, panels: &[DeclaredPanel]) -> Vec<PanelPreset> {
+    let mut browser = browser_preset(plugin);
+    let mut rest = Vec::new();
+    let mut declared_browser = false;
+
+    for panel in panels {
+        let Some(preset) = plugin_preset_for(plugin, panel) else {
+            continue;
+        };
+        if preset.panel_name() != Some("source browser") {
+            rest.push(preset);
+            continue;
+        }
+
+        // Only the first; any more would open the same panel again.
+        if !declared_browser {
+            declared_browser = true;
+            browser = PanelPreset {
+                name: BROWSER_ENTRY.into(),
+                ..preset
+            };
+        }
+    }
+
+    let mut entries = vec![browser];
+    entries.extend(rest);
+    entries
+}
+
+/// A plugin panel by its plugin and entry key, read again at pick time so
+/// a plugin stopped since the menu opened picks as a no-op.
+pub(crate) fn plugin_preset(plugin: &str, name: &str) -> Option<PanelPreset> {
+    plugin_sections()
+        .into_iter()
+        .find(|section| section.plugin == plugin)?
+        .presets
+        .into_iter()
+        .find(|preset| preset.name == name)
+}
+
+/// The External Sources panel held to the plugin's own source.
+fn browser_preset(plugin: &str) -> PanelPreset {
+    let source = format!("{SOURCE_PREFIX}{plugin}");
+    PanelPreset {
+        name: BROWSER_ENTRY.into(),
+        panel: serde_json::json!({
+            "panel_name": "source browser",
+            "children": [],
+            "info": { "panel": { "source": source, "owner": source } },
+        }),
+    }
+}
+
+/// The declared panel as a preset the restore path builds, owned by its
+/// plugin. A kind this build doesn't have is skipped rather than refusing
+/// the plugin, so one written for a later rox still runs here.
+fn plugin_preset_for(plugin: &str, panel: &DeclaredPanel) -> Option<PanelPreset> {
+    let kind = panel.panel_name()?;
+    if def_for(kind).is_none() {
+        log::debug!("plugins: {plugin} declares a {kind:?} panel this rox doesn't have");
+        return None;
+    }
+
+    // The manifest check already held it to one panel with an object
+    // config; the dock wants the children list spelled out.
+    let mut dump = panel.preset.clone();
+    let state = dump.as_object_mut()?;
+    state.insert("children".into(), serde_json::json!([]));
+    let config = state.get_mut("info")?.get_mut("panel")?.as_object_mut()?;
+    config.insert(
+        "owner".into(),
+        serde_json::json!(format!("{SOURCE_PREFIX}{plugin}")),
+    );
+
+    Some(PanelPreset {
+        name: panel.name.clone(),
+        panel: dump,
+    })
 }
 
 #[cfg(test)]
@@ -778,6 +932,163 @@ mod tests {
             raw.is_empty(),
             "these draw a label without translating it: {raw:#?}"
         );
+    }
+
+    #[test]
+    fn external_sources_lists_only_while_plugins_can_run() {
+        assert!(!rox_services::plugins::allowed());
+        assert_eq!(
+            CATALOGUE.panels.last().map(|def| def.name),
+            Some("source browser"),
+            "the bare section drops the last entry, which has to be this"
+        );
+
+        let shown = live(&CATALOGUE);
+        assert_eq!(shown.panels.len(), CATALOGUE.panels.len() - 1);
+        assert!(shown.panels.iter().all(|def| def.name != "source browser"));
+        assert!(sections().all(|section| {
+            section
+                .panels
+                .iter()
+                .all(|def| def.name != "source browser")
+        }));
+
+        // Hidden from the pickers, never from a restore.
+        assert!(def_for("source browser").is_some());
+    }
+
+    #[test]
+    fn no_plugin_panels_list_while_plugins_are_off() {
+        assert!(!rox_core::settings::plugins_enabled());
+        assert!(plugin_sections().is_empty());
+    }
+
+    #[test]
+    fn a_declared_panel_becomes_a_preset_its_plugin_owns() {
+        let panel = DeclaredPanel {
+            name: "Tones".into(),
+            preset: serde_json::json!({
+                "panel_name": "source browser",
+                "info": { "panel": { "source": "plugin:example-tones", "owner": "plugin:else" } },
+            }),
+        };
+        let preset = plugin_preset_for("example-tones", &panel).expect("a kind this rox has");
+
+        assert_eq!(preset.name, "Tones");
+        assert_eq!(preset.panel_name(), Some("source browser"));
+        assert_eq!(preset.panel["children"], serde_json::json!([]));
+        assert_eq!(
+            preset.panel["info"]["panel"]["owner"], "plugin:example-tones",
+            "the plugin's own claim is overwritten"
+        );
+
+        // It restores through the same state a saved preset holds.
+        let state: rox_dock::PanelState =
+            serde_json::from_value(preset.panel).expect("a dock panel state");
+        assert!(matches!(state.info, rox_dock::PanelInfo::Panel(_)));
+    }
+
+    #[test]
+    fn every_plugin_leads_with_its_own_external_sources() {
+        let preset = browser_preset("ytdlp");
+        assert_eq!(preset.name, BROWSER_ENTRY);
+        assert_eq!(preset.panel_name(), Some("source browser"));
+        assert_eq!(preset.panel["info"]["panel"]["source"], "plugin:ytdlp");
+        assert_eq!(preset.panel["info"]["panel"]["owner"], "plugin:ytdlp");
+
+        let state: rox_dock::PanelState =
+            serde_json::from_value(preset.panel).expect("a dock panel state");
+        assert!(matches!(state.info, rox_dock::PanelInfo::Panel(_)));
+    }
+
+    #[test]
+    fn a_plugin_branches_only_with_panels_of_its_own() {
+        let section = |presets: Vec<PanelPreset>| PluginSection {
+            plugin: "ytdlp".into(),
+            label: "YouTube".into(),
+            presets,
+        };
+        assert!(section(vec![browser_preset("ytdlp")]).single());
+
+        let library = PanelPreset {
+            name: "Library".into(),
+            panel: serde_json::json!({}),
+        };
+        assert!(!section(vec![browser_preset("ytdlp"), library.clone()]).single());
+
+        rox_i18n::pin_thread_locale(rox_i18n::SOURCE_LOCALE);
+        assert_eq!(entry_label(&browser_preset("ytdlp")), "External Sources");
+        assert_eq!(entry_label(&library), "Library");
+    }
+
+    #[test]
+    fn a_declared_external_sources_takes_the_automatic_slot() {
+        let declared = |name: &str, kind: &str, config: serde_json::Value| DeclaredPanel {
+            name: name.into(),
+            preset: serde_json::json!({ "panel_name": kind, "info": { "panel": config } }),
+        };
+        let panels = [
+            declared(
+                "Browse",
+                "source browser",
+                serde_json::json!({ "source": "plugin:tones", "title": "Tone Bank" }),
+            ),
+            declared(
+                "Library",
+                "library",
+                serde_json::json!({ "query": "source:tones" }),
+            ),
+            declared(
+                "Again",
+                "source browser",
+                serde_json::json!({ "source": "plugin:tones" }),
+            ),
+        ];
+
+        let entries = plugin_entries("tones", &panels);
+        let names: Vec<&str> = entries.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [BROWSER_ENTRY, "Library"],
+            "one External Sources, first"
+        );
+        assert_eq!(entries[0].panel["info"]["panel"]["title"], "Tone Bank");
+        assert_eq!(entries[0].panel["info"]["panel"]["owner"], "plugin:tones");
+
+        // Declaring only its browser leaves the plugin a single entry.
+        assert_eq!(plugin_entries("tones", &panels[..1]).len(), 1);
+    }
+
+    #[test]
+    fn a_kind_this_rox_lacks_is_skipped() {
+        let panel = DeclaredPanel {
+            name: "Later".into(),
+            preset: serde_json::json!({ "panel_name": "hologram", "info": { "panel": {} } }),
+        };
+        assert!(plugin_preset_for("example-tones", &panel).is_none());
+    }
+
+    /// A plugin panel is a preset of a catalog kind, so it restores whether
+    /// or not its plugin is still around, as long as the kind has a restore
+    /// builder. Without one it comes back as the dock's invalid-panel stand-in.
+    #[test]
+    fn every_catalog_kind_has_a_restore_builder() {
+        let source = include_str!("workspace.rs");
+        let start = source
+            .find("fn register_panels(")
+            .expect("workspace.rs registers the restore builders");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("the function ends")];
+
+        for section in CATALOG {
+            for def in section.panels {
+                assert!(
+                    body.contains(&format!("\"{}\"", def.name)),
+                    "{} has no restore builder in register_panels",
+                    def.name
+                );
+            }
+        }
     }
 
     #[test]

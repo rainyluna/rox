@@ -101,7 +101,8 @@ for a second source client. ADR 29's amendments add what a plugin source needs. 
 plugin row stores no URL: the engine opens a stream the plugin serves and decodes its
 bytes like a file, with the current and next entries opened ahead of time. And a
 plugin's rows come from synced collections and single picks, tracked by membership, so
-syncing one collection never prunes another's rows.
+syncing one collection never prunes another's rows. A pick plays without joining the
+library; Add to Library is what keeps a single track.
 
 Plugins are [ADR 30](decisions/30-adr-plugins.md): a folder the user drops in, run as a
 subprocess over stdin and stdout, declaring capabilities from a closed set. A plugin can
@@ -146,5 +147,5 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [26 - Last.fm sessions](decisions/26-adr-lastfm-sessions.md) | One session per api key, so builds stop invalidating each other | Decided |
 | [27 - i18n](decisions/27-adr-i18n.md) | Fluent messages and ICU4X formatting behind one locale static, en-CA as source | Decided |
 | [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Decided |
-| [29 - Source contract](decisions/29-adr-source-contract.md) | Sources as rows under a source id, in-process, trait and host deferred | Decided; plugin streams and rows by membership added by its amendments, host taken up by 30 |
-| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Decided |
+| [29 - Source contract](decisions/29-adr-source-contract.md) | Sources as rows under a source id, in-process, trait and host deferred | Decided; plugin streams, rows by membership and picks kept out of the library added by its amendments, host taken up by 30 |
+| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Decided; one switch opting in and Developer mode added by its amendment |

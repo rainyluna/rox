@@ -198,3 +198,25 @@ for a plugin track then comes back when its row does, after a re-sync, a re-pick
 reinstalling the plugin.
 
 Whether a picked row nobody played should expire on its own is left open.
+
+**Amended 2026-09-29: a pick plays a track, it doesn't add one.** Searching a service and
+playing the first result turned a whole page of results into library rows. Playing from
+a list makes the tracks around the pick the playing context, so each one is picked, and
+the library showed every one. Playing a result isn't asking to keep it.
+
+A picked row still gets written and held in the picked collection, since the queue,
+history, scrobbling and playlists all key on rows. But a row held by nothing else stays
+out of the library: it doesn't browse and general search doesn't find it, the way a
+switched-off source's rows don't, and it still resolves wherever it's already referenced.
+
+Keeping a single track is its own act. Add to Library on a browsed track records it in a
+list of saved tracks beside the membership table, `source_saved`, and a saved row
+browses like a synced collection's. It's a table of its own rather than a reserved
+collection id, since a node id can be any non-empty string. A saved row counts as held,
+so no prune takes it, and Remove from Library lets go of it, pruning the row if nothing
+else holds it.
+
+That settles the open question above. A row held only by the picked collection that
+hasn't been picked or played in 30 days, and isn't in the saved queue, is pruned at
+startup. Playlist entries and history keep their snapshots and reattach if the track is
+picked again.

@@ -17,6 +17,8 @@ pub(crate) enum NavRun {
     Layout(String, LayoutTarget),
     Workspace(String, WorkspaceTarget),
     Preset(String, PanelTarget),
+    /// A plugin id and the declared panel's name.
+    PluginPanel(String, String, PanelTarget),
     PanelWindow(&'static PanelDef),
     SaveLayout,
     SaveWorkspace,
@@ -426,6 +428,9 @@ impl Workspace {
             NavRun::Layout(name, target) => self.run_layout(name, target, cx),
             NavRun::Workspace(name, target) => self.run_workspace(name, target, cx),
             NavRun::Preset(name, target) => self.run_panel_preset(name, target, window, cx),
+            NavRun::PluginPanel(plugin, name, target) => {
+                self.run_plugin_panel(&plugin, &name, target, window, cx)
+            }
             NavRun::PanelWindow(def) => self.open_panel_window(def, window, cx),
             NavRun::SaveLayout => self.open_save_dialog(window, cx),
             NavRun::SaveWorkspace => self.open_save_workspace_dialog(window, cx),
@@ -479,14 +484,19 @@ pub(crate) fn menu_entry_rows(menu: usize) -> Vec<(NavSlot, NavRow)> {
             }
             MenuEntry::Section(_) => {}
             MenuEntry::Panels(section) if !section_shows(section) => {}
-            MenuEntry::Panels(section) if section.group.is_none() => {
-                rows.extend(section.panels.iter().enumerate().map(|(j, def)| {
-                    (
-                        (i, Some(j)),
-                        NavRow::Run(NavRun::Action(MenuAction::OpenPanel(def))),
-                    )
-                }))
-            }
+            MenuEntry::Panels(section) if section.group.is_none() => rows.extend(
+                catalog::live(section)
+                    .panels
+                    .iter()
+                    .enumerate()
+                    .map(|(j, def)| {
+                        (
+                            (i, Some(j)),
+                            NavRow::Run(NavRun::Action(MenuAction::OpenPanel(def))),
+                        )
+                    }),
+            ),
+            MenuEntry::PluginsSubmenu { .. } if !plugins_show() => {}
             _ => rows.push(((i, None), NavRow::Open(i))),
         }
     }
@@ -499,7 +509,7 @@ pub(crate) fn submenu_rows(menu: usize, entry: usize) -> Vec<NavRow> {
         return Vec::new();
     };
     match entry {
-        MenuEntry::Panels(section) => section
+        MenuEntry::Panels(section) => catalog::live(section)
             .panels
             .iter()
             .map(|def| NavRow::Run(NavRun::Action(MenuAction::OpenPanel(def))))
@@ -540,6 +550,10 @@ pub(crate) fn submenu_rows(menu: usize, entry: usize) -> Vec<NavRow> {
             .into_iter()
             .map(|preset| NavRow::Run(NavRun::Preset(preset.name, *target)))
             .collect(),
+        MenuEntry::PluginsSubmenu { target, .. } => plugin_panels()
+            .into_iter()
+            .map(|panel| NavRow::Run(NavRun::PluginPanel(panel.plugin, panel.key, *target)))
+            .collect(),
         MenuEntry::PanelWindowsSubmenu { .. } => {
             let mut rows = Vec::new();
             // Group 0 is the presets when there are any, as the picker numbers them.
@@ -557,13 +571,35 @@ pub(crate) fn submenu_rows(menu: usize, entry: usize) -> Vec<NavRow> {
                     Some(_) => rows.push(NavRow::Open(i + 1)),
                 }
             }
+            if plugins_show() {
+                rows.push(NavRow::Open(plugins_group()));
+            }
             rows
         }
         MenuEntry::Item(_) | MenuEntry::Section(_) => Vec::new(),
     }
 }
 
+/// The panel-window picker's plugin group, after the catalog's: presets
+/// are 0 and the catalog's sections count from 1.
+pub(crate) fn plugins_group() -> usize {
+    1 + catalog::sections().count()
+}
+
 pub(crate) fn subgroup_rows(group: usize) -> Vec<NavRow> {
+    if group == plugins_group() {
+        return plugin_panels()
+            .into_iter()
+            .map(|panel| {
+                NavRow::Run(NavRun::PluginPanel(
+                    panel.plugin,
+                    panel.key,
+                    PanelTarget::NewWindow,
+                ))
+            })
+            .collect();
+    }
+
     let presets = panel_presets::saved();
     if group == 0 {
         return presets
@@ -1335,7 +1371,7 @@ impl Workspace {
                             }
                             MenuEntry::Panels(section) if !section_shows(section) => Vec::new(),
                             MenuEntry::Panels(section) => match section.group {
-                                None => section
+                                None => catalog::live(section)
                                     .panels
                                     .iter()
                                     .enumerate()
@@ -1353,8 +1389,14 @@ impl Workspace {
                                     })
                                     .collect(),
                                 Some((label, icon)) => vec![
-                                    self.submenu_row(i, label, icon, section.panels, cx)
-                                        .into_any_element(),
+                                    self.submenu_row(
+                                        i,
+                                        label,
+                                        icon,
+                                        catalog::live(section).panels,
+                                        cx,
+                                    )
+                                    .into_any_element(),
                                 ],
                             },
                             MenuEntry::LayoutsSubmenu {
@@ -1385,6 +1427,15 @@ impl Workspace {
                             ],
                             MenuEntry::PanelWindowsSubmenu { label, icon } => vec![
                                 self.panel_windows_submenu_row(i, label, icon, cx)
+                                    .into_any_element(),
+                            ],
+                            MenuEntry::PluginsSubmenu { .. } if !plugins_show() => Vec::new(),
+                            MenuEntry::PluginsSubmenu {
+                                label,
+                                icon,
+                                target,
+                            } => vec![
+                                self.plugins_submenu_row(i, label, icon, *target, cx)
                                     .into_any_element(),
                             ],
                         }
@@ -1686,6 +1737,31 @@ impl Workspace {
         })
     }
 
+    fn plugins_submenu_row(
+        &self,
+        index: usize,
+        label: &'static str,
+        icon: &'static str,
+        target: PanelTarget,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let open = self.open_submenu == Some(index);
+        let lit = open || self.nav_on(index, None);
+        submenu_shell(index, label, icon, lit, cx).when(open, |d| {
+            let level = self.level(1);
+            let list = self
+                .menu_list(level)
+                .children(plugin_panels().into_iter().enumerate().map(|(row, panel)| {
+                    self.plugin_item(panel, target, cx)
+                        .when(self.nav_sub(row), nav_lit)
+                }));
+            d.child(Self::flyout_at(
+                self.flyout_left(self.level(0)),
+                self.menu_frame(level, px(200.), list),
+            ))
+        })
+    }
+
     /// Every pick opens a panel in its own window, which is why this is a
     /// flyout of its own rather than a target on the Panels menu.
     fn panel_windows_submenu_row(
@@ -1735,6 +1811,25 @@ impl Workspace {
                         flyout.child(self.panel_window_group(i + 1, label, icon, rows, cx))
                     }
                 };
+            }
+            let plugins = plugin_panels();
+            if !plugins.is_empty() {
+                let group = plugins_group();
+                let rows = plugins
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, panel)| {
+                        self.plugin_item(panel, PanelTarget::NewWindow, cx)
+                            .when(self.nav_group(group, row), nav_lit)
+                    })
+                    .collect();
+                flyout = flyout.child(self.panel_window_group(
+                    group,
+                    catalog::PLUGINS_LABEL,
+                    catalog::PLUGINS_ICON,
+                    rows,
+                    cx,
+                ));
             }
             // This flyout hosts the group flyouts, so it captures its own bounds.
             d.child(Self::flyout_at(
@@ -1840,6 +1935,29 @@ impl Workspace {
                 .text_color(palette::text_muted()),
         )
         .child(label)
+    }
+
+    /// A plugin entry. From a plugin that branches it trails the plugin's
+    /// name, since these flyouts list every plugin's entries in one run.
+    fn plugin_item(&self, panel: PluginPanel, target: PanelTarget, cx: &mut Context<Self>) -> Div {
+        let (plugin, key) = (panel.plugin, panel.key);
+        menu_row(cx.listener(move |this, _, window, cx| {
+            this.close_menus(cx);
+            this.run_plugin_panel(&plugin, &key, target, window, cx);
+        }))
+        .child(
+            svg()
+                .path(panel.icon)
+                .size_3p5()
+                .text_color(palette::text_muted()),
+        )
+        .child(div().flex_1().child(panel.label))
+        .children(panel.trailing.map(|name| {
+            div()
+                .text_xs()
+                .text_color(palette::text_faint())
+                .child(name)
+        }))
     }
 
     fn close_menus(&mut self, cx: &mut Context<Self>) {
@@ -2087,7 +2205,10 @@ pub(crate) fn dropdown_child_index(menu: &Menu, slot: NavSlot) -> usize {
         .take(entry)
         .map(|entry| match entry {
             MenuEntry::Panels(section) if !section_shows(section) => 0,
-            MenuEntry::Panels(section) if section.group.is_none() => section.panels.len(),
+            MenuEntry::Panels(section) if section.group.is_none() => {
+                catalog::live(section).panels.len()
+            }
+            MenuEntry::PluginsSubmenu { .. } if !plugins_show() => 0,
             _ => 1,
         })
         .sum();

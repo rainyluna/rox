@@ -384,6 +384,7 @@ impl Host {
             "config": config.config,
             "data_dir": config.data_dir.to_string_lossy(),
             "platform": manifest::platform(),
+            "features": wire::FEATURES,
         });
         let asked = Instant::now();
         let answer = std::fs::create_dir_all(&config.data_dir)

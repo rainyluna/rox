@@ -1109,6 +1109,12 @@ pub(crate) fn add_panel_submenu(
                 }
             },
         );
+        let tabs_for_plugin = tabs.clone();
+        let add_plugin_panel = move |panel, window: &mut Window, cx: &mut App| {
+            if let Some(tabs) = tabs_for_plugin.upgrade() {
+                tabs.update(cx, |tabs, cx| tabs.add_panel(panel, window, cx));
+            }
+        };
         for section in catalog::sections() {
             match section.group {
                 None => {
@@ -1134,7 +1140,7 @@ pub(crate) fn add_panel_submenu(
                 }
             }
         }
-        menu
+        panel_presets::plugins_submenu(menu, dock.clone(), false, window, cx, add_plugin_panel)
     });
     menu.separator().item(
         gpui_component::menu::PopupMenuItem::submenu(
@@ -2435,6 +2441,19 @@ fn run_menu_command(command: &str, cx: &mut App) {
         "panel-preset-window" => with_front_workspace(cx, move |ws, window, cx| {
             ws.run_panel_preset(name, PanelTarget::NewWindow, window, cx)
         }),
+        // "<plugin>/<entry>": a plugin id has no slash, an entry name may.
+        "plugin-panel" | "plugin-panel-window" => {
+            let target = match kind {
+                "plugin-panel" => PanelTarget::Open,
+                _ => PanelTarget::NewWindow,
+            };
+            if let Some((plugin, entry)) = name.split_once('/') {
+                let (plugin, entry) = (plugin.to_string(), entry.to_string());
+                with_front_workspace(cx, move |ws, window, cx| {
+                    ws.run_plugin_panel(&plugin, &entry, target, window, cx)
+                });
+            }
+        }
         // A catalog panel straight into a window of its own, the Window
         // menu's half of the same flyout. Keyed by registry name like
         // "panel:".
@@ -2528,6 +2547,14 @@ pub(crate) enum MenuEntry {
     PanelWindowsSubmenu {
         label: &'static str,
         icon: &'static str,
+    },
+    /// The running plugins' declared panels, read at open time; picking one
+    /// does the flyout's `target` with it. Not drawn while no plugin
+    /// declares a panel, the gate [`plugins_show`] applies.
+    PluginsSubmenu {
+        label: &'static str,
+        icon: &'static str,
+        target: PanelTarget,
     },
     /// A workspaces flyout whose items are the saved and shipped workspaces,
     /// read at open time; picking one does the flyout's `target` with that
@@ -2908,6 +2935,11 @@ pub(crate) const MENUS: &[Menu] = &[
             // grew the right-click Add Panel flyout, which reads the
             // catalog directly, and left this menu one group short.
             MenuEntry::Panels(&catalog::EXPERIMENTAL),
+            MenuEntry::PluginsSubmenu {
+                label: catalog::PLUGINS_LABEL,
+                icon: catalog::PLUGINS_ICON,
+                target: PanelTarget::Open,
+            },
         ],
     },
 ];
@@ -2918,6 +2950,54 @@ pub(crate) const MENUS: &[Menu] = &[
 /// table directly.
 pub(crate) fn section_shows(section: &'static PanelSection) -> bool {
     !catalog::is_experimental(section) || settings::experimental()
+}
+
+/// Whether the plugin flyouts draw: only while a running plugin declares a
+/// panel this rox has.
+pub(crate) fn plugins_show() -> bool {
+    !catalog::plugin_sections().is_empty()
+}
+
+/// One plugin entry as the hand-built flyouts list it. They go two levels
+/// deep and count rows for the keyboard, so a plugin that branches can't
+/// nest a third: its entries sit in the one run, each trailing its name.
+pub(crate) struct PluginPanel {
+    pub(crate) plugin: String,
+    /// What [`catalog::plugin_preset`] resolves the pick by.
+    pub(crate) key: String,
+    pub(crate) label: SharedString,
+    pub(crate) trailing: Option<SharedString>,
+    pub(crate) icon: &'static str,
+}
+
+pub(crate) fn plugin_panels() -> Vec<PluginPanel> {
+    catalog::plugin_sections()
+        .into_iter()
+        .flat_map(|section| {
+            let single = section.single();
+            let (plugin, plugin_label) = (section.plugin, section.label);
+
+            section.presets.into_iter().map(move |preset| {
+                let (label, trailing, icon) = if single {
+                    (plugin_label.clone(), None, catalog::PLUGINS_ICON)
+                } else {
+                    (
+                        catalog::entry_label(&preset),
+                        Some(plugin_label.clone()),
+                        panel_presets::icon_for(&preset),
+                    )
+                };
+
+                PluginPanel {
+                    plugin: plugin.clone(),
+                    key: preset.name,
+                    label,
+                    trailing,
+                    icon,
+                }
+            })
+        })
+        .collect()
 }
 
 /// The keybinding a dropdown row trails, Zed-style, matching [`init`]'s
@@ -3436,6 +3516,9 @@ impl Workspace {
             // The plugin host, once per app like capture. Off unless plugins
             // and experimental features are both on.
             rox_services::plugins::start(library.clone(), player.clone(), cx);
+            // The macOS bar is built once and lists the running plugins'
+            // panels, so it's rebuilt whenever which plugins run can change.
+            rox_services::plugins::after_apply(native_menu::rebuild);
             let scrobbler = cx.new(|cx| Scrobbler::new(&player, &library, &radio, cx));
             let discord = cx.new(|cx| DiscordPresence::new(&player, &library, cx));
             let listenbrainz = cx.new(|cx| ListenBrainz::new(&scrobbler, cx));
@@ -4448,12 +4531,39 @@ impl Workspace {
         else {
             return;
         };
-        let dock = self.dock.downgrade();
-        let Some(panel) = panel_presets::build(&preset, dock, window, cx) else {
+        self.place_preset(&preset, target, window, cx);
+    }
+
+    /// A plugin panel pick from any flyout. Resolved again here, so a plugin
+    /// stopped while the menu stood open picks as a no-op.
+    pub(crate) fn run_plugin_panel(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        target: PanelTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preset) = catalog::plugin_preset(plugin, name) else {
             return;
         };
+        self.place_preset(&preset, target, window, cx);
+    }
+
+    fn place_preset(
+        &mut self,
+        preset: &rox_core::settings::PanelPreset,
+        target: PanelTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dock = self.dock.downgrade();
+        let Some(panel) = panel_presets::build(preset, dock, window, cx) else {
+            return;
+        };
+
         match target {
-            PanelTarget::Open => match panel_presets::placement_for(&preset) {
+            PanelTarget::Open => match panel_presets::placement_for(preset) {
                 PanelPlacement::Center => self.add_center(panel, window, cx),
                 PanelPlacement::Bottom => self.add_bottom(panel, window, cx),
                 PanelPlacement::Top => self.add_top(panel, window, cx),
@@ -5686,6 +5796,73 @@ impl Workspace {
                             .unwrap_or_else(|| rox_i18n::t!("menu-panels"));
                         launcher_section(group_label, tiles)
                     }))
+                    // The running plugins after the catalog: one Plugins run
+                    // for those that are a single entry, and a section of its
+                    // own for each that branches.
+                    .children({
+                        let (single, branching): (Vec<_>, Vec<_>) = catalog::plugin_sections()
+                            .into_iter()
+                            .partition(|section| section.single());
+                        let mut sections = Vec::new();
+
+                        if !single.is_empty() {
+                            let tiles: Vec<Div> = single
+                                .into_iter()
+                                .filter_map(|section| {
+                                    let preset = section.presets.into_iter().next()?;
+                                    let (plugin, key) = (section.plugin, preset.name);
+                                    Some(launcher_tile(
+                                        section.label,
+                                        catalog::PLUGINS_ICON,
+                                        false,
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.run_plugin_panel(
+                                                &plugin,
+                                                &key,
+                                                PanelTarget::Open,
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                    ))
+                                })
+                                .collect();
+                            sections.push(launcher_section(
+                                rox_i18n::t!(catalog::PLUGINS_LABEL),
+                                tiles,
+                            ));
+                        }
+
+                        for section in branching {
+                            let plugin = section.plugin;
+                            let tiles: Vec<Div> = section
+                                .presets
+                                .into_iter()
+                                .map(|preset| {
+                                    let icon = panel_presets::icon_for(&preset);
+                                    let label = catalog::entry_label(&preset);
+                                    let (plugin, key) = (plugin.clone(), preset.name);
+                                    launcher_tile(
+                                        label,
+                                        icon,
+                                        false,
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.run_plugin_panel(
+                                                &plugin,
+                                                &key,
+                                                PanelTarget::Open,
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                })
+                                .collect();
+                            sections.push(launcher_section(section.label, tiles));
+                        }
+
+                        sections
+                    })
                     // Under the whole catalog: the other way back to the
                     // welcome window's quick-start, spelled out for anyone who
                     // read past the panels without spotting the corner info.
@@ -5949,6 +6126,7 @@ impl Workspace {
                     }))
                     .children(bundle_card.byline.clone().map(line))
                     .children(bundle_card.description.clone().map(line))
+                    .children(bundle_card.requires.clone().map(line))
                     .child(line(if *imported {
                         rox_i18n::t!("workspace-apply-imported-body")
                     } else {

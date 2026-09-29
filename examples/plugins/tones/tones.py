@@ -57,7 +57,8 @@ CHORD_SECS = 15
 
 
 def track(key, title, album, number, secs):
-    # Every field is always sent. Unknown text is "", an unknown number is 0.
+    # Only key is required, but sending every field keeps rows complete.
+    # Unknown text is "", an unknown number is 0, and null is refused.
     return {
         "key": key,
         "title": title,

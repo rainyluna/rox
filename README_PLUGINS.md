@@ -13,8 +13,7 @@ This guide covers plugin API version 1, the only one the host supports.
 
 ## Installing one
 
-1. Turn on Experimental Panels in Settings > Development, then Enable Plugins in
-   Settings > Application. That shows the Plugins page.
+1. Turn on Enable Plugins at the top of Settings > Plugins.
 2. Press Reveal Folder on the Plugins page. It opens the plugins folder, creating it
    the first time.
 3. Drop the plugin's folder in. The folder's name has to be the plugin's id. The page
@@ -22,9 +21,10 @@ This guide covers plugin API version 1, the only one the host supports.
 4. Switch it on. The first time, a card shows what the plugin declares and which
    programs it runs, and asks you to confirm.
 
-The plugin's source then shows up in the External Sources panel (Add Panel >
-Experimental). Keep in the library on a collection syncs it into the library.
-Playing, queueing or adding a single track to a playlist adds just that track.
+The plugin then shows up under Add Panel > Plugins, which opens the External Sources
+panel on its source. Keep in the library on a collection syncs it into the library.
+Playing or queueing a track plays it without adding it; Add to Library on a track keeps
+it.
 
 Remove on the Plugins page drops the plugin's tracks, synced collections, settings and
 approval. Its folder stays where it is.
@@ -46,6 +46,8 @@ Some things about the hash matter when you write a plugin:
 
 - A write into the plugin's own folder changes its hash and switches it off. Write
   only under the `data_dir` that `hello` hands you.
+- Editing your own plugin changes its hash too. [Developer mode](#developer-mode)
+  approves those edits for one session.
 - A symlink anywhere in the folder refuses the plugin, and so does a plugin folder
   that is itself a symlink. So does a file name that isn't UTF-8.
 - `.DS_Store`, `Thumbs.db` and `desktop.ini` are left out of the hash, since the OS
@@ -113,6 +115,7 @@ match the folder's name is refused.
 | `entry`               | Exactly one of `script` or `native`.                                                                             |
 | `meta`                | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
 | `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false.                                                   |
+| `capabilities.panels` | Extra panels listed under the plugin in Add Panel. Optional. See [Panels](#panels).                              |
 | `programs`            | Programs the plugin runs, by name. The page reports each as found on PATH or missing. rox doesn't enforce the list. |
 | `config_schema`       | JSON Schema for the plugin's settings.                                                                           |
 
@@ -149,6 +152,9 @@ A manifest is refused, with the reason on the Plugins page, when:
 - `entry` names both kinds or neither
 - there's no native build for this platform, the interpreter isn't on PATH, or the
   entry path leaves the folder or doesn't exist
+- a declared panel has no name or shares one with another, has no `panel_name`, holds
+  children, doesn't have `info` as `{ "panel": { ... } }`, or is a `source browser`
+  whose `source` isn't the plugin's own `plugin:<id>`
 
 Unknown keys inside `meta` and `capabilities` are ignored, so fields added there later
 don't break older hosts. A new top-level key means a new `api` version. A plugin with
@@ -167,13 +173,19 @@ rox can have many requests in flight, and a plugin may answer them in any order.
 plugin that answers one at a time works, but its own playback then waits behind its
 own searches. The tones example runs everything but `shutdown` on a thread pool.
 
-Answers are parsed strictly. A result with a field rox doesn't know is refused, and a
-line that doesn't parse or answers an id rox never sent is logged and dropped. An
-error's message is shown to the user when the call was theirs (a browse, a sync) and
-logged otherwise.
+Answers are parsed strictly. A result with a field rox doesn't know fails that call,
+with an error naming the field. A line that doesn't parse, has a key the frame doesn't
+define, or answers an id rox never sent is logged and dropped, and the call it was
+meant for waits out its timeout.
+
+An error's `code` has to be an integer, but rox reads only its `message`. That message is
+shown to the user when the call was theirs (a browse, a sync) and logged otherwise. The
+tones example follows JSON-RPC's codes: -32601 for an unknown method, -32602 for bad
+params, -32000 for anything else.
 
 stderr is free text. Each line goes to rox's log as `plugin <id>: <line>`, cut at 4 KiB.
-The plugin never sends requests to rox.
+The log is live in the Console window (F12), and on disk at `<data>/logs/rox.log`, which
+rolls to `rox.log.1` at 2 MiB. The plugin never sends requests to rox.
 
 ## Methods
 
@@ -194,12 +206,16 @@ The plugin never sends requests to rox.
 The first request, and nothing else is sent until it's answered:
 
 ```
-→ {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64"}}
+→ {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64","features":["notice"]}}
 ← {"jsonrpc":"2.0","id":1,"result":{"name":"Tones","version":"0.1.0","api":1}}
 ```
 
 `config` is the plugin's settings as the Plugins page stored them, `{}` or null when
 there are none. The answer's `api` has to be one the host supports, or rox hangs up.
+
+`features` names the optional parts of API 1 this host reads. A host from before a
+feature refuses a result that uses it, so a plugin uses one only when it's listed, and
+treats a missing `features` as an empty list. This host lists `notice`.
 
 ### source.browse and source.search
 
@@ -220,9 +236,9 @@ non-null `cursor` means there's another page, fetched by sending that cursor bac
 ```
 
 A Track has `key`, `title`, `artist`, `album_artist`, `album`, `genre`, `year`,
-`disc_no`, `track_no`, `duration_ms`, `codec`, `bitrate_kbps` and `live`. None of them
-is ever null: unknown text is `""` and an unknown number is `0`. A missing field reads
-as empty.
+`disc_no`, `track_no`, `duration_ms`, `codec`, `bitrate_kbps` and `live`. Only `key` is
+required. A field left out reads as empty, and null is refused: unknown text is `""`
+and an unknown number is `0`.
 
 `key` is opaque to rox and non-empty. It becomes the track's path in the library, so it
 has to stay the same across sessions and plugin versions. A plugin that changes how it
@@ -234,6 +250,23 @@ Search answers in the same page shape, so it can return nodes as well as tracks:
 → {"jsonrpc":"2.0","id":4,"method":"source.search","params":{"query":"minor","cursor":null}}
 ← {"jsonrpc":"2.0","id":4,"result":{"entries":[{"track":{"key":"chord:A minor","title":"A minor", ...}}],"cursor":null}}
 ```
+
+The roots are what the panel shows before anyone searches, so a source with something to
+discover, like a feed or a front page, lists it there as nodes.
+
+Either answer can carry a `notice`, a line rox shows above the entries, or on its own
+when there are none:
+
+```
+← {"jsonrpc":"2.0","id":2,"result":{"entries":[],"cursor":null,"notice":{"text":"Add a cookies file in this plugin's settings to see your feeds.","kind":"setup"}}}
+```
+
+Send one only when `hello` listed `notice` in `features`. `kind` is `info`, the default,
+or `setup` for a setting the plugin needs before it can
+list something. A setup notice comes with a button that opens the Plugins page, where
+the plugin's settings are. rox shows the notice from a place's first page and ignores it
+on later ones. The text is the plugin's own and isn't translated, like the rest of what
+it sends.
 
 ### source.sync
 
@@ -360,10 +393,16 @@ at the live edge.
 
 ## Tracks in the library
 
-A track enters the library when the user keeps a collection that holds it, or plays,
-queues or adds it to a playlist on its own. Syncing a collection makes it hold exactly
-the tracks the sync returned. A track no kept collection holds any more, and that the
-user never picked on its own, leaves the library.
+A track enters the library when the user keeps a collection that holds it, or adds it
+on its own with Add to Library. Syncing a collection makes it hold exactly the tracks
+the sync returned, and a track no kept collection holds any more, and that the user
+didn't add, leaves the library.
+
+Playing, queueing or adding a track to a playlist from the External Sources panel plays
+it without adding it to the library. It still has a place in the queue, history and
+the playlist, and it stays out of the library's views and search. One that isn't
+played or picked again for 30 days, and isn't in the saved queue, is deleted when rox
+starts. Its playlist entries and play history reattach if it comes back.
 
 A plugin's tracks show only while it's switched on and its folder is present. A
 switched-off plugin's tracks are hidden, and so are those of a plugin whose folder is
@@ -374,6 +413,46 @@ back with the same key.
 A plugin's tracks scrobble only when its manifest declares `"scrobble": true` and the
 user leaves Scrobble Plays on for it. Approving a manifest that declares scrobbling
 turns Scrobble Plays on, since the card just said so.
+
+## Panels
+
+Every running plugin is listed under Add Panel > Plugins, and in the Panels menu, New
+Window from Panel and an empty window's panel list. Picking it opens the External Sources
+panel on the plugin's source. A plugin needs nothing in its manifest for that.
+
+`capabilities.panels` adds more panels beside it, and then the plugin's entry opens into
+a list: External Sources first, then its own. Each one is a preset of a panel rox
+already has: a name for the entry, and a `preset` holding the panel's saved state.
+Nothing in it runs. A plugin can't add a new kind of panel or draw one. A library panel
+showing only the plugin's kept tracks looks like this:
+
+```json
+"panels": [
+  {
+    "name": "Library",
+    "preset": {
+      "panel_name": "library",
+      "info": { "panel": { "query": "source:tones", "search": true } }
+    }
+  }
+]
+```
+
+`panel_name` is the kind, and `info.panel` is that kind's settings, the same object rox
+saves for a panel preset. The easy way to get one is to set a panel up in rox, save it
+with Save As Preset from its menu, and copy its `panel` from `bundle.panel_presets` in
+`workspace.json` in rox's data folder. A `source browser`, the External Sources panel,
+has to name the plugin's own source, and it takes the External Sources entry's place
+rather than adding a second one, so a plugin can give that panel its own title or look.
+
+A `panel_name` this version of rox doesn't have is skipped, and the rest of the plugin
+works as usual, so a plugin can declare a kind a newer rox added. Entries list only
+while the plugin runs, which takes a `source` capability.
+
+A panel added from one of these entries remembers its plugin. A saved workspace lists
+the plugins its panels came from under `requires`, and applying it names any that
+aren't running. The panels restore either way, since they're panels rox has and the
+plugin only fills them.
 
 ## Process lifecycle
 
@@ -429,6 +508,20 @@ that call.
   by filesystem permission and can't tell a plugin from any other local program.
 - Write into its own folder without switching itself off.
 - Scrobble without declaring it.
+
+## Developer mode
+
+Every save to a plugin you're writing changes its folder's hash, which switches it off
+until you approve it again. Developer mode, the terminal button beside a switched-on
+plugin's switch on the Plugins page, approves each change on its own instead, and the
+plugin restarts on the new files.
+It lasts until rox quits or you switch the plugin off, and it's never saved.
+
+It approves only changes that keep the manifest's declarations. A save that adds a
+capability or a program, changes the entry, or turns scrobbling on or off switches the
+plugin off as usual, and switching it back on shows the card with what changed.
+Developer mode stays on through that. A folder that stops loading mid-edit, say with a
+half-written manifest, keeps its switch and starts again once it loads.
 
 ## Trying a plugin without rox
 

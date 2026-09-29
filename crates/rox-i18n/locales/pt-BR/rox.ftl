@@ -821,8 +821,6 @@ settings-application-download-updates = Baixar atualizações
     .description = Quando uma verificação encontra uma versão mais nova, baixar e deixar pronta em segundo plano; o próximo início a executa
 settings-application-enable-ai = Ativar recursos de IA
     .description = Deixar ferramentas de IA conversarem com o rox: adiciona suporte a MCP e os downloads de modelos de ML, com as páginas deles entrando na barra lateral.
-settings-application-enable-plugins = Ativar plugins
-    .description = Mostra a página Plugins, onde cada plugin colocado na pasta de plugins ganha seu próprio botão. Um plugin roda como programa neste computador, com as suas permissões
 settings-application-lock-panel-resize = Travar o redimensionamento dos painéis
     .description = As divisões dos painéis só mudam de tamanho com o Modo de design ligado, para que um arraste perto de uma costura não desloque um layout pronto
 settings-application-menu-entry = Entrada no menu de aplicativos
@@ -835,7 +833,6 @@ settings-application-portable-restart-note = Vale a partir do próximo início; 
 settings-application-remain-in-tray = Continuar na bandeja
     .description = Manter a música tocando quando a última janela fecha, com o ícone da bandeja (o dock no macOS) como o caminho de volta
 settings-application-section-ai = IA
-settings-application-section-plugins = Plugins
 settings-application-section-control-socket = Socket de controle
 settings-application-section-data = Dados
 settings-application-section-desktop = Área de trabalho
@@ -1198,6 +1195,8 @@ settings-playback-unrated-dots = Pontos para o não avaliado
     .description = Marcar as estrelas vazias com um ponto fraco em vez de deixá-las em branco
 
 ## Settings: plugins
+settings-plugins-enable = Ativar plugins
+    .description = Deixa rodar os plugins da pasta de plugins. Cada um continua com seu próprio botão abaixo e roda como programa neste computador, com as suas permissões
 settings-plugins-intro = Cada pasta dentro da pasta de plugins é um plugin. Nada nela roda até você ligá-lo, e um que muda no disco se desliga até você ligá-lo de novo
 settings-plugins-reveal = Mostrar pasta
 settings-plugins-guide = Guia de plugins
@@ -1211,6 +1210,7 @@ settings-plugins-failed-title = Este plugin não consegue rodar
 settings-plugins-sync-failed = A última sincronização falhou
 settings-plugins-scrobble = Fazer scrobble
     .description = Envia o que este plugin toca para os seus serviços de scrobble. Oferecido porque o plugin pede
+settings-plugins-developer = Modo desenvolvedor: até você fechar o rox, uma mudança na pasta deste plugin é aprovada sozinha e o reinicia. Uma mudança no que o manifesto declara ainda o desliga
 settings-plugins-synced = Coleções sincronizadas
 settings-plugins-synced-none = Nada sincronizado ainda. Ligue a sincronização de uma coleção no navegador da fonte do plugin
 settings-plugins-sync-now = Sincronizar agora
@@ -1505,6 +1505,10 @@ workspace-apply-screen-shader-plain = Aplica um shader de overlay sobre a janela
 workspace-apply-shader-count = { $count ->
     [one] Inclui { $count } shader: { $names }
    *[other] Inclui { $count } shaders: { $names }
+}
+workspace-requires-missing = { $count ->
+    [one] Usa um plugin que não está rodando: { $plugins }
+   *[other] Usa { $count } plugins que não estão rodando: { $plugins }
 }
 workspace-apply-shaders-approve-body = Aprovar deixa que eles rodem nesta máquina. Aplicar sem eles deixa o visual pelado, com os shaders ainda no conjunto dele.
 workspace-apply-shaders-plain-body = Aplicar sem eles deixa o visual pelado, com os shaders ainda no conjunto dele.
@@ -2171,6 +2175,7 @@ panel-catalog-group-catalogue = Catálogo
 panel-catalog-group-controls = Controles
 panel-catalog-group-details = Detalhes
 panel-catalog-group-experimental = Experimental
+panel-catalog-group-plugins = Plugins
 panel-catalog-group-visualizers = Visualizações
 panel-catalog-group-widgets = Widgets
 panel-catalog-history = Histórico
@@ -3990,7 +3995,18 @@ source-browser-empty = Nada aqui
 source-browser-pick = Escolha uma fonte
 source-browser-no-sources = Nenhuma fonte de plugin está rodando.
 source-browser-failed = { $source } não respondeu
-source-browser-pick-failed = Não foi possível adicionar estas faixas à biblioteca
+source-browser-plugins-off = Os plugins estão desligados
+source-browser-switched-off = { $source } está desligado
+source-browser-changed = { $source } mudou no disco. Ligue-o de novo para aprovar a mudança
+source-browser-missing = { $source } não está mais na pasta de plugins
+source-browser-cant-load = { $source } não carrega. A página Plugins diz por quê
+source-browser-stopped = { $source } parou depois de travar várias vezes. Desligue e ligue de novo
+source-browser-open-plugins = Abrir Plugins
+source-browser-pick-failed = Não foi possível preparar estas faixas para tocar
+source-browser-add-to-library = Adicionar à biblioteca
+source-browser-remove-from-library = Remover da biblioteca
+source-browser-save-failed = Não foi possível adicionar estas faixas à biblioteca
+source-browser-unsave-failed = Não foi possível remover estas faixas da biblioteca
 source-browser-sync-failed = Não foi possível sincronizar { $title }
 source-browser-sync = Manter na biblioteca
 source-browser-members = { $count ->

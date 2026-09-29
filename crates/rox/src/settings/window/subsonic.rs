@@ -855,7 +855,7 @@ fn plugin_row(record: &PluginRecord, stats: Stats) -> Stateful<Div> {
         .gap(tokens::SPACE_SM)
         .child(
             svg()
-                .path(icons::DATABASE)
+                .path(icons::PLUG)
                 .size(px(14.))
                 .flex_none()
                 .text_color(palette::text_muted()),

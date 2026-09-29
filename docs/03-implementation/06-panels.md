@@ -101,6 +101,7 @@ pub struct PanelChrome {
     pub max_height: Option<f32>,
     pub min_width: Option<f32>,
     pub min_height: Option<f32>,
+    pub owner: String,            // plugin:<id> for a panel from a plugin's entry
 }
 ```
 

@@ -1430,7 +1430,8 @@ impl TrackInfoPanel {
         let glyph = match now.origin {
             Origin::Local => None,
             Origin::Radio => Some(icons::RADIO),
-            Origin::Subsonic | Origin::Plugin => Some(icons::DATABASE),
+            Origin::Subsonic => Some(icons::DATABASE),
+            Origin::Plugin => Some(icons::PLUG),
         }
         .map(|path| match texts.album.is_some() {
             true => (InfoPiece::Album, path),

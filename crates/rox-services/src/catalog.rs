@@ -1128,6 +1128,26 @@ impl Library {
         self.resolve_key(key).map(|(_, meta)| meta)
     }
 
+    /// Whether the row shows in the library views. False for a station, a
+    /// switched-off source, and a plugin track that was only played.
+    pub fn in_library(&self, id: i64) -> bool {
+        let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id)) else {
+            return false;
+        };
+
+        projection.is_browsable(row)
+    }
+
+    /// A plugin track added to the library on its own, which Remove from
+    /// Library can take back out.
+    pub fn is_saved(&self, id: i64) -> bool {
+        let (Some(projection), Some(&row)) = (&self.projection, self.row_by_id.get(&id)) else {
+            return false;
+        };
+
+        projection.is_saved(row)
+    }
+
     pub fn id_for_key(&self, key: &TrackKey) -> Option<i64> {
         let conn = self.conn.as_ref()?;
         store::queue_meta_for_key(conn, &key.source, key.path.to_str()?, key.sub)
@@ -2364,17 +2384,36 @@ fn load_projection(
         .unwrap_or(4);
     let mut projection =
         Projection::load_parallel(db_path, shards, rox_core::settings::fold_case())?;
-    // Before the order, which is built off the browse mask this rewrites.
+    // Before the order, which is built off the browse mask these rewrite.
     crate::sources::publish_labels();
     projection.hide_sources(crate::sources::hidden_sources());
-    let order = projection.sort_canonical();
-    let row_by_id = projection
+    let row_by_id: HashMap<i64, u32> = projection
         .db_id
         .iter()
         .enumerate()
         .map(|(row, &id)| (id, row as u32))
         .collect();
+    let (picked_only, saved) = plugin_holds(db_path)?;
+    projection.hide_rows(
+        picked_only
+            .iter()
+            .filter_map(|id| row_by_id.get(id).copied()),
+    );
+    projection.mark_saved(saved.iter().filter_map(|id| row_by_id.get(id).copied()));
+    let order = projection.sort_canonical();
     Ok((projection, order, row_by_id))
+}
+
+/// Plugin tracks that were only played, which stay out of the library, and
+/// those added one at a time (ADR 29).
+fn plugin_holds(
+    db_path: &std::path::Path,
+) -> Result<(Vec<i64>, Vec<i64>), rox_library::rusqlite::Error> {
+    let conn = store::open(db_path)?;
+    Ok((
+        rox_library::members::picked_only_ids(&conn)?,
+        rox_library::members::saved_ids(&conn)?,
+    ))
 }
 
 fn status_line(

@@ -850,8 +850,6 @@ settings-application-download-updates = Download Updates
     .description = When a check finds a newer release, download and stage it in the background; the next start runs it
 settings-application-enable-ai = Enable AI Features
     .description = Let AI tooling talk to rox: adds MCP support, and the ML model downloads, with their pages joining the sidebar.
-settings-application-enable-plugins = Enable Plugins
-    .description = Show the Plugins page, where each plugin dropped into the plugins folder gets its own switch. A plugin runs as a program on this computer with your permissions
 settings-application-lock-panel-resize = Lock Panel Resize
     .description = Panel splits only resize while Design Mode is on, so a drag near a seam can't nudge a finished layout
 settings-application-menu-entry = App Menu Entry
@@ -864,7 +862,6 @@ settings-application-portable-restart-note = Applies on the next launch; this ru
 settings-application-remain-in-tray = Remain in Tray
     .description = Keep the music playing when the last window closes, with the tray icon (the dock on macOS) as the way back in
 settings-application-section-ai = AI
-settings-application-section-plugins = Plugins
 settings-application-section-control-socket = Control Socket
 settings-application-section-data = Data
 settings-application-section-desktop = Desktop
@@ -1250,6 +1247,8 @@ settings-playback-unrated-dots = Unrated Dots
 
 ## Settings: plugins
 
+settings-plugins-enable = Enable Plugins
+    .description = Let the plugins in the plugins folder run. Each one still has its own switch below, and runs as a program on this computer with your permissions
 settings-plugins-intro = Each folder in the plugins folder is one plugin. Nothing in it runs until you switch it on, and one that changes on disk switches off until you switch it on again
 settings-plugins-reveal = Reveal Folder
 settings-plugins-guide = Plugin Guide
@@ -1263,6 +1262,7 @@ settings-plugins-failed-title = This plugin can't run
 settings-plugins-sync-failed = The last sync failed
 settings-plugins-scrobble = Scrobble Plays
     .description = Send what this plugin plays to your scrobblers. Offered because the plugin asks for it
+settings-plugins-developer = Developer mode: until rox quits, a change to this plugin's folder is approved on its own and restarts it. A change to what its manifest declares still switches it off
 settings-plugins-synced = Synced Collections
 settings-plugins-synced-none = Nothing synced yet. Switch sync on for a collection in the plugin's source browser
 settings-plugins-sync-now = Sync Now
@@ -1567,6 +1567,10 @@ workspace-apply-screen-shader-plain = Applies an overlay shader over the whole w
 workspace-apply-shader-count = { $count ->
     [one] Includes { $count } shader: { $names }
    *[other] Includes { $count } shaders: { $names }
+}
+workspace-requires-missing = { $count ->
+    [one] Uses a plugin that isn't running: { $plugins }
+   *[other] Uses { $count } plugins that aren't running: { $plugins }
 }
 workspace-apply-shaders-approve-body = Approving lets them run on this machine. Applying without them leaves the look bare, with the shaders still in its pool.
 workspace-apply-shaders-plain-body = Applying without them leaves the look bare, with the shaders still in its pool.
@@ -2250,6 +2254,7 @@ panel-catalog-group-catalogue = Catalogue
 panel-catalog-group-controls = Controls
 panel-catalog-group-details = Details
 panel-catalog-group-experimental = Experimental
+panel-catalog-group-plugins = Plugins
 panel-catalog-group-visualizers = Visualizers
 panel-catalog-group-widgets = Widgets
 panel-catalog-history = History
@@ -4079,7 +4084,18 @@ source-browser-empty = Nothing here
 source-browser-pick = Choose a Source
 source-browser-no-sources = No plugin source is running.
 source-browser-failed = { $source } couldn't answer
-source-browser-pick-failed = Couldn't add these tracks to the library
+source-browser-plugins-off = Plugins are switched off
+source-browser-switched-off = { $source } is switched off
+source-browser-changed = { $source } changed on disk. Switch it on again to approve the change
+source-browser-missing = { $source } is gone from the plugins folder
+source-browser-cant-load = { $source } can't load. The Plugins page says why
+source-browser-stopped = { $source } stopped after repeated crashes. Switch it off and on again
+source-browser-open-plugins = Open Plugins
+source-browser-pick-failed = Couldn't get these tracks ready to play
+source-browser-add-to-library = Add to Library
+source-browser-remove-from-library = Remove from Library
+source-browser-save-failed = Couldn't add these tracks to the library
+source-browser-unsave-failed = Couldn't take these tracks out of the library
 source-browser-sync-failed = Couldn't sync { $title }
 source-browser-sync = Keep in the library
 source-browser-members = { $count ->

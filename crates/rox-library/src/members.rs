@@ -5,9 +5,13 @@
 //! living in a collection of their own ([`PICKED`]), and a row is pruned only
 //! when nothing holds it or the user removes it.
 //!
+//! A pick plays a track without adding it (ADR 29, amended 2026-09-29): a
+//! row held only by [`PICKED`] stays out of the library, and one the user
+//! adds is recorded in `source_saved`, which holds it like a collection.
+//! Picked-only rows nobody touched in [`PICK_KEEP_SECS`] expire.
+//!
 //! Writes here refuse local files, stations and Subsonic servers outright,
-//! and every statement is scoped to the source it was handed. Nothing
-//! expires a picked row on its own; ADR 29 leaves that open.
+//! and every statement is scoped to the source it was handed.
 
 use std::path::PathBuf;
 
@@ -20,6 +24,17 @@ use crate::{TrackRow, listens, playlists, stations, store};
 /// The collection single picks live in. Node ids from a plugin are never
 /// empty, so it can't collide with a synced one.
 pub const PICKED: &str = "";
+
+/// How long a picked-only row survives without being picked or played.
+pub const PICK_KEEP_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Picked-only rows: held by [`PICKED`] and nothing else, and not saved.
+/// Over `p`, a `source_members` alias.
+const PICKED_ONLY: &str = "p.collection = ''
+    AND NOT EXISTS (SELECT 1 FROM source_members m
+                     WHERE m.source = p.source AND m.path = p.path AND m.collection <> '')
+    AND NOT EXISTS (SELECT 1 FROM source_saved s
+                     WHERE s.source = p.source AND s.path = p.path)";
 
 /// One track as a plugin lists it. Every field is set, empty or zero when the
 /// plugin doesn't know it.
@@ -55,6 +70,19 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (source, collection, path)
         );
         CREATE INDEX IF NOT EXISTS source_members_path ON source_members (source, path);",
+    )
+}
+
+/// Single tracks the user added to the library, apart from the collections
+/// so no node id can collide with it.
+pub(crate) fn add_saved(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS source_saved (
+            source   TEXT NOT NULL,
+            path     TEXT NOT NULL,
+            saved_at INTEGER NOT NULL,
+            PRIMARY KEY (source, path)
+        );",
     )
 }
 
@@ -125,6 +153,142 @@ pub fn pick(
         .collect())
 }
 
+/// Add to Library: upsert `tracks` and save each, so they browse. Answers
+/// their keys.
+pub fn save(
+    conn: &mut Connection,
+    source: &str,
+    tracks: &[PluginTrack],
+) -> rusqlite::Result<Vec<TrackKey>> {
+    refuse_other_shapes(source)?;
+
+    if tracks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tx = conn.transaction()?;
+    upsert(&tx, source, tracks)?;
+    {
+        let mut insert = tx.prepare_cached(
+            "INSERT OR IGNORE INTO source_saved (source, path, saved_at) VALUES (?1, ?2, ?3)",
+        )?;
+        let now = unix_now();
+        for track in tracks {
+            insert.execute(params![source, track.key, now])?;
+        }
+    }
+    playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
+    tx.commit()?;
+
+    let id = cue::source_id(source);
+    Ok(tracks
+        .iter()
+        .map(|track| TrackKey {
+            source: id.clone(),
+            path: PathBuf::from(&track.key),
+            sub: 0,
+        })
+        .collect())
+}
+
+/// Remove from Library: let go of saved tracks. A row still held by a pick
+/// or a collection stays; one held by nothing is pruned. Answers how many
+/// rows went.
+pub fn unsave(conn: &mut Connection, source: &str, paths: &[String]) -> rusqlite::Result<usize> {
+    refuse_other_shapes(source)?;
+
+    let tx = conn.transaction()?;
+    {
+        let mut delete =
+            tx.prepare_cached("DELETE FROM source_saved WHERE source = ?1 AND path = ?2")?;
+        for path in paths {
+            delete.execute(params![source, path])?;
+        }
+    }
+    let pruned = prune_orphans(&tx, source)?;
+    playlists::reattach(&tx)?;
+    listens::reattach(&tx)?;
+    tx.commit()?;
+
+    Ok(pruned)
+}
+
+/// The track ids of every picked-only row, which stay out of the library.
+pub fn picked_only_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
+    let sql = format!(
+        "SELECT t.id FROM source_members p
+           JOIN tracks t ON t.source = p.source AND t.path = p.path
+          WHERE {PICKED_ONLY}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let ids = stmt.query_map([], |r| r.get(0))?;
+
+    ids.collect()
+}
+
+/// The track ids of every saved row, for Remove from Library.
+pub fn saved_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id FROM source_saved s
+           JOIN tracks t ON t.source = s.source AND t.path = s.path",
+    )?;
+    let ids = stmt.query_map([], |r| r.get(0))?;
+
+    ids.collect()
+}
+
+/// Prune picked-only rows neither picked nor played since `cutoff` (unix
+/// seconds), leaving the ids in `keep` alone: the saved queue restores by
+/// row id. Playlist entries and listens detach to their snapshots.
+/// Answers how many rows went.
+pub fn expire_picks(
+    conn: &mut Connection,
+    cutoff: i64,
+    keep: &std::collections::HashSet<i64>,
+) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let stale: Vec<(i64, String, String)> = {
+        let sql = format!(
+            "SELECT t.id, t.source, t.path FROM source_members p
+               JOIN tracks t ON t.source = p.source AND t.path = p.path
+              WHERE {PICKED_ONLY}
+                AND t.mtime < ?1
+                AND NOT EXISTS (SELECT 1 FROM listens l
+                                 WHERE l.track_id = t.id AND l.played_at >= ?1)"
+        );
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+
+    let mut expired = 0;
+    {
+        let mut members =
+            tx.prepare_cached("DELETE FROM source_members WHERE source = ?1 AND path = ?2")?;
+        let mut tracks = tx.prepare_cached("DELETE FROM tracks WHERE id = ?1")?;
+        for (id, source, path) in stale.iter().filter(|(id, ..)| !keep.contains(id)) {
+            members.execute(params![source, path])?;
+            expired += tracks.execute([id])?;
+        }
+    }
+
+    if expired > 0 {
+        playlists::reattach(&tx)?;
+        listens::reattach(&tx)?;
+    }
+    tx.commit()?;
+
+    Ok(expired)
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Make `collection` hold exactly `tracks`, in order, then prune the rows
 /// nothing holds any more. Answers how many went.
 pub fn set_collection(
@@ -184,6 +348,10 @@ pub fn remove_track(conn: &mut Connection, source: &str, path: &str) -> rusqlite
         params![source, path],
     )?;
     tx.execute(
+        "DELETE FROM source_saved WHERE source = ?1 AND path = ?2",
+        params![source, path],
+    )?;
+    tx.execute(
         "DELETE FROM tracks WHERE source = ?1 AND path = ?2",
         params![source, path],
     )?;
@@ -199,6 +367,7 @@ pub fn remove_source(conn: &mut Connection, source: &str) -> rusqlite::Result<us
 
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM source_members WHERE source = ?1", [source])?;
+    tx.execute("DELETE FROM source_saved WHERE source = ?1", [source])?;
     let removed = tx.execute("DELETE FROM tracks WHERE source = ?1", [source])?;
     playlists::reattach(&tx)?;
     listens::reattach(&tx)?;
@@ -263,11 +432,7 @@ fn refuse_other_shapes(source: &str) -> rusqlite::Result<()> {
 /// with the membership that holds them. A row committed without its
 /// membership would sit unheld until some later prune.
 fn upsert(conn: &Connection, source: &str, tracks: &[PluginTrack]) -> rusqlite::Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
+    let now = unix_now();
     let rows: Vec<TrackRow> = tracks.iter().map(|track| row_for(track, now)).collect();
     store::upsert_source_rows_in(conn, source, &rows)
 }
@@ -305,11 +470,14 @@ fn hold(
 /// One statement rather than `store::prune_source`'s read-then-delete: that
 /// one reads paths into memory to stay under the bound-parameter ceiling,
 /// and a subquery binds nothing but the source.
+/// A saved row counts as held.
 fn prune_orphans(conn: &Connection, source: &str) -> rusqlite::Result<usize> {
     conn.execute(
         "DELETE FROM tracks WHERE source = ?1
            AND NOT EXISTS (SELECT 1 FROM source_members m
-                            WHERE m.source = ?1 AND m.path = tracks.path)",
+                            WHERE m.source = ?1 AND m.path = tracks.path)
+           AND NOT EXISTS (SELECT 1 FROM source_saved s
+                            WHERE s.source = ?1 AND s.path = tracks.path)",
         [source],
     )
 }
@@ -355,6 +523,114 @@ mod tests {
         keys.iter()
             .map(|key| key.path.to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn id_of(conn: &Connection, path: &str) -> i64 {
+        conn.query_row(
+            "SELECT id FROM tracks WHERE source = ?1 AND path = ?2",
+            params![DEMO, path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn age(conn: &Connection, path: &str, mtime: i64) {
+        conn.execute(
+            "UPDATE tracks SET mtime = ?1 WHERE source = ?2 AND path = ?3",
+            params![mtime, DEMO, path],
+        )
+        .unwrap();
+    }
+
+    fn sorted(mut ids: Vec<i64>) -> Vec<i64> {
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn a_pick_stays_out_of_the_library_until_saved_or_synced() {
+        let mut conn = store();
+        pick(
+            &mut conn,
+            DEMO,
+            &[track("a", "A"), track("b", "B"), track("c", "C")],
+        )
+        .unwrap();
+        let (a, b, c) = (id_of(&conn, "a"), id_of(&conn, "b"), id_of(&conn, "c"));
+        assert_eq!(
+            sorted(picked_only_ids(&conn).unwrap()),
+            sorted(vec![a, b, c])
+        );
+
+        save(&mut conn, DEMO, &[track("a", "A")]).unwrap();
+        set_collection(&mut conn, DEMO, "liked", &[track("b", "B")]).unwrap();
+
+        assert_eq!(picked_only_ids(&conn).unwrap(), vec![c]);
+        assert_eq!(saved_ids(&conn).unwrap(), vec![a]);
+    }
+
+    #[test]
+    fn saving_needs_no_pick_and_unsaving_prunes_what_nothing_holds() {
+        let mut conn = store();
+        save(&mut conn, DEMO, &a_and_b()).unwrap();
+        pick(&mut conn, DEMO, &[track("b", "B")]).unwrap();
+        assert!(
+            picked_only_ids(&conn).unwrap().is_empty(),
+            "saved rows show"
+        );
+
+        let pruned = unsave(&mut conn, DEMO, &["a".into(), "b".into()]).unwrap();
+        assert_eq!(pruned, 1, "only a went; b is still a pick");
+        assert_eq!(rows(&conn, DEMO), ["b"]);
+        assert_eq!(picked_only_ids(&conn).unwrap(), vec![id_of(&conn, "b")]);
+    }
+
+    #[test]
+    fn dropping_a_collection_keeps_a_saved_row() {
+        let mut conn = store();
+        set_collection(&mut conn, DEMO, "liked", &a_and_b()).unwrap();
+        save(&mut conn, DEMO, &[track("a", "A")]).unwrap();
+
+        drop_collection(&mut conn, DEMO, "liked").unwrap();
+        assert_eq!(rows(&conn, DEMO), ["a"]);
+    }
+
+    #[test]
+    fn a_stale_pick_expires_unless_something_still_wants_it() {
+        let mut conn = store();
+        let tracks: Vec<PluginTrack> = ["old", "played", "queued", "fresh", "saved", "synced"]
+            .iter()
+            .map(|key| track(key, key))
+            .collect();
+        pick(&mut conn, DEMO, &tracks).unwrap();
+        save(&mut conn, DEMO, &[track("saved", "saved")]).unwrap();
+        set_collection(&mut conn, DEMO, "liked", &[track("synced", "synced")]).unwrap();
+
+        let cutoff = 1_000_000;
+        for key in ["old", "played", "queued", "saved", "synced"] {
+            age(&conn, key, cutoff - 10);
+        }
+        age(&conn, "fresh", cutoff + 10);
+        conn.execute(
+            "INSERT INTO listens (track_id, played_at, title, artist, album, genre)
+             VALUES (?1, ?2, 'played', '', '', '')",
+            params![id_of(&conn, "played"), cutoff + 5],
+        )
+        .unwrap();
+        let keep = std::collections::HashSet::from([id_of(&conn, "queued")]);
+
+        assert_eq!(expire_picks(&mut conn, cutoff, &keep).unwrap(), 1);
+        assert_eq!(
+            rows(&conn, DEMO),
+            ["fresh", "played", "queued", "saved", "synced"]
+        );
+        assert!(
+            collections(&conn, DEMO)
+                .unwrap()
+                .iter()
+                .all(|(_, n)| *n > 0),
+            "the expired row's membership went with it"
+        );
     }
 
     #[test]
@@ -557,6 +833,11 @@ mod tests {
             let a = [track("a", "A")];
 
             assert!(pick(&mut conn, source, &a).is_err(), "{source}");
+            assert!(save(&mut conn, source, &a).is_err(), "{source}");
+            assert!(
+                unsave(&mut conn, source, &["a".into()]).is_err(),
+                "{source}"
+            );
             assert!(
                 set_collection(&mut conn, source, "liked", &a).is_err(),
                 "{source}"

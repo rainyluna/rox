@@ -7,13 +7,15 @@
 //! The plugins folder is scanned and watched, and [`apply`] keeps one host
 //! per plugin that's switched on, loaded, and approved for the exact folder
 //! hash it has now. A folder that changed since its approval is switched off
-//! until the user switches it on again, which is the approving act. A record
-//! whose folder is gone is Missing: nothing starts and nothing is swept.
+//! until the user switches it on again, which is the approving act. Developer
+//! mode, which the user turns on per plugin for one session, approves such a
+//! change instead when the manifest declares nothing new. A record whose
+//! folder is gone is Missing: nothing starts and nothing is swept.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, Global, Task};
@@ -52,6 +54,33 @@ const FIRST_APPLY_WAIT: Duration = Duration::from_secs(10);
 pub struct Page {
     pub entries: Vec<Entry>,
     pub cursor: Option<String>,
+    pub notice: Option<Notice>,
+}
+
+/// What the plugin wants said over a page. `setup` means it needs a setting
+/// from the user first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub setup: bool,
+}
+
+/// Why a plugin source has nothing to answer with, in terms the user can act
+/// on from the Plugins page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// The Plugins switch is off.
+    PluginsOff,
+    /// Its own switch is off.
+    SwitchedOff,
+    /// Its folder changed since the last approval.
+    Changed,
+    /// Its folder is gone from the plugins folder.
+    Missing,
+    /// Its folder is there but doesn't load.
+    Failed,
+    /// It crashed too often and was stopped.
+    Stopped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +112,9 @@ static HOSTS: LazyLock<RwLock<HashMap<String, Arc<Running>>>> =
 /// is the projection's first load at startup, so its rows hide right away.
 static FOLDERS: LazyLock<RwLock<Vec<Loaded>>> =
     LazyLock::new(|| RwLock::new(loader::scan(&settings::plugins_dir())));
+
+/// Run at the end of every [`apply`]. See [`after_apply`].
+static AFTER_APPLY: OnceLock<fn(&mut App)> = OnceLock::new();
 
 /// The live ids [`apply`] last reloaded the projection for.
 static LIVE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
@@ -194,13 +226,15 @@ pub fn status(id: &str) -> Option<Status> {
 }
 
 /// Installs the stream opener, follows `player` to open upcoming plugin
-/// tracks early, and starts every plugin that's switched on and approved.
+/// tracks early, expires old picks, and starts every plugin that's switched
+/// on and approved.
 /// Once per app; a later window's call is a no-op.
 pub fn start(library: Entity<Library>, player: Entity<Player>, cx: &mut App) {
     if STARTED.swap(true, Ordering::Relaxed) {
         return;
     }
 
+    expire_picks(&library, cx);
     cx.set_global(Wiring {
         library,
         watch: None,
@@ -243,18 +277,66 @@ pub fn start(library: Entity<Library>, player: Entity<Player>, cx: &mut App) {
     .detach();
 }
 
+/// Plugins run only with the Plugins switch on.
+pub fn allowed() -> bool {
+    settings::plugins_enabled()
+}
+
+/// Played-but-never-added tracks nobody came back to go (ADR 29). At launch
+/// only, so a queue in use is never touched; the saved queue and the last
+/// track are kept, since they restore by row id.
+fn expire_picks(library: &Entity<Library>, cx: &mut App) {
+    let db_path = library.read(cx).db_path();
+    let expired = cx.background_executor().spawn(async move {
+        let session = Settings::load().session;
+        let keep: HashSet<i64> = session
+            .last_queue
+            .iter()
+            .flat_map(|queue| queue.entries.iter().map(|entry| entry.id))
+            .chain(session.last_track.map(|track| track.id))
+            .collect();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let expired = store::open(&db_path).and_then(|mut conn| {
+            members::expire_picks(&mut conn, now - members::PICK_KEEP_SECS, &keep)
+        });
+        match expired {
+            Ok(count) => count,
+            Err(e) => {
+                log::warn!("plugins: expiring old picks failed: {e}");
+                0
+            }
+        }
+    });
+
+    let library = library.clone();
+    cx.spawn(async move |cx| {
+        let count = expired.await;
+        if count > 0 {
+            log::info!("plugins: {count} played but never added tracks expired");
+            library
+                .update(cx, |library, cx| library.reload_projection(cx))
+                .ok();
+        }
+    })
+    .detach();
+}
+
 /// Brings the hosts in line with the records, the folders and the approvals,
 /// then reloads the projection if that changed which rows browse. Run after
 /// anything that moves one of them.
 ///
-/// Plugins run only with experimental features and the Plugins switch both
-/// on. A switched-on record whose folder isn't the approved one is switched
-/// off here, whatever the gate.
+/// Plugins run only with the Plugins switch on. A switched-on record whose
+/// folder isn't the approved one is switched off here, whatever the gate,
+/// unless Developer mode approves it first.
 pub fn apply(cx: &mut App) {
     let Some(library) = cx.try_global::<Wiring>().map(|w| w.library.clone()) else {
         return;
     };
-    let on = settings::experimental() && settings::plugins_enabled();
+    let on = allowed();
     if on {
         watch(cx);
     }
@@ -262,15 +344,23 @@ pub fn apply(cx: &mut App) {
     let folders = loaded();
     let folder = |id: &str| folders.iter().find(|folder| folder.id == id);
 
+    let mut records = Settings::load().accounts.plugins;
+    if redevelop(&records, &folders) {
+        records = Settings::load().accounts.plugins;
+    }
+
     // Changed on disk. A Missing record keeps its switch: deleting the old
-    // folder is how many people update a plugin.
-    let records = Settings::load().accounts.plugins;
+    // folder is how many people update a plugin. So does a Developer mode
+    // folder that can't load, since it can't run and a save mid-edit is how
+    // that happens.
     let changed: Vec<String> = records
         .iter()
         .filter(|record| record.enabled)
         .filter(|record| {
-            folder(&record.id)
-                .is_some_and(|folder| !settings::plugin_approved(&record.id, &folder.hash))
+            folder(&record.id).is_some_and(|folder| {
+                !settings::plugin_approved(&record.id, &folder.hash)
+                    && !(developing(&record.id) && !folder.runs())
+            })
         })
         .map(|record| record.id.clone())
         .collect();
@@ -331,6 +421,17 @@ pub fn apply(cx: &mut App) {
 
     FIRST_APPLY.open();
     bump();
+
+    if let Some(hook) = AFTER_APPLY.get() {
+        hook(cx);
+    }
+}
+
+/// The app's hook for state that follows which plugins run, since apply
+/// also runs off the folder watch where no caller is around to follow up.
+/// Set once; a second call is ignored.
+pub fn after_apply(hook: fn(&mut App)) {
+    let _ = AFTER_APPLY.set(hook);
 }
 
 /// Swaps the host table to `wanted`, keeping a host whose folder and config
@@ -474,6 +575,12 @@ fn watch(cx: &mut App) {
 /// machine's approvals, and the record keeps the manifest for the next
 /// diff. Creates the record the first time.
 pub fn approve(folder: &Loaded, cx: &mut App) {
+    record_approval(folder);
+    apply(cx);
+}
+
+/// The approval's writes, without the [`apply`] that follows them.
+fn record_approval(folder: &Loaded) {
     let Some(manifest) = folder.manifest.as_ref() else {
         return;
     };
@@ -513,8 +620,59 @@ pub fn approve(folder: &Loaded, cx: &mut App) {
         record.hash = hash;
         record.approved_manifest = document;
     });
+}
 
-    apply(cx);
+/// Developer mode's half of [`apply`]: approves every switched-on folder in
+/// it that changed, loads, and declares nothing its last approval didn't.
+/// Answers whether it approved any.
+fn redevelop(records: &[PluginRecord], folders: &[Loaded]) -> bool {
+    let mut approved = false;
+    for record in records.iter().filter(|r| r.enabled && developing(&r.id)) {
+        let Some(folder) = folders.iter().find(|f| f.id == record.id) else {
+            continue;
+        };
+        if !folder.runs() || settings::plugin_approved(&record.id, &folder.hash) {
+            continue;
+        }
+
+        // A new capability, program, entry or scrobble ask goes to the card.
+        if !changes(&record.approved_manifest, &folder.document).is_empty() {
+            continue;
+        }
+
+        log::info!(
+            "plugin:{}: developer mode approved {}",
+            record.id,
+            folder.hash
+        );
+        record_approval(folder);
+        approved = true;
+    }
+
+    approved
+}
+
+/// Plugins in Developer mode. Never saved, so it ends with the session.
+static DEVELOPING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+pub fn developing(id: &str) -> bool {
+    DEVELOPING
+        .lock()
+        .is_ok_and(|developing| developing.contains(id))
+}
+
+/// Developer mode approves the plugin's folder on its own whenever it
+/// changes, for the rest of the session, so a save restarts the plugin
+/// instead of switching it off. Switching the plugin off ends it.
+pub fn set_developing(id: &str, on: bool) {
+    if let Ok(mut developing) = DEVELOPING.lock() {
+        match on {
+            true => developing.insert(id.to_string()),
+            false => developing.remove(id),
+        };
+    }
+
+    bump();
 }
 
 fn declares_scrobble_in(document: &Value) -> bool {
@@ -527,6 +685,10 @@ fn declares_scrobble_in(document: &Value) -> bool {
 /// approve anything: a folder that isn't the approved one goes straight back
 /// off in [`apply`].
 pub fn set_enabled(id: &str, on: bool, cx: &mut App) {
+    if !on {
+        set_developing(id, false);
+    }
+
     edit(id, move |record| record.enabled = on);
     apply(cx);
 }
@@ -575,6 +737,7 @@ pub fn remove(id: &str, cx: &mut App) -> Task<Result<usize, String>> {
         .and_then(|mut table| table.remove(&source));
 
     settings::revoke_plugin(id);
+    set_developing(id, false);
     let gone = id.to_string();
     Settings::update(move |s| s.accounts.plugins.retain(|record| record.id != gone));
     // The write below reloads the projection, so apply needn't.
@@ -914,6 +1077,10 @@ fn page(wire: wire::Page) -> Page {
     Page {
         entries,
         cursor: wire.cursor,
+        notice: wire.notice.map(|notice| Notice {
+            text: notice.text,
+            setup: notice.kind == wire::NoticeKind::Setup,
+        }),
     }
 }
 
@@ -923,12 +1090,14 @@ fn listing(
     params: Value,
     cx: &App,
 ) -> Task<Result<Page, String>> {
-    let host = match host_for(source) {
-        Ok(host) => host,
-        Err(e) => return Task::ready(Err(e)),
-    };
+    let source = source.to_string();
 
     cx.background_executor().spawn(async move {
+        // A panel restored at launch lists before the first apply has built
+        // the hosts, and would otherwise read that as no host at all.
+        await_first_apply(&source);
+        let host = host_for(&source)?;
+
         let timeout = host.timeouts().listing;
         host.call(method, params, timeout)
             .and_then(wire::decode::<wire::Page>)
@@ -1183,6 +1352,36 @@ pub fn pick(
     })
 }
 
+/// Add to Library: the tracks show in the library from now on, rather
+/// than only playing (ADR 29).
+pub fn save(
+    library: Entity<Library>,
+    source: &str,
+    tracks: Vec<PluginTrack>,
+    cx: &mut App,
+) -> Task<Result<Vec<TrackKey>, String>> {
+    let source = source.to_string();
+    write(library, cx, move |db_path| {
+        let mut conn = store::open(&db_path).map_err(|e| e.to_string())?;
+        members::save(&mut conn, &source, &tracks).map_err(|e| e.to_string())
+    })
+}
+
+/// Remove from Library: tracks added one at a time go back to being only
+/// played, or go altogether if nothing else holds them.
+pub fn unsave(
+    library: Entity<Library>,
+    source: &str,
+    paths: Vec<String>,
+    cx: &mut App,
+) -> Task<Result<usize, String>> {
+    let source = source.to_string();
+    write(library, cx, move |db_path| {
+        let mut conn = store::open(&db_path).map_err(|e| e.to_string())?;
+        members::unsave(&mut conn, &source, &paths).map_err(|e| e.to_string())
+    })
+}
+
 /// Blocking; called from `fetch_cover`'s thread. A miss there is held for
 /// minutes, so one asked before the first apply waits for it.
 pub fn cover(source: &str, key: &str) -> Option<Vec<u8>> {
@@ -1214,6 +1413,92 @@ pub fn declares_scrobble(source: &str) -> bool {
             .as_ref()
             .is_some_and(|cap| cap.scrobble)
     })
+}
+
+/// A running plugin as the Add Panel pickers list it.
+#[derive(Clone, Debug)]
+pub struct RunningPlugin {
+    pub id: String,
+    /// The manifest's display name.
+    pub name: String,
+    /// Its declared panels, past the External Sources panel every one gets.
+    pub panels: Vec<rox_plugins::manifest::DeclaredPanel>,
+}
+
+/// Every running plugin, by display name. Running is switched on and
+/// approved, so nothing lists for code nobody agreed to. Empty while
+/// plugins are off.
+pub fn running_plugins() -> Vec<RunningPlugin> {
+    if !allowed() {
+        return Vec::new();
+    }
+    let Ok(table) = HOSTS.read() else {
+        return Vec::new();
+    };
+
+    let mut plugins: Vec<RunningPlugin> = table
+        .iter()
+        .filter_map(|(source, running)| {
+            let manifest = running.host.manifest();
+            Some(RunningPlugin {
+                id: record_id(source)?.to_string(),
+                name: manifest.name.clone(),
+                panels: manifest.capabilities.panels.clone(),
+            })
+        })
+        .collect();
+    plugins.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+
+    plugins
+}
+
+/// Whether `source` has a host that isn't stopped. Cheap enough to ask
+/// while drawing.
+pub fn answers(source: &str) -> bool {
+    allowed()
+        && running(source)
+            .is_some_and(|running| !matches!(running.host.status(), Status::Stopped(_)))
+}
+
+/// Why `source` can't answer, or None when it has a host that's running.
+/// Reads the settings file, so it's for after a call failed, not per frame.
+pub fn unavailable(source: &str) -> Option<Unavailable> {
+    if !allowed() {
+        return Some(Unavailable::PluginsOff);
+    }
+
+    if let Some(running) = running(source) {
+        return match running.host.status() {
+            Status::Stopped(_) => Some(Unavailable::Stopped),
+            _ => None,
+        };
+    }
+
+    let id = record_id(source)?;
+    let folders = loaded();
+    let Some(folder) = folders.iter().find(|folder| folder.id == id) else {
+        return Some(Unavailable::Missing);
+    };
+    if !folder.runs() {
+        return Some(Unavailable::Failed);
+    }
+
+    let record = Settings::load()
+        .accounts
+        .plugins
+        .into_iter()
+        .find(|record| record.id == id);
+    let approved_before = record.as_ref().is_some_and(|r| !r.hash.is_empty());
+    if approved_before && !settings::plugin_approved(id, &folder.hash) {
+        return Some(Unavailable::Changed);
+    }
+
+    Some(Unavailable::SwitchedOff)
+}
+
+/// Whether the plugin has a host right now: switched on, approved, loaded.
+pub fn is_running(id: &str) -> bool {
+    running(&source_of(id)).is_some()
 }
 
 /// `(source id, label)` for every plugin that's loaded and not stopped.

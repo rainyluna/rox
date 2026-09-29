@@ -808,6 +808,12 @@ pub struct Projection {
     browsable: Vec<bool>,
     /// By source symbol, see [`Projection::hide_sources`]. Past the end is visible.
     hidden: Vec<bool>,
+    /// By row: a plugin track that was only played, never added (ADR 29).
+    /// Empty when there's none. See [`Projection::hide_rows`].
+    held_out: Vec<bool>,
+    /// Rows the user added to the library one at a time, for Remove from
+    /// Library.
+    saved: HashSet<u32>,
     /// Value to symbol per table, built on first patch. Without it an append
     /// scans every string to ask whether it knows an artist.
     sym_index: Option<Box<SymIndex>>,
@@ -1527,6 +1533,35 @@ impl Projection {
         }
     }
 
+    /// Keep rows out of browse and general search while they still resolve
+    /// for the queue, history and playlists: a plugin track that was played
+    /// but never added. Run after [`Projection::hide_sources`], which rebuilds
+    /// the browse mask, and before the canonical order is taken.
+    pub fn hide_rows(&mut self, rows: impl IntoIterator<Item = u32>) {
+        self.held_out = Vec::new();
+        for row in rows {
+            let i = row as usize;
+            if i >= self.browsable.len() {
+                continue;
+            }
+
+            if self.held_out.is_empty() {
+                self.held_out = vec![false; self.browsable.len()];
+            }
+            self.held_out[i] = true;
+            self.browsable[i] = false;
+        }
+    }
+
+    pub fn mark_saved(&mut self, rows: impl IntoIterator<Item = u32>) {
+        self.saved = rows.into_iter().collect();
+    }
+
+    /// Added to the library on its own, so Remove from Library applies.
+    pub fn is_saved(&self, row: u32) -> bool {
+        self.saved.contains(&row)
+    }
+
     /// What `source:` suggests and the source filter lists.
     pub fn browse_sources(&self) -> impl Iterator<Item = &str> {
         self.sources
@@ -1543,7 +1578,7 @@ impl Projection {
 
     /// Alive and not under a hidden source: general search's reach.
     fn is_listed(&self, row: u32) -> bool {
-        if self.is_dead(row) {
+        if self.is_dead(row) || self.held_out.get(row as usize).copied().unwrap_or(false) {
             return false;
         }
 
@@ -1872,6 +1907,8 @@ impl Projection {
             dead_rows: 0,
             browsable,
             hidden: Vec::new(),
+            held_out: Vec::new(),
+            saved: HashSet::new(),
             sym_index: None,
         }
     }
@@ -3162,6 +3199,8 @@ impl Projection {
             + self.dead.capacity()
             + self.browsable.capacity()
             + self.hidden.capacity()
+            + self.held_out.capacity()
+            + self.saved.capacity() * std::mem::size_of::<u32>()
             + self.sym_index.as_ref().map_or(0, |i| i.heap_bytes())
     }
 }
@@ -3803,6 +3842,42 @@ mod tests {
         };
         assert!(track_matches(&parse_query("source:home"), &fields));
         assert!(!track_matches(&parse_query("source:local"), &fields));
+    }
+
+    #[test]
+    fn a_held_out_row_leaves_browse_and_search_but_still_resolves() {
+        let (_db, mut conn) = sorted_library(
+            "held-out",
+            &[track("/m/one.flac", "So What", "Miles Davis", 1959)],
+        );
+        let picked = track("yt-1", "So What", "Miles Davis", 1959);
+        let saved = track("yt-2", "So What", "Miles Davis", 1959);
+        store::upsert_source_rows(&mut conn, "plugin:yt", &[picked, saved]).unwrap();
+
+        let mut p = Projection::load_serial(&conn, false).unwrap();
+        p.hide_sources(|_| false);
+        let row_of = |p: &Projection, path: &str| {
+            let id: i64 = conn
+                .query_row("SELECT id FROM tracks WHERE path = ?1", [path], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            p.db_id.iter().position(|&db| db == id).expect("loaded") as u32
+        };
+        let (held, kept) = (row_of(&p, "yt-1"), row_of(&p, "yt-2"));
+        p.hide_rows([held]);
+        p.mark_saved([kept]);
+
+        assert!(!p.is_browsable(held));
+        assert!(p.is_browsable(kept));
+        assert_eq!(p.resolve(held).title, "So What");
+        assert!(p.is_saved(kept) && !p.is_saved(held));
+
+        let order = p.sort_canonical();
+        assert!(!order.contains(&held) && order.contains(&kept));
+        assert!(!p.search("so what").contains(&held));
+        assert!(!p.search_all("so what").contains(&held));
+        assert!(p.search_all("so what").contains(&kept));
     }
 
     #[test]

@@ -1046,6 +1046,10 @@ pub struct PanelChrome {
     /// A WGSL shader over the panel's surface, run after its body paints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shader: Option<PanelShader>,
+    /// `plugin:<id>` for a panel added from a plugin's Add Panel entry,
+    /// which is how a saved workspace knows the plugins it needs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
 }
 
 impl PanelChrome {

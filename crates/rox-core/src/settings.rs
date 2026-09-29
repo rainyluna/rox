@@ -472,8 +472,8 @@ pub struct Settings {
     /// Whether anything of rox talks to AI tooling (ADR 22). Acoustic
     /// analysis never reads this.
     pub ai_enabled: bool,
-    /// Reveals the Plugins page. Each plugin still has its own switch
-    /// (ADR 30).
+    /// Lets plugins run, from the head of the Plugins page. Each plugin
+    /// still has its own switch (ADR 30).
     pub plugins_enabled: bool,
     /// Whether MCP answers tool calls. The rox-mcp proxy checks it on every
     /// call, so a flip applies to the next tool use.
@@ -1501,7 +1501,7 @@ pub fn plugin_approved(id: &str, hash: &str) -> bool {
 }
 
 /// Only a direct user action calls this: switching the plugin on is the
-/// approving act.
+/// approving act, and turning on its Developer mode approves its later saves.
 pub fn approve_plugin(id: &str, hash: &str) {
     APPROVED_PLUGINS
         .write()
@@ -2521,6 +2521,14 @@ pub struct WorkspaceBundle {
     pub backdrop_shader: Option<PostShaderConfig>,
     /// The appearance knobs.
     pub appearance: AppearanceBundle,
+    /// The ids of the plugins whose panels the layouts and panel presets
+    /// hold, worked out on save. Applying names the ones not running; the
+    /// panels still restore without them.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "lenient::vec"
+    )]
+    pub requires: Vec<String>,
 }
 
 impl Default for WorkspaceBundle {
@@ -2540,7 +2548,32 @@ impl Default for WorkspaceBundle {
             post_shader: None,
             backdrop_shader: None,
             appearance: AppearanceBundle::default(),
+            requires: Vec::new(),
         }
+    }
+}
+
+/// What a panel's `owner` starts with when a plugin's Add Panel entry made it.
+const PLUGIN_OWNER: &str = "plugin:";
+
+/// Every plugin id named by an `owner` anywhere in a dump.
+fn collect_owners(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(id) = map
+                .get("owner")
+                .and_then(|owner| owner.as_str())
+                .and_then(|owner| owner.strip_prefix(PLUGIN_OWNER))
+                .filter(|id| !id.is_empty())
+            {
+                out.insert(id.to_string());
+            }
+            map.values().for_each(|v| collect_owners(v, out));
+        }
+
+        serde_json::Value::Array(items) => items.iter().for_each(|v| collect_owners(v, out)),
+
+        _ => {}
     }
 }
 
@@ -2972,8 +3005,22 @@ impl WorkspaceBundle {
         }
         bundle.inline_post_shader();
         bundle.scrub_paths();
+        bundle.requires = bundle.required_plugins();
         bundle.meta.stamp(&utc_today());
         bundle
+    }
+
+    /// The plugin ids the layouts and panel presets hold panels of.
+    pub fn required_plugins(&self) -> Vec<String> {
+        let mut ids = BTreeSet::new();
+        for layout in &self.layouts {
+            collect_owners(&layout.dump, &mut ids);
+        }
+        for preset in &self.panel_presets {
+            collect_owners(&preset.panel, &mut ids);
+        }
+
+        ids.into_iter().collect()
     }
 
     /// Pull path-only shaders' files inline so they travel. Best effort: an
@@ -4116,6 +4163,46 @@ mod tests {
         alone.carry_forward(&WorkspaceMeta::default());
         assert_eq!(alone.created, "2026-08-07");
         assert!(alone.author.is_empty());
+    }
+
+    #[test]
+    fn from_settings_lists_the_plugins_its_panels_came_from() {
+        let panel = |owner: &str| {
+            serde_json::json!({
+                "panel_name": "source browser",
+                "children": [],
+                "info": { "panel": { "source": "plugin:x", "owner": owner } },
+            })
+        };
+        let mut settings = Settings::default();
+        settings.look.bundle.layouts.push(NamedLayout {
+            name: "Main".into(),
+            dump: serde_json::json!({
+                "center": { "panel_name": "stack", "children": [
+                    panel("plugin:youtube"),
+                    panel("plugin:tones"),
+                    panel("plugin:youtube"),
+                    panel(""),
+                    panel("local"),
+                ], "info": { "stack": { "sizes": [], "axis": 0 } } },
+            }),
+            size: None,
+        });
+        settings.look.bundle.panel_presets.push(PanelPreset {
+            name: "Radio".into(),
+            panel: panel("plugin:radio"),
+        });
+
+        let bundle = WorkspaceBundle::from_settings("mine".into(), &settings);
+        assert_eq!(bundle.requires, vec!["radio", "tones", "youtube"]);
+
+        let empty = WorkspaceBundle::from_settings("bare".into(), &Settings::default());
+        assert!(empty.requires.is_empty());
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(
+            json.get("requires").is_none(),
+            "an empty list stays off the file"
+        );
     }
 
     #[test]

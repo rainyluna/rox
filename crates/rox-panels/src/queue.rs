@@ -198,7 +198,9 @@ fn origin_glyph(origin: Origin) -> Option<&'static str> {
 
         // The closest the icon set has to a server, the settings sidebar's
         // library glyph.
-        Origin::Subsonic | Origin::Plugin => Some(icons::DATABASE),
+        Origin::Subsonic => Some(icons::DATABASE),
+
+        Origin::Plugin => Some(icons::PLUG),
     }
 }
 

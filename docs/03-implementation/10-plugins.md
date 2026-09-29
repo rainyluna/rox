@@ -21,9 +21,9 @@ The README in the Linux and Windows release archives gives a user these same ste
 the Plugins page links to [README_PLUGINS.md](../../README_PLUGINS.md), the author-facing
 guide drawn from this document.
 
-1. Plugins are behind two switches. Settings > Development > Experimental Panels reveals
-   the Plugins section on Settings > Application, and Enable Plugins there reveals the
-   Plugins page (`rox/src/settings/window/application_page.rs:115-130`).
+1. Plugins are behind one switch, Enable Plugins at the top of Settings > Plugins
+   (`set_plugins_enabled`, `rox/src/settings/window/plugins_page.rs`). The rest of the
+   page lists only while it's on.
 2. Reveal Folder on the Plugins page creates the plugins folder and opens it. rox never
    creates it on its own.
 3. Drop the plugin's folder in. The folder's name has to be the plugin's id. The page
@@ -31,11 +31,14 @@ guide drawn from this document.
 4. Switch it on. The first time, a card says what the plugin is and asks to confirm.
    Confirming approves exactly the files in that folder.
 5. If any file in the folder changes, the plugin switches itself off until it's switched
-   on again, and the card shows what changed.
-6. A plugin source's tracks are browsed and searched in the External Sources panel (in
-   the Experimental group of Add Panel). Keep in the library on a collection syncs it
-   into the library; playing, queueing or adding a track to a playlist adds just that
-   track.
+   on again, and the card shows what changed. Developer mode approves the change instead
+   when the manifest declares nothing new.
+6. A plugin source's tracks are browsed and searched in the External Sources panel:
+   Add Panel > Plugins > the plugin opens one on its source, and the bare panel is in
+   the Catalogue group while plugins can run (`live` in `rox/src/panel_catalog.rs`).
+   Keep in the library on a collection syncs it into the library, and Add to Library
+   adds a single track. Playing, queueing or adding a track to a playlist plays it
+   without adding it.
 7. Remove on the Plugins page drops the plugin's tracks, synced collections, settings
    and approval. Its folder is left alone.
 
@@ -127,6 +130,7 @@ The host sets `PYTHONDONTWRITEBYTECODE=1` for every plugin
 | `entry` | Exactly one of `script` or `native`. |
 | `meta` | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
 | `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. |
+| `capabilities.panels` | Extra presets of core panel kinds, listed under the plugin in Add Panel. See [Panels](#panels). |
 | `programs` | Programs the plugin runs, by name. The page reports each as found on PATH or missing. rox enforces nothing with it. |
 | `config_schema` | JSON Schema for the plugin's settings. |
 
@@ -170,8 +174,12 @@ What refuses a manifest, with the reason the page shows:
 - No native build for this platform ("no build for macos-x86_64"), an interpreter not on
   PATH ("interpreter python3 not found"), an entry path that leaves the folder, or an
   entry file that's missing (`entry_with`, `manifest.rs:171-197`).
+- A declared panel with no name or a repeated one, no `panel_name`, any children, `info`
+  that isn't `{ "panel": { ... } }`, or a `source browser` naming any source but
+  `plugin:<id>` (`check_panels`, `manifest.rs`).
 - A plugin with no `capabilities.source` loads but gets no host, since source is the only
-  capability that runs anything today (`apply`, `rox-services/src/plugins.rs:240-245`).
+  capability that runs anything today (`apply`, `rox-services/src/plugins.rs`). It
+  doesn't list under Plugins either, since that lists the running hosts.
 
 ## The wire
 
@@ -196,13 +204,15 @@ is logged and dropped (`parse_line`, `wire.rs:92-117`).
 ### `hello`
 
 ```json
-> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64"}}
+> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64","features":["notice"]}}
 < {"jsonrpc":"2.0","id":1,"result":{"name":"Tones","version":"0.1.0","api":1}}
 ```
 
 `config` is the plugin's settings as the Plugins page stored them, `{}` or `null` when
 there are none. The answer's `api` has to be in `SUPPORTED_API`, or rox hangs up
-(`start`, `rox-plugins/src/host.rs:382-405`).
+(`start`, `rox-plugins/src/host.rs:382-405`). `features` is `wire::FEATURES`, the
+optional parts of API 1 this host reads. A plugin uses one only when it's listed, since
+an older host refuses a result that carries it.
 
 ### `source.browse`
 
@@ -458,9 +468,20 @@ which no node id can be (`members.rs:22`).
   the synced tracks, then prunes rows nothing holds any more (`members.rs:130-153`).
   Letting it go is `drop_collection`, which prunes the same way.
 - Playing, queueing or adding a browsed track to a playlist `pick`s it: the row is
-  upserted and held in `PICKED`, and nothing is pruned (`members.rs:99-126`).
-- Remove on the Plugins page is `remove_source`: every row and membership of the source
-  goes (`members.rs:197-208`).
+  upserted and held in `PICKED`, and nothing is pruned (`pick`). A row held by nothing
+  but `PICKED` stays out of the library (ADR 29, amended 2026-09-29):
+  `picked_only_ids` feeds `Projection::hide_rows` in `load_projection`
+  (`rox-services/src/catalog.rs`), which takes it out of browse and general search
+  while the queue, history and playlists still resolve it.
+- Add to Library is `save`, which records the track in `source_saved`, a table of its
+  own since a node id can be any non-empty string. A saved row counts as held.
+  Remove from Library is `unsave`, which prunes the row if nothing else holds it. The
+  browser offers Remove only for rows `Library::is_saved` says were added on their own.
+- At launch, `expire_picks` deletes picked-only rows neither picked nor played in 30
+  days (`PICK_KEEP_SECS`), keeping the saved queue's rows and the last track, which
+  restore by row id (`rox-services/src/plugins.rs`).
+- Remove on the Plugins page is `remove_source`: every row, membership and saved entry
+  of the source goes.
 
 Each of these writes the rows, the membership, the prune and the relinks in one
 transaction. Playlist members and listens snapshot their source beside their path, so a
@@ -475,6 +496,15 @@ Kept collections sync once when the plugin starts, and on Sync Now on the Plugin
 External Sources panel from the library, with no plugin call, so it still browses with
 the plugin stopped or the network down.
 
+A browse or search waits for the first `apply` before it looks up its host
+(`listing`, `rox-services/src/plugins.rs`), since a panel restored at launch lists
+before the hosts exist. When a listing fails, the panel asks `plugins::unavailable` why
+and, when rox knows, shows that in its own words with an Open Plugins button instead of
+the error (`unavailable_banner`, `rox-panels/src/source_browser.rs`). It asks again once
+`plugins::answers` says the source is back, checked on each draw and each library
+reload. A page's `notice` shows as a banner over the list, Info or, for `setup`, Warn
+with the same button (`notice_banner`).
+
 A plugin's rows show only while it's switched on and its folder is loaded
 (`live_ids`, `rox-services/src/sources.rs:228-232`). A switched-off plugin's rows are
 hidden, not deleted. A Missing plugin, whose folder is gone, keeps its switch and its
@@ -485,6 +515,55 @@ A plugin row scrobbles only when the loaded manifest declares `scrobble: true` a
 user leaves Scrobble Plays on (`may_scrobble`, `rox-services/src/lastfm.rs:150-171`).
 A plugin that isn't loaded never scrobbles, whatever its record says. Capture never
 applies: a plugin stream doesn't pass through the HTTP source or its ICY wrapper.
+
+## Panels
+
+Contract capability `panels` (WT-P9). Every running plugin is listed under Add Panel >
+Plugins with an External Sources panel on its own source (`browser_preset`,
+`rox/src/panel_catalog.rs`), whatever its manifest says. `capabilities.panels` adds
+more: each entry is a name and a `preset`, a dock `PanelState` with `PanelInfo::Panel`,
+the same dump a saved panel preset holds (`DeclaredPanel`, `rox-plugins/src/manifest.rs`).
+Nothing executes. The manifest check holds the shape; whether the kind exists is the
+app's call, since only the app has the catalog. `plugin_preset_for` skips a kind this
+build lacks rather than refusing the plugin, so a plugin written for a later rox still
+runs.
+
+`running_plugins` (`rox-services/src/plugins.rs`) reads the host table, so a plugin
+lists only while it's switched on and approved, and none list with plugins off.
+`plugin_sections` builds each plugin's entries, External Sources first, keyed by the
+declared name or, for External Sources, the blank name no declared panel can have
+(`BROWSER_ENTRY`). A declared `source browser` takes the External Sources slot instead
+of listing a second time, and any after the first are dropped (`plugin_entries`). Each
+is a `PanelPreset` with `owner` set to `plugin:<id>`. They're
+built at open time and kept out of `CATALOG`, since their labels are the plugin's own
+text rather than message keys.
+
+A plugin with nothing declared is one entry; one with declared panels branches.
+
+| Picker | Shape | Code |
+| --- | --- | --- |
+| Add Panel, a composite's slot picker | Plugins > plugin, or Plugins > plugin > entry | `panel_presets::plugins_submenu` |
+| Panels menu, in the menubar and the menu panel | Plugins > plugin, a branching plugin's entries each trailing its name | `MenuEntry::PluginsSubmenu` |
+| New Window from Panel, same two | a Plugins group after the catalog's, same rows | `plugins_group`, `workspace/menubar.rs` |
+| The macOS menu bar | Plugins > plugin, or Plugins > plugin > entry | `plugin_items`, `workspace/native_menu.rs` |
+| An empty window's panel list | a Plugins section of single-entry plugins, and a section per branching one | `workspace.rs` |
+
+The hand-built flyouts go two levels deep and number their rows for the keyboard, so
+there a branching plugin's entries sit in the one run instead of nesting a third level
+(`plugin_panels`). A pick resolves the entry again by plugin and key (`plugin_preset`),
+so a plugin stopped since the menu opened picks as a no-op. The macOS bar is a snapshot,
+so `plugins::after_apply` rebuilds it after every apply.
+
+`owner` lives on `PanelChrome`, flattened into every config, so it survives a dump and a
+restore. `WorkspaceBundle::from_settings` fills `requires` with the plugin ids found in
+`owner` fields across the layouts and panel presets (`required_plugins`,
+`rox-core/src/settings.rs`), and the apply card names the ones not running
+(`requires_line`, `rox/src/workspaces.rs`). A plugin panel is a core kind, so it restores
+without its plugin; only a kind the binary doesn't have comes back as the dock's
+`InvalidPanel` stand-in (`PanelRegistry::build_panel`, `rox-dock/src/panel.rs`).
+
+Declarative panels with plugin-defined readouts and verbs, and ADR 24 node trees, are out
+of scope here.
 
 ## Trust
 
@@ -512,6 +591,17 @@ the one approved last time (`changes`, `plugins.rs:553-601`): capabilities added
 dropped, programs added, the scrobble declaration turned on or off, and a changed entry.
 When the manifest is the same, the card says other files changed.
 
+Developer mode is a per-plugin toggle for its author, an icon button beside a
+switched-on plugin's switch (`plugin_row`, `rox/src/settings/window/plugins_page.rs`). It's
+an in-memory set in `rox-services/src/plugins.rs` (`DEVELOPING`), never saved, so it
+ends when rox quits, and switching the plugin off or removing it clears it. Before
+`apply` looks for changed folders, `redevelop` approves each switched-on plugin in the
+set whose folder loads and whose manifest diff against the last approval is empty. The
+host then restarts on the new hash like any re-approval. A diff that isn't empty falls
+through to the usual switch-off and card. A developing plugin whose folder stops loading
+keeps its switch rather than being switched off, since it can't run either way.
+Turning the toggle on is the direct user action that approves the saves that follow.
+
 A first approval of a manifest that declares scrobbling turns Scrobble Plays on, since
 the card just said so. A user who turned it off keeps it off across re-approvals that
 don't change the declaration.
@@ -533,7 +623,9 @@ The Plugins page's copy, in English, for finding each string in the other locale
 | Card, re-approval | Changed since you last switched it on: / The manifest is the same as last time. Other files in the folder changed. |
 | Card, changes | New capability: { $name } / Dropped capability: { $name } / New program: { $program } / Now asks to scrobble / No longer asks to scrobble / Starts a different way |
 | Card button | Switch On |
+| Page switch | Enable Plugins: Let the plugins in the plugins folder run. Each one still has its own switch below, and runs as a program on this computer with your permissions |
 | Under a switched-on plugin | Scrobble Plays, Synced Collections, Sync Now, The last sync failed |
+| Developer mode tooltip | Developer mode: until rox quits, a change to this plugin's folder is approved on its own and restarts it. A change to what its manifest declares still switches it off |
 | Nothing kept | Nothing synced yet. Switch sync on for a collection in the plugin's source browser |
 | Remove title | Remove "{ $name }"? |
 | Remove body | Its tracks, synced collections and settings go. Its folder stays in the plugins folder, so delete it there to stop it showing here. |
@@ -614,5 +706,6 @@ approvals are `PluginRecord`, `SyncedCollection` and `approved_plugins` in
 `crates/rox-playback/src/plugin.rs` (`Opener`, `PluginSource`, recovery, live streams)
 and `download.rs` (whole-track download). The UI is
 `crates/rox/src/settings/window/plugins_page.rs` (the Plugins page and the enable card),
-`application_page.rs` (Enable Plugins) and `crates/rox-panels/src/source_browser.rs`
-(the External Sources panel).
+`application_page.rs` (Enable Plugins), `crates/rox-panels/src/source_browser.rs`
+(the External Sources panel), `crates/rox/src/panel_catalog.rs` (`plugin_sections`) and
+`panel_presets.rs` (`plugins_submenu`).

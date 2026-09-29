@@ -182,12 +182,44 @@ pub struct Page {
     pub entries: Vec<Entry>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub notice: Option<Notice>,
+}
+
+/// The optional parts of API 1 this host reads, sent in `hello`. A host
+/// from before one refuses a result that uses it, so a plugin checks here.
+pub const FEATURES: &[&str] = &["notice"];
+
+/// A line the plugin wants shown over a page, like a setting it needs
+/// before it can list anything.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Notice {
+    pub text: String,
+    #[serde(default)]
+    pub kind: NoticeKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoticeKind {
+    /// Something worth knowing about the page.
+    #[default]
+    Info,
+    /// The plugin needs a setting from the user, so rox offers its settings.
+    Setup,
 }
 
 impl Checked for Page {
     fn check(&self) -> Result<(), String> {
         list("entries", &self.entries)?;
         cursor(&self.cursor)?;
+        if let Some(notice) = &self.notice {
+            if notice.text.trim().is_empty() {
+                return Err("a notice has no text".into());
+            }
+            string("notice", &notice.text)?;
+        }
 
         self.entries.iter().try_for_each(|entry| match entry {
             Entry::Node(node) => node.check(),
@@ -493,6 +525,28 @@ mod tests {
         assert!(
             matches!(&page.entries[1], Entry::Track(t) if t.key == "k1" && t.artist.is_empty())
         );
+    }
+
+    #[test]
+    fn a_page_carries_a_notice() {
+        let page: Page = decode(json!({
+            "entries": [],
+            "notice": {"text": "Set a cookies file", "kind": "setup"}
+        }))
+        .unwrap();
+        let notice = page.notice.expect("the notice parses");
+        assert_eq!(notice.kind, NoticeKind::Setup);
+
+        let plain: Page = decode(json!({"entries": [], "notice": {"text": "hi"}})).unwrap();
+        assert_eq!(plain.notice.map(|n| n.kind), Some(NoticeKind::Info));
+
+        for bad in [
+            json!({"entries": [], "notice": {"text": " "}}),
+            json!({"entries": [], "notice": {"text": "x", "kind": "urgent"}}),
+            json!({"entries": [], "notice": {"text": "x", "link": "y"}}),
+        ] {
+            assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -10,11 +10,6 @@ impl SettingsWindow {
         // The macOS bar is built once and held by the system, so it needs a
         // rebuild.
         crate::workspace::native_menu::rebuild(cx);
-        // Plugins run only with experimental features on.
-        rox_services::plugins::apply(cx);
-        if self.page == Page::Plugins && !self.plugins_visible() {
-            self.page = Page::Development;
-        }
         cx.notify();
     }
 

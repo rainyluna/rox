@@ -52,14 +52,14 @@ fn entry_items(entry: &'static MenuEntry, playing: bool) -> Vec<gpui::MenuItem> 
         MenuEntry::Section(_) => vec![gpui::MenuItem::separator()],
         MenuEntry::Panels(section) if !crate::workspace::section_shows(section) => Vec::new(),
         MenuEntry::Panels(section) => match section.group {
-            None => section
+            None => catalog::live(section)
                 .panels
                 .iter()
                 .filter_map(|def| action_item(panel_menu_item(def), playing))
                 .collect(),
             Some((label, _)) => vec![gpui::MenuItem::submenu(gpui::Menu {
                 name: rox_i18n::t!(label),
-                items: section
+                items: catalog::live(section)
                     .panels
                     .iter()
                     .filter_map(|def| action_item(panel_menu_item(def), playing))
@@ -94,6 +94,13 @@ fn entry_items(entry: &'static MenuEntry, playing: bool) -> Vec<gpui::MenuItem> 
             vec![gpui::MenuItem::submenu(gpui::Menu {
                 name: rox_i18n::t!(*label),
                 items: panel_window_items(),
+            })]
+        }
+        MenuEntry::PluginsSubmenu { .. } if !plugins_show() => Vec::new(),
+        MenuEntry::PluginsSubmenu { label, target, .. } => {
+            vec![gpui::MenuItem::submenu(gpui::Menu {
+                name: rox_i18n::t!(*label),
+                items: plugin_items(*target),
             })]
         }
     }
@@ -252,6 +259,39 @@ fn workspace_items(target: WorkspaceTarget, with_new: bool) -> Vec<gpui::MenuIte
     items
 }
 
+/// A row per running plugin, or a submenu for one that declares panels,
+/// keyed `<plugin>/<entry>` for [`run_menu_command`].
+#[cfg(target_os = "macos")]
+fn plugin_items(target: PanelTarget) -> Vec<gpui::MenuItem> {
+    let kind = match target {
+        PanelTarget::Open => "plugin-panel",
+        PanelTarget::NewWindow => "plugin-panel-window",
+    };
+    catalog::plugin_sections()
+        .into_iter()
+        .map(|section| {
+            let plugin = section.plugin.clone();
+            let command = |preset: &rox_core::settings::PanelPreset| MenuCommand {
+                command: format!("{kind}:{plugin}/{}", preset.name),
+            };
+
+            if section.single() {
+                return gpui::MenuItem::action(section.label.clone(), command(&section.presets[0]));
+            }
+            gpui::MenuItem::submenu(gpui::Menu {
+                name: section.label.clone(),
+                items: section
+                    .presets
+                    .iter()
+                    .map(|preset| {
+                        gpui::MenuItem::action(catalog::entry_label(preset), command(preset))
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn preset_items(target: PanelTarget) -> Vec<gpui::MenuItem> {
     let kind = match target {
@@ -305,6 +345,12 @@ fn panel_window_items() -> Vec<gpui::MenuItem> {
                 items: rows,
             })),
         }
+    }
+    if plugins_show() {
+        items.push(gpui::MenuItem::submenu(gpui::Menu {
+            name: rox_i18n::t!(catalog::PLUGINS_LABEL),
+            items: plugin_items(PanelTarget::NewWindow),
+        }));
     }
     items
 }

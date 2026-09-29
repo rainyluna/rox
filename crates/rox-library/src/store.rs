@@ -335,6 +335,14 @@ const MIGRATIONS: &[crate::migrate::Migration] = &[
         up: crate::listens::add_source_snapshot,
         rescan: false,
     },
+    // Single plugin tracks the user added to the library (ADR 29, amended
+    // 2026-09-29): a pick alone no longer shows there. No mtime reset:
+    // nothing here is read from a tag.
+    crate::migrate::Migration {
+        name: "plugin-saved",
+        up: crate::members::add_saved,
+        rescan: false,
+    },
 ];
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {

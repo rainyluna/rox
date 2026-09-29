@@ -832,8 +832,6 @@ settings-application-download-updates = Завантажувати оновле�
     .description = Коли перевірка знаходить новіший випуск, завантажити й підготувати його у фоні; наступний запуск його застосує
 settings-application-enable-ai = Увімкнути функції ШІ
     .description = Дозволити інструментам ШІ говорити з rox: додає підтримку MCP і завантаження моделей ML, а їхні сторінки з'являються на бічній панелі.
-settings-application-enable-plugins = Увімкнути плагіни
-    .description = Показує сторінку «Плагіни», де кожен плагін із теки плагінів має власний перемикач. Плагін працює як програма на цьому комп'ютері з вашими правами
 settings-application-lock-panel-resize = Заблокувати зміну розміру панелей
     .description = Розділювачі панелей рухаються лише в Режимі дизайну, тож перетягування біля шва не зрушить готову розкладку
 settings-application-menu-entry = Пункт у меню програм
@@ -846,7 +844,6 @@ settings-application-portable-restart-note = Застосується при н�
 settings-application-remain-in-tray = Лишатися в лотку
     .description = Не спиняти музику, коли закрито останнє вікно; значок у лотку (док на macOS) - шлях назад
 settings-application-section-ai = ШІ
-settings-application-section-plugins = Плагіни
 settings-application-section-control-socket = Керувальний сокет
 settings-application-section-data = Дані
 settings-application-section-desktop = Робочий стіл
@@ -1207,6 +1204,8 @@ settings-playback-unrated-dots = Крапки замість порожніх з
     .description = Позначати незаповнені місця під зірки блідою крапкою, а не лишати їх порожніми
 
 ## Settings: plugins
+settings-plugins-enable = Увімкнути плагіни
+    .description = Дозволяє запуск плагінів із теки плагінів. Кожен і далі має власний перемикач нижче й працює як програма на цьому комп'ютері з вашими правами
 settings-plugins-intro = Кожна тека в теці плагінів це один плагін. Нічого з неї не запускається, доки ви його не ввімкнете, а плагін, що змінився на диску, вимикається, доки ви не ввімкнете його знову
 settings-plugins-reveal = Показати теку
 settings-plugins-guide = Посібник із плагінів
@@ -1220,6 +1219,7 @@ settings-plugins-failed-title = Цей плагін не може працюва
 settings-plugins-sync-failed = Остання синхронізація не вдалася
 settings-plugins-scrobble = Скробблити прослуховування
     .description = Надсилати те, що грає цей плагін, у ваші скробблери. Пропонується, бо плагін про це просить
+settings-plugins-developer = Режим розробника: доки rox не закрито, зміна в теці цього плагіна схвалюється сама й перезапускає його. Зміна того, що оголошує його маніфест, і далі вимикає його
 settings-plugins-synced = Синхронізовані колекції
 settings-plugins-synced-none = Поки нічого не синхронізовано. Увімкніть синхронізацію колекції в оглядачі джерела плагіна
 settings-plugins-sync-now = Синхронізувати
@@ -1517,6 +1517,12 @@ workspace-apply-shader-count = { $count ->
     [few] Містить { $count } шейдери: { $names }
     [many] Містить { $count } шейдерів: { $names }
    *[other] Містить { $count } шейдера: { $names }
+}
+workspace-requires-missing = { $count ->
+    [one] Використовує { $count } плагін, який не запущено: { $plugins }
+    [few] Використовує { $count } плагіни, які не запущено: { $plugins }
+    [many] Використовує { $count } плагінів, які не запущено: { $plugins }
+   *[other] Використовує { $count } плагіна, які не запущено: { $plugins }
 }
 workspace-apply-shaders-approve-body = Підтвердження дозволяє їм працювати на цій машині. Застосування без них лишає вигляд голим, а шейдери - в його пулі.
 workspace-apply-shaders-plain-body = Застосування без них лишає вигляд голим, а шейдери - в його пулі.
@@ -2189,6 +2195,7 @@ panel-catalog-group-catalogue = Каталог
 panel-catalog-group-controls = Керування
 panel-catalog-group-details = Подробиці
 panel-catalog-group-experimental = Експериментальні
+panel-catalog-group-plugins = Плагіни
 panel-catalog-group-visualizers = Візуалізації
 panel-catalog-group-widgets = Віджети
 panel-catalog-history = Історія
@@ -4042,7 +4049,18 @@ source-browser-empty = Тут нічого немає
 source-browser-pick = Виберіть джерело
 source-browser-no-sources = Жодне джерело-плагін не запущене.
 source-browser-failed = { $source } не відповів
-source-browser-pick-failed = Не вдалося додати ці треки до медіатеки
+source-browser-plugins-off = Плагіни вимкнено
+source-browser-switched-off = { $source } вимкнено
+source-browser-changed = { $source } змінився на диску. Увімкніть його знову, щоб схвалити зміну
+source-browser-missing = { $source } більше немає в теці плагінів
+source-browser-cant-load = { $source } не завантажується. Причину вказано на сторінці «Плагіни»
+source-browser-stopped = { $source } зупинено після повторних збоїв. Вимкніть і знову ввімкніть його
+source-browser-open-plugins = Відкрити «Плагіни»
+source-browser-pick-failed = Не вдалося підготувати ці треки до відтворення
+source-browser-add-to-library = Додати до медіатеки
+source-browser-remove-from-library = Прибрати з медіатеки
+source-browser-save-failed = Не вдалося додати ці треки до медіатеки
+source-browser-unsave-failed = Не вдалося прибрати ці треки з медіатеки
 source-browser-sync-failed = Не вдалося синхронізувати { $title }
 source-browser-sync = Зберігати в медіатеці
 source-browser-members = { $count ->

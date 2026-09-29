@@ -140,6 +140,13 @@
         "chrome_side": "right",
         "resize_border": true
       }
+    },
+    "requires": {
+      "description": "The ids of the plugins whose panels the layouts and panel presets\nhold, worked out on save. Applying names the ones not running; the\npanels still restore without them.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   },
   "$defs": {

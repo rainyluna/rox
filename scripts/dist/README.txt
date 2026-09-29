@@ -287,8 +287,7 @@ doesn't ship plugins for any service.
 
 To add one:
 
-  1. Turn on Experimental Panels in Settings > Development, then Enable
-     Plugins in Settings > Application. That shows the Plugins page.
+  1. Turn on Enable Plugins at the top of Settings > Plugins.
   2. Press Reveal Folder on the Plugins page. It opens the plugins folder,
      creating it the first time. In portable mode that's rox-data/plugins
      beside the executable.
@@ -302,9 +301,10 @@ doesn't sandbox it. Switching it on approves exactly the files in its
 folder. If any of them change, it switches off until you switch it on
 again. The card then shows what changed.
 
-Browse and search a plugin's source in the External Sources panel (Add
-Panel > Experimental). Keep in the library on a collection syncs it into
-your library, and playing or queueing a track adds just that track.
+Browse and search a plugin's source by picking it under Add Panel >
+Plugins, which opens the External Sources panel on it. Keep in the
+library on a collection syncs it into your library. Playing or queueing
+a track plays it without adding it; Add to Library on a track keeps it.
 Remove on the Plugins page drops the plugin's tracks, synced collections
 and settings, and leaves its folder where it is.
 
