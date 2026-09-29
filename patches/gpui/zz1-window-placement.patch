@@ -1,0 +1,274 @@
+--- a/src/platform/linux/wayland/window.rs
++++ b/src/platform/linux/wayland/window.rs
+@@ -829,6 +829,12 @@
+         self.borrow().bounds
+     }
+ 
++    // rox patch: a Wayland client never learns its position; the origin in
++    // `bounds` is whatever the window was created with.
++    fn screen_origin(&self) -> Option<Point<Pixels>> {
++        None
++    }
++
+     fn is_maximized(&self) -> bool {
+         self.borrow().maximized
+     }
+--- a/src/platform/linux/x11/window.rs
++++ b/src/platform/linux/x11/window.rs
+@@ -68,6 +68,8 @@
+         _NET_WM_STATE_FULLSCREEN,
+         _NET_WM_STATE_HIDDEN,
+         _NET_WM_STATE_FOCUSED,
++        _NET_WM_STATE_ABOVE,
++        _NET_MOVERESIZE_WINDOW,
+         _NET_ACTIVE_WINDOW,
+         _NET_WM_SYNC_REQUEST,
+         _NET_WM_SYNC_REQUEST_COUNTER,
+@@ -756,8 +758,8 @@
+ }
+ 
+ enum WmHintPropertyState {
+-    // Remove = 0,
+-    // Add = 1,
++    Remove = 0,
++    Add = 1,
+     Toggle = 2,
+ }
+ 
+@@ -1226,6 +1228,72 @@
+         xcb_flush(&self.0.xcb);
+     }
+ 
++    // rox patch: ConfigureNotify reports the origin relative to the WM's
++    // frame once the window is reparented, so `bounds` can't be trusted for
++    // this. Ask the server where the window sits on the root instead.
++    fn screen_origin(&self) -> Option<Point<Pixels>> {
++        let reply = self.get_root_position(Point::default()).log_err()?;
++        let scale_factor = self.0.state.borrow().scale_factor;
++        Some(Point::new(
++            px(reply.dst_x as f32 / scale_factor),
++            px(reply.dst_y as f32 / scale_factor),
++        ))
++    }
++
++    // rox patch: _NET_MOVERESIZE_WINDOW with StaticGravity places the
++    // window itself at the point, where a plain ConfigureWindow would put
++    // the WM's frame there and drift the window by its titlebar on every
++    // round trip through `screen_origin`.
++    fn move_to(&mut self, origin: Point<Pixels>) {
++        const STATIC_GRAVITY: u32 = 10;
++        const HAS_X: u32 = 1 << 8;
++        const HAS_Y: u32 = 1 << 9;
++        const FROM_APPLICATION: u32 = 1 << 12;
++
++        let state = self.0.state.borrow();
++        let x = (origin.x.0 * state.scale_factor) as i32;
++        let y = (origin.y.0 * state.scale_factor) as i32;
++        let message = ClientMessageEvent::new(
++            32,
++            self.0.x_window,
++            state.atoms._NET_MOVERESIZE_WINDOW,
++            [
++                STATIC_GRAVITY | HAS_X | HAS_Y | FROM_APPLICATION,
++                x as u32,
++                y as u32,
++                0,
++                0,
++            ],
++        );
++        check_reply(
++            || "X11 SendEvent to move a window failed.",
++            self.0.xcb.send_event(
++                false,
++                state.x_root_window,
++                xproto::EventMask::SUBSTRUCTURE_REDIRECT | xproto::EventMask::SUBSTRUCTURE_NOTIFY,
++                message,
++            ),
++        )
++        .log_err();
++        xcb_flush(&self.0.xcb);
++    }
++
++    fn set_keep_above(&self, above: bool) {
++        let state = self.0.state.borrow();
++        let action = if above {
++            WmHintPropertyState::Add
++        } else {
++            WmHintPropertyState::Remove
++        };
++        self.set_wm_hints(
++            || "X11 SendEvent to keep a window above failed.",
++            action,
++            state.atoms._NET_WM_STATE_ABOVE,
++            xproto::AtomEnum::NONE.into(),
++        )
++        .log_err();
++    }
++
+     fn scale_factor(&self) -> f32 {
+         self.0.state.borrow().scale_factor
+     }
+--- a/src/platform/mac/window.rs
++++ b/src/platform/mac/window.rs
+@@ -69,6 +69,8 @@
+ #[allow(non_upper_case_globals)]
+ const NSNormalWindowLevel: NSInteger = 0;
+ #[allow(non_upper_case_globals)]
++const NSFloatingWindowLevel: NSInteger = 3;
++#[allow(non_upper_case_globals)]
+ const NSPopUpWindowLevel: NSInteger = 101;
+ #[allow(non_upper_case_globals)]
+ const NSTrackingMouseEnteredAndExited: NSUInteger = 0x01;
+@@ -1000,6 +1002,46 @@
+                 }
+             })
+             .detach();
++    }
++
++    // rox patch: the inverse of `bounds`, which reports the frame's top-left
++    // relative to the screen the window is on.
++    fn move_to(&mut self, origin: Point<Pixels>) {
++        let this = self.0.lock();
++        let window = this.native_window;
++        this.executor
++            .spawn(async move {
++                unsafe {
++                    let screen = NSWindow::screen(window);
++                    if screen == nil {
++                        return;
++                    }
++                    let screen_frame = NSScreen::frame(screen);
++                    let top_left = NSPoint::new(
++                        screen_frame.origin.x + origin.x.0 as f64,
++                        screen_frame.origin.y + screen_frame.size.height - origin.y.0 as f64,
++                    );
++                    NSWindow::setFrameTopLeftPoint_(window, top_left);
++                }
++            })
++            .detach();
++    }
++
++    fn set_keep_above(&self, above: bool) {
++        let this = self.0.lock();
++        let window = this.native_window;
++        let level = if above {
++            NSFloatingWindowLevel
++        } else {
++            NSNormalWindowLevel
++        };
++        this.executor
++            .spawn(async move {
++                unsafe {
++                    window.setLevel_(level);
++                }
++            })
++            .detach();
+     }
+ 
+     fn merge_all_windows(&self) {
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -577,6 +577,58 @@
+             .detach();
+     }
+ 
++    // rox patch: the origin is the client area's, the same point `bounds`
++    // reports, so the frame goes where the client ends up there.
++    fn move_to(&mut self, origin: Point<Pixels>) {
++        let hwnd = self.0.hwnd;
++        let bounds =
++            crate::bounds(origin, self.bounds().size).to_device_pixels(self.scale_factor());
++        let rect = calculate_window_rect(bounds, self.0.state.borrow().border_offset);
++
++        self.0
++            .executor
++            .spawn(async move {
++                unsafe {
++                    SetWindowPos(
++                        hwnd,
++                        None,
++                        rect.left,
++                        rect.top,
++                        0,
++                        0,
++                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
++                    )
++                    .context("unable to move window")
++                    .log_err();
++                }
++            })
++            .detach();
++    }
++
++    fn set_keep_above(&self, above: bool) {
++        let hwnd = self.0.hwnd;
++        let insert_after = if above { HWND_TOPMOST } else { HWND_NOTOPMOST };
++
++        self.0
++            .executor
++            .spawn(async move {
++                unsafe {
++                    SetWindowPos(
++                        hwnd,
++                        Some(insert_after),
++                        0,
++                        0,
++                        0,
++                        0,
++                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
++                    )
++                    .context("unable to change window topmost state")
++                    .log_err();
++                }
++            })
++            .detach();
++    }
++
+     fn scale_factor(&self) -> f32 {
+         self.0.state.borrow().scale_factor
+     }
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -486,6 +486,15 @@
+     fn window_bounds(&self) -> WindowBounds;
+     fn content_size(&self) -> Size<Pixels>;
+     fn resize(&mut self, size: Size<Pixels>);
++    // rox patch: placement for a window that remembers where it sat. The
++    // origin is in the same space `bounds()` reports and `move_to` takes, so
++    // a read and a write round-trip. None where the platform won't say
++    // (Wayland), and there the move and the pin are no-ops too.
++    fn screen_origin(&self) -> Option<Point<Pixels>> {
++        Some(self.bounds().origin)
++    }
++    fn move_to(&mut self, _origin: Point<Pixels>) {}
++    fn set_keep_above(&self, _above: bool) {}
+     fn scale_factor(&self) -> f32;
+     fn appearance(&self) -> WindowAppearance;
+     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -1710,6 +1710,24 @@
+         self.platform_window.resize(size);
+     }
+ 
++    /// rox patch: where the window sits, in the space [`Self::move_to`]
++    /// takes. None where the platform won't say, which is Wayland.
++    pub fn screen_origin(&self) -> Option<Point<Pixels>> {
++        self.platform_window.screen_origin()
++    }
++
++    /// rox patch: move the window, keeping its size. A no-op on Wayland,
++    /// where only the compositor places windows.
++    pub fn move_to(&mut self, origin: Point<Pixels>) {
++        self.platform_window.move_to(origin);
++    }
++
++    /// rox patch: keep the window above others, or let it stack normally
++    /// again. A no-op on Wayland, which has no protocol for it.
++    pub fn set_keep_above(&self, above: bool) {
++        self.platform_window.set_keep_above(above);
++    }
++
+     /// Returns whether or not the window is currently fullscreen
+     pub fn is_fullscreen(&self) -> bool {
+         self.platform_window.is_fullscreen()

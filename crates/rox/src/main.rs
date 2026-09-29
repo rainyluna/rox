@@ -118,7 +118,8 @@ fn open_workspace_window(
     open: Option<(rox_library::open_files::LaunchMode, Vec<std::path::PathBuf>)>,
     cx: &mut App,
 ) {
-    let mut window_bounds = match Settings::load().windows.main {
+    let saved = Settings::load().windows.main;
+    let mut window_bounds = match saved {
         Some(w) => {
             let bounds = Bounds {
                 origin: point(px(w.x), px(w.y)),
@@ -184,6 +185,9 @@ fn open_workspace_window(
             })
             .detach();
         let workspace = cx.new(|cx| Workspace::new(start, adopt, window, cx));
+        // X11 window managers tend to ignore the creation-time position, and
+        // Wayland has none, so the saved spot is applied again once it's up.
+        workspace.update(cx, |ws, cx| ws.restore_placement(saved, window, cx));
         // The player is path-based, so this works for files outside the library.
         if let Some((mode, paths)) = open {
             workspace.update(cx, |ws, cx| ws.open_paths(mode, paths, cx));
@@ -418,6 +422,8 @@ fn main() {
         // staging this sweep must not race.
         startup::updater::clean_leftovers();
         startup::updates::check_on_launch(cx);
+        // On KWin the placement script loads while the first window maps.
+        integrations::placement::start(cx);
         let open = (!launch_files.is_empty()).then_some((launch_mode, launch_files));
         open_workspace_window(workspace::WorkspaceStart::Restore, None, open, cx);
         // The macOS menu bar needs a workspace to act on. A no-op elsewhere.

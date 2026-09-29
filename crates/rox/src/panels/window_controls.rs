@@ -1,10 +1,12 @@
 //! The window controls panel: minimize, maximize and close for the OS window
 //! hosting it, for layouts with the OS decorations off. Icons or macOS traffic
-//! lights; a popped-out copy controls its own window.
+//! lights; a popped-out copy controls its own window. Optional mini toggle and
+//! pin lead the row.
 
 use gpui::{
     AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, MouseButton,
-    MouseDownEvent, Pixels, Stateful, Subscription, WeakEntity, Window, div, prelude::*, px, svg,
+    MouseDownEvent, Pixels, Rgba, SharedString, Stateful, Subscription, WeakEntity, Window, div,
+    prelude::*, px, svg,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_core::settings::ChromeStyle;
@@ -12,6 +14,7 @@ use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_panel_kit::{icon_controls, traffic_lights};
 use serde::{Deserialize, Serialize};
 
+use crate::integrations::placement;
 use crate::workspace::Workspace;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
@@ -28,7 +31,20 @@ pub struct WindowControlsConfig {
     #[serde(default)]
     pub mini: bool,
     #[serde(default)]
+    pub pin: PinButton,
+    #[serde(default)]
     pub align: Align,
+}
+
+/// When the pin button shows.
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PinButton {
+    #[default]
+    Hide,
+    Show,
+    /// Only while the window is on the mini layout.
+    Mini,
 }
 
 pub struct WindowControlsPanel {
@@ -103,35 +119,83 @@ impl WindowControlsPanel {
         } else {
             (icons::MINIMIZE, rox_i18n::t!("mini-tip-shrink"))
         };
-        Some(
-            panel::Tip::keyed("mini-toggle", tip).apply(
-                div()
-                    .size(px(24.))
-                    .rounded(tokens::RADIUS)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(palette::bg_control_hover()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            // Deferred: the toggle dumps the dock, which reads this
-                            // panel, and a read inside its own update panics.
-                            let ws = this.workspace.clone();
-                            window.defer(cx, move |window, cx| {
-                                let Some(ws) = ws.upgrade() else { return };
-                                ws.update(cx, |ws, cx| ws.toggle_mini(window, cx));
-                            });
-                        }),
-                    )
-                    .child(
-                        svg()
-                            .path(icon)
-                            .size(px(14.))
-                            .text_color(palette::text_muted()),
-                    ),
-            ),
+        Some(self.toggle_button(
+            "mini-toggle",
+            icon,
+            palette::text_muted(),
+            tip,
+            |ws, window, cx| ws.toggle_mini(window, cx),
+            cx,
+        ))
+    }
+
+    /// Only in the workspace's own window: a popped-out copy would pin the
+    /// wrong one.
+    fn pin_button(&self, window: &Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let ws = self.workspace.upgrade()?;
+        let shown = match self.config.pin {
+            PinButton::Hide => false,
+            PinButton::Show => true,
+            PinButton::Mini => ws.read(cx).on_mini(),
+        };
+        if !shown || !placement::available(cx) || !crate::workspace::is_workspace_window(window, cx)
+        {
+            return None;
+        }
+
+        let (color, tip) = if ws.read(cx).pinned(window, cx) {
+            (
+                palette::accent(),
+                rox_i18n::t!("window-controls-pin-tip-off"),
+            )
+        } else {
+            (
+                palette::text_muted(),
+                rox_i18n::t!("window-controls-pin-tip-on"),
+            )
+        };
+        Some(self.toggle_button(
+            "pin-toggle",
+            icons::PIN,
+            color,
+            tip,
+            |ws, window, cx| ws.toggle_pin(window, cx),
+            cx,
+        ))
+    }
+
+    fn toggle_button(
+        &self,
+        key: &'static str,
+        icon: &'static str,
+        color: Rgba,
+        tip: SharedString,
+        action: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        panel::Tip::keyed(key, tip).apply(
+            div()
+                .size(px(24.))
+                .rounded(tokens::RADIUS)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|d| d.bg(palette::bg_control_hover()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        // Deferred: the mini toggle dumps the dock, which
+                        // reads this panel, and a read inside its own update
+                        // panics.
+                        let ws = this.workspace.clone();
+                        window.defer(cx, move |window, cx| {
+                            let Some(ws) = ws.upgrade() else { return };
+                            ws.update(cx, |ws, cx| action(ws, window, cx));
+                        });
+                    }),
+                )
+                .child(svg().path(icon).size(px(14.)).text_color(color)),
         )
     }
 
@@ -157,6 +221,7 @@ impl WindowControlsPanel {
             .items_center()
             .map(|d| justify(d, self.config.align))
             .px(tokens::SPACE_MD)
+            .children(self.pin_button(window, cx))
             .children(self.mini_button(cx))
             .map(|d| match self.config.style {
                 ChromeStyle::Icons => d
@@ -231,6 +296,23 @@ impl PanelSettings for WindowControlsPanel {
                     self.config.mini,
                     |this: &mut Self, mini, cx| {
                         this.config.mini = mini;
+                        cx.notify();
+                    },
+                    cx,
+                ),
+            ))
+            .child(panel::setting_row(
+                rox_i18n::t!("window-controls-pin"),
+                Some(rox_i18n::t!("window-controls-pin.description")),
+                panel::choices_shared(
+                    &[
+                        (rox_i18n::t!("window-controls-pin-hide"), PinButton::Hide),
+                        (rox_i18n::t!("window-controls-pin-show"), PinButton::Show),
+                        (rox_i18n::t!("window-controls-pin-mini"), PinButton::Mini),
+                    ],
+                    self.config.pin,
+                    |this: &mut Self, pin, cx| {
+                        this.config.pin = pin;
                         cx.notify();
                     },
                     cx,

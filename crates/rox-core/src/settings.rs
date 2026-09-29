@@ -586,6 +586,12 @@ pub struct WindowsState {
     /// The modal and popped-out queue's view. Raw JSON so the file stays
     /// readable when the queue's config schema moves.
     pub queue_view: Option<serde_json::Value>,
+    /// Where the mini toggle left each named layout, keyed by layout name.
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "lenient::map"
+    )]
+    pub placements: BTreeMap<String, LayoutPlacement>,
 }
 
 /// `session.json`: the volatile playback state, kept off the preferences file
@@ -3167,6 +3173,25 @@ pub struct WindowState {
     pub width: f32,
     pub height: f32,
     pub maximized: bool,
+    /// Kept above other windows.
+    pub pinned: bool,
+}
+
+/// A window position in the platform's own screen coordinates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowOrigin {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Where a layout's window sat and whether it was pinned. The origin is
+/// None where the platform can't say where a window is.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutPlacement {
+    pub origin: Option<WindowOrigin>,
+    pub pinned: bool,
 }
 
 /// Seed the shared threshold from the Last.fm account's legacy copy, only
@@ -4587,14 +4612,30 @@ mod tests {
                 width: 800.0,
                 height: 600.0,
                 maximized: true,
+                pinned: true,
             }),
             queue_view: Some(serde_json::json!({ "columns": ["title"] })),
+            placements: BTreeMap::from([
+                (
+                    "Mini".to_string(),
+                    LayoutPlacement {
+                        origin: Some(WindowOrigin { x: 40.0, y: 50.0 }),
+                        pinned: true,
+                    },
+                ),
+                ("Full".to_string(), LayoutPlacement::default()),
+            ]),
             ..Default::default()
         };
         let back: WindowsState =
             serde_json::from_str(&serde_json::to_string(&windows).unwrap()).unwrap();
         assert_eq!(back.main.map(|w| w.width), Some(800.0));
+        assert_eq!(back.main.map(|w| w.pinned), Some(true));
         assert!(back.queue_view.is_some());
+        let mini = back.placements["Mini"];
+        assert_eq!(mini.origin, Some(WindowOrigin { x: 40.0, y: 50.0 }));
+        assert!(mini.pinned);
+        assert_eq!(back.placements["Full"].origin, None);
     }
 
     /// The settings file is the one people are pointed at, so it must carry no
@@ -4612,6 +4653,7 @@ mod tests {
             width: 800.0,
             height: 600.0,
             maximized: false,
+            pinned: false,
         });
         let json = serde_json::to_string(&src).unwrap();
         for key in [

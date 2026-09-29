@@ -56,12 +56,31 @@ pub fn front_workspace(cx: &mut App) -> Option<(AnyWindowHandle, AppState)> {
 /// Every title goes through [`set_window_title`] to keep it true.
 static WINDOW_TITLES: RwLock<BTreeMap<u64, String>> = RwLock::new(BTreeMap::new());
 
+/// Suffixes on the title the OS sees, never on the one rox reads back.
+static TITLE_TAGS: RwLock<BTreeMap<u64, String>> = RwLock::new(BTreeMap::new());
+
 /// Set and remember a window's title. On Wayland only a post-open set
 /// reaches the compositor; the creation-time title is ignored.
 pub fn set_window_title(window: &mut Window, title: &str) {
-    window.set_window_title(title);
     let id = window.window_handle().window_id().as_u64();
+    match TITLE_TAGS.read().unwrap().get(&id) {
+        Some(tag) => window.set_window_title(&format!("{title}{tag}")),
+        None => window.set_window_title(title),
+    }
     WINDOW_TITLES.write().unwrap().insert(id, title.to_string());
+}
+
+/// Mark the OS title until `None` clears it, across any title change in
+/// between. The compositor sees the mark; rox's own reads don't.
+pub fn set_title_tag(window: &mut Window, tag: Option<String>) {
+    let id = window.window_handle().window_id().as_u64();
+    match tag {
+        Some(tag) => TITLE_TAGS.write().unwrap().insert(id, tag),
+        None => TITLE_TAGS.write().unwrap().remove(&id),
+    };
+
+    let title = window_title(id).unwrap_or_default();
+    set_window_title(window, &title);
 }
 
 pub fn window_title(id: u64) -> Option<String> {

@@ -33,6 +33,7 @@ use gpui_component::menu::PopupMenu;
 use crate::composite;
 use crate::goto_dialog::GoTo;
 use crate::integrations::media_controls::MediaSession;
+use crate::integrations::placement;
 use crate::integrations::tray;
 use crate::panel_catalog::{self as catalog, PanelDef, PanelPlacement, PanelSection};
 use crate::panel_presets;
@@ -48,8 +49,8 @@ use crate::panels::window_controls::{WindowControlsConfig, WindowControlsPanel};
 use crate::pass_prompt;
 use crate::quick_play::QuickPlay;
 use rox_core::settings::{
-    self, GainModeSetting, LastTrack, LayoutEdit, LayoutSize, NamedLayout, PostShaderConfig,
-    QueueState, QueuedTrack, Settings, ShuffleMode, WindowState,
+    self, GainModeSetting, LastTrack, LayoutEdit, LayoutPlacement, LayoutSize, NamedLayout,
+    PostShaderConfig, QueueState, QueuedTrack, Settings, ShuffleMode, WindowOrigin, WindowState,
 };
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
@@ -892,6 +893,8 @@ pub(crate) fn close_workspace_window(
             None => palette::forget(player, cx),
         }
     }
+    // After the persist above, which reads where KWin last had the window.
+    placement::forget(window, cx);
     // Whatever the tray didn't take ends here, which frees the per-process
     // name before the hand-off below claims it again.
     let had_media = media.take().is_some();
@@ -3192,6 +3195,9 @@ pub struct Workspace {
     /// `mini_layout`; a workspace save captures into it. None is an unnamed
     /// arrangement.
     active_layout: Option<String>,
+    /// Kept above other windows, as rox last set it. Read through
+    /// [`Workspace::pinned`], which prefers the window manager's word.
+    pinned: bool,
     /// The layout save/apply dialog while it's up; dropped on close.
     layout_dialog: Option<LayoutDialog>,
     /// The keyboard's home while a dialog is up. The dialog claims it on
@@ -3794,6 +3800,7 @@ impl Workspace {
             layout_error,
             primary_layout,
             mini_layout,
+            pinned: false,
             active_layout,
             layout_dialog: None,
             dialog_focus: cx.focus_handle(),
@@ -4231,10 +4238,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.apply_named_layout_sized(name, window, cx).is_some()
+    }
+
+    /// [`Self::apply_named_layout`], saying what size it resized the window
+    /// to, if it did. None when it didn't apply.
+    fn apply_named_layout_sized(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Option<gpui::Size<Pixels>>> {
         let settings = Settings::load();
-        let Some(preset) = rox_core::settings::layouts::resolve(&settings, name) else {
-            return false;
-        };
+        let preset = rox_core::settings::layouts::resolve(&settings, name)?;
         // Size to the preset by default; a working copy with its own size
         // overrides that below, so a resize made while editing comes back too.
         let mut size = preset.size;
@@ -4255,13 +4271,11 @@ impl Workspace {
             }
         }
         if !applied {
-            let Ok(dump) = serde_json::from_value::<DockAreaState>(preset.dump) else {
-                return false;
-            };
+            let dump = serde_json::from_value::<DockAreaState>(preset.dump).ok()?;
             applied = self.apply_layout(dump, window, cx);
         }
         if !applied {
-            return false;
+            return None;
         }
         self.set_active_layout(Some(name.to_string()));
         // Size the window to whichever source won above (the working copy's
@@ -4272,11 +4286,12 @@ impl Workspace {
         // its resize still takes. A `--window-size` launch also pins the
         // frame: preset sizes stay stored, they just don't move the window
         // that session, so every look screenshots at the flag's one size.
+        let mut resized = None;
         if let Some(size) = size
             && !(cfg!(target_os = "macos") && window.is_fullscreen())
             && crate::window_size_override().is_none()
         {
-            resize_clamped(window, size);
+            resized = Some(resize_clamped(window, size));
         }
         // A programmatic resize only shows on the next drawn frame, and gpui
         // stops pumping frames for a window that's idle and not focused.
@@ -4286,7 +4301,7 @@ impl Workspace {
         // back. Wake it and mark it dirty so the new layout draws now.
         window.activate_window();
         window.refresh();
-        true
+        Some(resized)
     }
 
     /// Apply a shipped or saved workspace to this window: the whole look
@@ -4682,18 +4697,94 @@ impl Workspace {
                     }
                 }
                 this.update_in(cx, |this, window, cx| {
-                    if this.apply_named_layout(&name, window, cx) {
-                        cx.notify();
-                    }
+                    this.enter_mini_side(&name, window, cx)
                 })
                 .ok();
             })
             .detach();
             return;
         }
-        if self.apply_named_layout(&name, window, cx) {
-            cx.notify();
+        self.enter_mini_side(&name, window, cx);
+    }
+
+    /// Swap to one side of the mini toggle, carrying the window placement
+    /// with it: the layout being left keeps where it sat and its pin, and
+    /// the one arriving goes back to its own. A layout with no record stays
+    /// where the window is, unpinned, so a pin only ever set on the mini
+    /// doesn't follow you back to a layout with no button to undo it.
+    fn enter_mini_side(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let leaving = self.active_layout.clone();
+        let here = LayoutPlacement {
+            origin: self.placement_origin(window, cx),
+            pinned: self.pinned(window, cx),
+        };
+        let Some(resized) = self.apply_named_layout_sized(name, window, cx) else {
+            return;
+        };
+
+        if let Some(leaving) = leaving {
+            Settings::update(move |s| {
+                s.windows.placements.insert(leaving, here);
+            });
         }
+
+        let arriving = Settings::load()
+            .windows
+            .placements
+            .get(name)
+            .copied()
+            .unwrap_or_default();
+        if let Some(origin) = arriving.origin {
+            placement::move_to(window, gpui::point(px(origin.x), px(origin.y)), resized, cx);
+        }
+        self.pinned = arriving.pinned;
+        placement::set_pinned(window, arriving.pinned, cx);
+
+        self.save_layout_soon(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the window stays above others. The window manager's answer
+    /// wins where it gives one, so a pin set from its own menu shows here.
+    pub(crate) fn pinned(&self, window: &Window, cx: &App) -> bool {
+        placement::pinned(window, cx).unwrap_or(self.pinned)
+    }
+
+    pub(crate) fn toggle_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pinned = !self.pinned(window, cx);
+        self.pinned = pinned;
+        placement::set_pinned(window, pinned, cx);
+        self.save_layout_soon(window, cx);
+        cx.notify();
+    }
+
+    /// Put a just-opened window where the last one sat, pinned if it was.
+    pub(crate) fn restore_placement(
+        &mut self,
+        saved: Option<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let origin = saved
+            .filter(|w| !w.maximized)
+            .map(|w| gpui::point(px(w.x), px(w.y)));
+        let pinned = saved.is_some_and(|w| w.pinned);
+        self.pinned = pinned;
+        placement::restore(window, origin, pinned, cx);
+    }
+
+    /// Where the window sits, for a placement record. A maximized or
+    /// fullscreen frame isn't a position to come back to.
+    fn placement_origin(&self, window: &Window, cx: &App) -> Option<WindowOrigin> {
+        if window.is_maximized() || window.is_fullscreen() {
+            return None;
+        }
+
+        let origin = placement::origin(window, cx)?;
+        Some(WindowOrigin {
+            x: origin.x.into(),
+            y: origin.y.into(),
+        })
     }
 
     /// Open the save dialog: a focused name field that Enter or the button
@@ -5308,12 +5399,32 @@ impl Workspace {
         let layout = self.dock_dump(cx).ok().filter(|_| !self.dock_is_empty(cx));
         let bounds = window.window_bounds();
         let frame = bounds.get_bounds();
+        // The platform's read of the position where it has one, since X11's
+        // frame origin is relative to the WM's decoration. Without one (a
+        // maximized window, or KWin not having reported yet), Wayland keeps
+        // the last real position rather than saving its made-up origin.
+        let origin = self
+            .placement_origin(window, cx)
+            .or_else(|| {
+                let saved = (!placement::bounds_have_origin())
+                    .then(|| Settings::load().windows.main)
+                    .flatten()?;
+                Some(WindowOrigin {
+                    x: saved.x,
+                    y: saved.y,
+                })
+            })
+            .unwrap_or(WindowOrigin {
+                x: frame.origin.x.into(),
+                y: frame.origin.y.into(),
+            });
         let window_state = WindowState {
-            x: frame.origin.x.into(),
-            y: frame.origin.y.into(),
+            x: origin.x,
+            y: origin.y,
             width: frame.size.width.into(),
             height: frame.size.height.into(),
             maximized: matches!(bounds, WindowBounds::Maximized(_)),
+            pinned: self.pinned(window, cx),
         };
         // The playing track is stored as its library id, for the launch
         // restore. Nothing playing, or a file outside the library, clears
@@ -6053,11 +6164,13 @@ pub(crate) fn denoise_f32(value: &mut serde_json::Value) {
 /// Resize the window to a preset's stored size, floored at the window
 /// minimum. A bad or zero size in a preset would otherwise collapse the
 /// window to nothing on a layout swap or mini toggle.
-fn resize_clamped(window: &mut Window, size: LayoutSize) {
-    window.resize(gpui::size(
+fn resize_clamped(window: &mut Window, size: LayoutSize) -> gpui::Size<Pixels> {
+    let size = gpui::size(
         px(size.width).max(rox_core::settings::MIN_WINDOW_SIZE.width),
         px(size.height).max(rox_core::settings::MIN_WINDOW_SIZE.height),
-    ));
+    );
+    window.resize(size);
+    size
 }
 
 /// The window's content size in logical pixels, for storing with a layout
