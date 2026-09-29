@@ -2,9 +2,10 @@
 # Wraps the release binaries into a single-file AppImage. The release
 # workflow's "Package (Linux AppImage)" step calls this after `cargo build
 # --release`; run it by hand from the repo root to
-# reproduce that locally. Nothing gets bundled beyond rox itself: every
-# library rox links is on the AppImage excludelist or is glibc, so the host
-# supplies Vulkan, ALSA, fontconfig and the rest.
+# reproduce that locally. The host supplies glibc, Vulkan, ALSA, fontconfig
+# and everything else on the AppImage excludelist. The xkbcommon libraries
+# rox links aren't on it and stock installs can lack the X11 one, so those
+# get bundled.
 # Usage: scripts/appimage/build.sh <version> <out-dir>
 set -euo pipefail
 
@@ -54,6 +55,23 @@ done
 mkdir -p "$APPDIR/usr/bin"
 cp target/release/rox target/release/rox-mcp "$APPDIR/usr/bin/"
 install -m 755 scripts/appimage/AppRun "$APPDIR/AppRun"
+
+# Bundled libraries. ldd resolves them from the build container, which sets
+# the same glibc floor as the binary. A RUNPATH only covers the object that
+# carries it, so each bundled lib gets $ORIGIN too: that's how
+# libxkbcommon-x11 finds the bundled libxcb-xkb.
+mkdir -p "$APPDIR/usr/lib"
+for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1; do
+    path=$(ldd target/release/rox | awk -v lib="$lib" '$1 == lib { print $3 }')
+    if [ ! -f "$path" ]; then
+        echo "$lib didn't resolve against target/release/rox" >&2
+        exit 1
+    fi
+
+    cp -L "$path" "$APPDIR/usr/lib/$lib"
+    patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$lib"
+done
+patchelf --set-rpath '$ORIGIN/../lib' "$APPDIR/usr/bin/rox"
 
 # Desktop entry under the reverse-DNS id, with the icon name to match. Both
 # Exec= lines stay as shipped: AppRun is what runs, appimagetool only wants

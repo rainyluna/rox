@@ -120,7 +120,8 @@ jobs:
       # checkout, the toolchain installer and install-action; dpkg-dev is
       # dpkg-shlibdeps for cargo-deb's $auto; file is for appimagetool;
       # cmake is for rox-milkdrop-sys, which builds libprojectM from source;
-      # imagemagick downscales the AppImage's icon to the 256px slot.
+      # imagemagick downscales the AppImage's icon to the 256px slot;
+      # patchelf points the AppImage's rox at its bundled libraries.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -129,7 +130,7 @@ jobs:
             build-essential git curl ca-certificates dpkg-dev file \
             pkg-config libasound2-dev libfontconfig1-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-dev libxcb1-dev libvulkan-dev \
-            libssl-dev cmake imagemagick
+            libssl-dev cmake imagemagick patchelf
 
       - uses: actions/checkout@v7
         with:
@@ -221,10 +222,10 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo deb -p rox --no-build -o .
 
-      # Same binaries again as one self-contained file. Nothing is bundled
-      # beyond rox, rox-mcp, the desktop entry, icons and metainfo: every
-      # library rox links is on the AppImage excludelist or is glibc, and
-      # the bookworm build is what makes that glibc floor hold. The script
+      # Same binaries again as one self-contained file, with the desktop
+      # entry, icons, metainfo and the xkbcommon libraries the AppImage
+      # excludelist leaves out. Everything else comes from the host, and
+      # the bookworm build is what makes the glibc floor hold. The script
       # pins appimagetool and the static runtime by hash.
       - name: Package (Linux AppImage)
         if: runner.os == 'Linux'
