@@ -1,6 +1,6 @@
 # ADR 30: Plugins are subprocesses that bring something external in
 
-**Status:** Proposed
+**Status:** Decided 2026-09-28, on the numbers in [research 04](../../0R-research/04-plugin-host.md)
 
 Decision: a plugin is a folder the user drops into rox's data directory, holding a
 manifest and an entry program. rox runs it as a subprocess and talks to it over its
@@ -13,8 +13,9 @@ in the UI, touches the engine or the ring, or connects to the control socket. ro
 publishes the contract, a service-neutral example plugin, and the host. It never
 publishes a plugin for a particular service ([scope](../../01-product/03-scope.md)).
 
-The mechanism is decided. The prototype for #8 measures the numbers it needs, listed at
-the end, and this ADR stays Proposed until that writeup exists.
+The prototype for #8 measured what this record could only estimate, and the numbers are
+in [research 04](../../0R-research/04-plugin-host.md). They set the timeouts, the read
+size, whole-track buffering and the pre-open, recorded at the end.
 
 The field-level shapes (manifest keys, wire methods, timeouts, size caps) are pinned in
 a contract kept with the implementation plans, outside this repository
@@ -219,10 +220,13 @@ The Plugins page renders a small subset of JSON Schema as rows: strings, secrets
 numbers, booleans, and enums. There are no per-locale strings, so a plugin's labels
 show in its author's language.
 
-Unknown top-level keys are rejected. That's new for rox: the workspace bundle reads
-leniently so an old look still loads, and nothing in the workspace rejects an unknown
-field today. A manifest is a different kind of file. A key the host doesn't know is a
-key it can't enforce, and a plugin that relies on one should fail loudly.
+Unknown top-level keys are rejected, and so are unknown keys inside the entry, since
+that's how the plugin runs. Inside `meta` and `capabilities` unknown keys are ignored,
+so a field added there later doesn't refuse a plugin on an older rox; a new top-level
+key bumps the API version. That's new for rox: the workspace bundle reads leniently so
+an old look still loads, and nothing in the workspace rejects an unknown field today. A
+manifest is a different kind of file. A key the host doesn't know is a key it can't
+enforce, and a plugin that relies on one should fail loudly.
 
 The API version is an integer. The host supports a range of versions and accepts a
 plugin that targets any version in it, so one rox release doesn't break every plugin at
@@ -298,19 +302,44 @@ This narrows the scope doc's refusal of scripted UI extensions for presets only:
 plugin can put entries on the menu, and every entry is data. ADR 24's script panels stay
 Proposed and separate, and plugin-supplied node trees wait on them.
 
-**What the #8 prototype measures.** The prototype runs one external downloader-backed
-plugin through the real folder, manifest, version check, and wire, never by linking
-rox's crates. ADR 29 is the reason (29:78-81): a boundary with no implementor living
-inside it is wrong in ways nobody finds out about. It measures what this ADR can only
-estimate:
+**What the #8 prototype measured.** The prototype ran one external plugin, built on a
+downloader the user installs, through the real folder, manifest, version check and wire,
+never linking rox's crates. ADR 29 is the reason (29:78-81). What it found settles the
+open numbers:
 
-- how long a cold open takes when the plugin runs a downloader
-- whether a cold open stalls pause and seek
-- what read size and read-ahead keep a lossless stream fed through the pipe
-- what a plugin costs to write in an interpreted language, on each OS
+- A cold open took 2.3 to 3.8 s when the plugin ran its downloader, a median of 2.7 s
+  over twenty. The open timeout stays at 20 s. Starting a plugin and its handshake took
+  under 0.8 s, so the handshake's 5 s stays.
+- A cold open does stall the engine. A pause pressed during one waits out the rest of
+  it, measured at up to 2.3 s, because commands drain at the top of the decode loop.
+  Pre-opening the next two entries answered every sequential advance in the test from a
+  stream already open, in under 2 ms, so the stall is confined to jumps and the first
+  play, and the transport, the waveform and the track's row show that wait while it
+  lasts. The pre-open waits for the audible track to hold for 2 s, so skipping through a
+  queue doesn't pay for opens it throws away.
+- The pipe is not a bandwidth problem. Base64 in JSON carried 14 Mbit/s at the worst
+  read size through the real plugin and 130 to 148 Mbit/s through a plugin with no
+  network behind it, and decoding a full read cost the host 0.3 ms. A second binary
+  channel stays unneeded.
+- Reads are 256 KiB. That got nearly all of 512 KiB's throughput through the real plugin
+  and four times 64 KiB's, and a seek cost the same one round trip, a median of 68 to 87
+  ms, at every size.
+- A seekable stream up to 64 MB is downloaded whole while it plays, rather than read a
+  chunk ahead, and so is a server's file answered by range. The seekbar shows what's
+  downloaded, a seek inside it touches nothing but memory, and the waveform is decoded
+  from the same bytes, so the track is fetched once. Plugin tracks of 3.5 to 5.7 MB
+  downloaded in under a second. Anything larger, unseekable or live reads as it plays,
+  and a plugin may ask for that too, for a service that meters or throttles fast
+  downloads: it can lower the buffering, never raise the cap. A pre-opened stream
+  downloads only once it plays.
+- A sync's first page may take 60 s, since a plugin may list a whole collection there to
+  learn whether it changed. Every other listing page keeps 15 s.
+- A plugin in an interpreted language cost about a thousand lines of standard-library
+  Python and a test suite of about eight hundred, on macOS and Linux. The per-step time
+  wasn't recorded.
 
-Those numbers set the timeouts, the read size, and the pre-open policy. This ADR stays
-Proposed until the research writeup exists.
+The first page's 60 s is a margin, not a measurement: no collection of thousands was
+synced.
 
 **The contract for the implementing layer.** rox-library gains a plugin origin beside
 Subsonic's (`rox-library/src/cue.rs:68`), a third `Locator` variant for a plugin

@@ -107,8 +107,9 @@ Plugins are [ADR 30](decisions/30-adr-plugins.md): a folder the user drops in, r
 subprocess over stdin and stdout, declaring capabilities from a closed set. A plugin can
 add a source under `plugin:<id>` that rox browses, searches, syncs, and streams through
 it, and list panel presets of core kinds under its name in Add Panel. It never runs code
-in the UI, touches the engine, or connects to the control socket. The prototype for #8
-measures cold open latency and pipe throughput before the ADR is decided.
+in the UI, touches the engine, or connects to the control socket. Its timeouts, read
+size and buffering come from the #8 prototype's numbers in
+[research 04](../0R-research/04-plugin-host.md).
 
 ## Decisions (ADRs)
 
@@ -146,4 +147,4 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [27 - i18n](decisions/27-adr-i18n.md) | Fluent messages and ICU4X formatting behind one locale static, en-CA as source | Decided |
 | [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Decided |
 | [29 - Source contract](decisions/29-adr-source-contract.md) | Sources as rows under a source id, in-process, trait and host deferred | Decided; plugin streams and rows by membership added by its amendments, host taken up by 30 |
-| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Proposed |
+| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Decided |
