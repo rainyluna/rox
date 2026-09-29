@@ -44,6 +44,9 @@ const PREOPEN_SETTLE: Duration = Duration::from_secs(2);
 /// A sync past this many pages is a plugin looping on its own cursor.
 const MAX_SYNC_PAGES: usize = 2000;
 
+/// How long an open or a cover waits for the first [`apply`] before refusing.
+const FIRST_APPLY_WAIT: Duration = Duration::from_secs(10);
+
 /// One page of a browse or search. A `None` cursor is the last page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Page {
@@ -87,6 +90,50 @@ static LIVE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Moves whenever the folders or the records might have, so the Plugins
 /// page re-reads on a change rather than every frame.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Opens once the first [`apply`] has built the hosts, plugins on or off. A
+/// launch restore opens its start entry before that.
+static FIRST_APPLY: Gate = Gate::new();
+
+static STARTED: AtomicBool = AtomicBool::new(false);
+
+/// A latch that stays open once opened.
+struct Gate {
+    open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Gate {
+    const fn new() -> Self {
+        Gate {
+            open: Mutex::new(false),
+            opened: Condvar::new(),
+        }
+    }
+
+    fn open(&self) {
+        if let Ok(mut open) = self.open.lock() {
+            *open = true;
+        }
+        self.opened.notify_all();
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.lock().is_ok_and(|open| *open)
+    }
+
+    /// Blocks for at most `limit`. Never on the UI thread: that's where the
+    /// first apply runs, so it would wait out the whole limit.
+    fn wait(&self, limit: Duration) -> bool {
+        let Ok(open) = self.open.lock() else {
+            return false;
+        };
+
+        self.opened
+            .wait_timeout_while(open, limit, |open| !*open)
+            .is_ok_and(|(open, _)| *open)
+    }
+}
 
 /// What `start` hands the rest of the module: the library to reload, and the
 /// watch, which stops when this drops.
@@ -150,7 +197,6 @@ pub fn status(id: &str) -> Option<Status> {
 /// tracks early, and starts every plugin that's switched on and approved.
 /// Once per app; a later window's call is a no-op.
 pub fn start(library: Entity<Library>, player: Entity<Player>, cx: &mut App) {
-    static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::Relaxed) {
         return;
     }
@@ -163,11 +209,21 @@ pub fn start(library: Entity<Library>, player: Entity<Player>, cx: &mut App) {
     follow(player, cx);
 
     // The first scan hashes every plugin folder, which stays off the UI
-    // thread.
+    // thread. Not on the pool either: cover fetches there wait for the apply
+    // after it, and on a fixed-size pool they could hold every thread.
+    let (scanned, scan) = async_channel::bounded::<()>(1);
+    let spawned = std::thread::Builder::new()
+        .name("plugin-scan".into())
+        .spawn(move || {
+            drop(loaded());
+            let _ = scanned.try_send(());
+        });
+    if let Err(e) = spawned {
+        log::warn!("plugins: scanning on the UI thread, no scan thread: {e}");
+    }
+
     cx.spawn(async move |cx| {
-        cx.background_executor()
-            .spawn(async { drop(loaded()) })
-            .await;
+        let _ = scan.recv().await;
         cx.update(apply).ok();
     })
     .detach();
@@ -273,6 +329,7 @@ pub fn apply(cx: &mut App) {
         library.update(cx, |library, cx| library.reload_projection(cx));
     }
 
+    FIRST_APPLY.open();
     bump();
 }
 
@@ -615,8 +672,26 @@ static OPENED_WARM: AtomicU64 = AtomicU64::new(0);
 static OPENED_JOINED: AtomicU64 = AtomicU64::new(0);
 static OPENED_COLD: AtomicU64 = AtomicU64::new(0);
 
+/// For the blocking paths that can run before the first [`apply`]. Answers
+/// at once when [`start`] never ran, since then nothing opens the gate.
+fn await_first_apply(source: &str) {
+    if FIRST_APPLY.is_open() || !STARTED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let began = Instant::now();
+    let ready = FIRST_APPLY.wait(FIRST_APPLY_WAIT);
+    log::info!(
+        "{source}: waited {:.0} ms for the first apply{}",
+        began.elapsed().as_secs_f64() * 1000.0,
+        if ready { "" } else { ", and gave up" }
+    );
+}
+
 /// What the engine calls, on its decode thread, for every plugin entry.
 fn open(stream: &PluginStream) -> Result<Opened, String> {
+    await_first_apply(&stream.source);
+
     let host = host_for(&stream.source)?;
     let began = Instant::now();
 
@@ -1108,8 +1183,11 @@ pub fn pick(
     })
 }
 
-/// Blocking; called from `fetch_cover`'s thread.
+/// Blocking; called from `fetch_cover`'s thread. A miss there is held for
+/// minutes, so one asked before the first apply waits for it.
 pub fn cover(source: &str, key: &str) -> Option<Vec<u8>> {
+    await_first_apply(source);
+
     let host = host_for(source).ok()?;
     let answer = host
         .call("source.cover", json!({ "key": key }), host.timeouts().cover)
@@ -1157,6 +1235,29 @@ pub fn live_sources() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gate_wakes_a_waiter_when_it_opens() {
+        let gate = Arc::new(Gate::new());
+        let opener = Arc::clone(&gate);
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            opener.open();
+        });
+
+        assert!(gate.wait(Duration::from_secs(10)));
+        assert!(gate.is_open());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_gate_nobody_opens_gives_up_at_its_limit() {
+        let gate = Gate::new();
+        let began = Instant::now();
+
+        assert!(!gate.wait(Duration::from_millis(50)));
+        assert!(began.elapsed() >= Duration::from_millis(50));
+    }
 
     #[test]
     fn a_plugin_that_isnt_loaded_declares_nothing() {

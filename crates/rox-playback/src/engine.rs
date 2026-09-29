@@ -2296,7 +2296,8 @@ impl Source {
             }
 
             Locator::Plugin(stream) => {
-                let opener = opener.ok_or_else(|| format!("{}: no plugin host", stream.source))?;
+                let opener =
+                    opener.ok_or_else(|| format!("{}: no plugin opener", stream.source))?;
 
                 // Named here so every refusal says which plugin it came from.
                 let opened = opener(stream).map_err(|e| format!("{}: {e}", stream.source))?;
@@ -5159,7 +5160,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_entry_with_no_host_refuses_and_the_queue_moves_on() {
+    fn a_plugin_entry_with_no_opener_refuses_and_the_queue_moves_on() {
         let fx = Fixtures::new("plugin-no-host");
         let mut e = engine_over(vec![plugin("a.wav"), local(fx.wav("b.wav", 0.25))]);
 
@@ -5167,7 +5168,7 @@ mod tests {
         assert_eq!(e.pos, 1);
         assert_eq!(
             e.shared.take_refusal().as_deref(),
-            Some("plugin:test: no plugin host")
+            Some("plugin:test: no plugin opener")
         );
         assert_eq!(e.shared.stream_state(0), Some(StreamState::Dropped));
     }

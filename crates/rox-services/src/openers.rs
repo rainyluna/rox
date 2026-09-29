@@ -3,7 +3,7 @@
 //! into it, and each queue the player starts takes a clone along to the
 //! engine, so `rox-playback` never calls up into the host (ADR 29, ADR 30).
 //!
-//! Empty, a plugin entry refuses to open with "no plugin host".
+//! Empty, a plugin entry refuses to open with "no plugin opener".
 
 use std::sync::LazyLock;
 use std::sync::RwLock;
