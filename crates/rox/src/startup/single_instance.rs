@@ -117,6 +117,7 @@ pub fn claim(mode: LaunchMode, files: &[PathBuf]) -> Option<Server> {
     // the path first: two cold launches in the same instant can't then delete
     // each other's freshly bound socket, the path just ends up pointing at
     // whichever of them renamed last.
+    rox_ipc::ensure_socket_dir(&path);
     let staging = path.with_extension(format!("{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&staging);
     let Ok(listener) = UnixListener::bind(&staging) else {
@@ -292,15 +293,15 @@ fn adopt(launch: Launch, cx: &mut App) {
 /// Where the instance listens. Keyed to the data directory, so a `--portable`
 /// or `--fresh` run is its own instance instead of talking to the daily
 /// driver's. The hash only has to agree with itself across two runs of the
-/// same binary, which is well inside what `DefaultHasher` guarantees. Sockets
-/// belong in the runtime dir and the path has a length limit, so that comes
-/// first and the data dir only stands in where there's no runtime dir.
+/// same binary, which is well inside what `DefaultHasher` guarantees. The
+/// folder is picked the same way as the control socket's.
 #[cfg(unix)]
 fn socket_path() -> PathBuf {
     use std::hash::{Hash as _, Hasher as _};
 
+    let data_dir = rox_core::settings::data_dir();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    rox_core::settings::data_dir().hash(&mut hasher);
-    let dir = dirs::runtime_dir().unwrap_or_else(rox_core::settings::data_dir);
-    dir.join(format!("rox-{:016x}.sock", hasher.finish()))
+    data_dir.hash(&mut hasher);
+
+    rox_ipc::socket_in(&data_dir, &format!("rox-{:016x}.sock", hasher.finish()))
 }

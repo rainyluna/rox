@@ -49,8 +49,62 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
         // backends peel the prefix back off to name the pipe.
         return PathBuf::from(format!(r"\\.\pipe\rox-ipc-{hash:016x}"));
     }
-    let dir = dirs::runtime_dir().unwrap_or_else(|| data_dir.to_path_buf());
-    dir.join(format!("rox-ipc-{hash:016x}.sock"))
+    socket_in(data_dir, &format!("rox-ipc-{hash:016x}.sock"))
+}
+
+/// Where a per-data-dir socket file goes: the runtime dir, else beside the
+/// data dir, else the user's cache dir when the data dir's path is too long
+/// to bind. Never a shared temp dir, where another user could squat the
+/// name.
+pub fn socket_in(data_dir: &Path, name: &str) -> PathBuf {
+    choose_socket_dir(dirs::runtime_dir(), data_dir, dirs::cache_dir(), name)
+}
+
+fn choose_socket_dir(
+    runtime: Option<PathBuf>,
+    data_dir: &Path,
+    cache: Option<PathBuf>,
+    name: &str,
+) -> PathBuf {
+    if let Some(dir) = runtime {
+        return dir.join(name);
+    }
+
+    let beside = data_dir.join(name);
+    if fits(&beside) {
+        return beside;
+    }
+
+    cache
+        .map(|dir| dir.join("rox").join(name))
+        .filter(|path| fits(path))
+        .unwrap_or(beside)
+}
+
+/// `sun_path` is 108 bytes on Linux and 104 on macOS and the BSDs, NUL
+/// included.
+const SUN_PATH: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
+
+/// Both binds stage under `<name>.<pid>.sock` first: the dot, a pid of up to
+/// seven digits, and the NUL.
+const STAGING_HEADROOM: usize = 9;
+
+fn fits(path: &Path) -> bool {
+    path.as_os_str().len() + STAGING_HEADROOM <= SUN_PATH
+}
+
+/// Creates the socket's folder if it's missing, user-only, since the cache
+/// dir fallback may not exist yet.
+#[cfg(unix)]
+pub fn ensure_socket_dir(path: &Path) {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir);
+    }
 }
 
 /// The key every per-data-dir name hangs off: the control socket here, the
@@ -94,4 +148,54 @@ pub(crate) fn pipe_taken(err: &std::io::Error) -> bool {
             err.raw_os_error(),
             Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY)
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NAME: &str = "rox-ipc-0123456789abcdef.sock";
+
+    #[test]
+    fn the_runtime_dir_wins_whatever_the_data_dir() {
+        let path = choose_socket_dir(
+            Some("/run/user/1000".into()),
+            Path::new("/home/me/.local/share/rox"),
+            Some("/home/me/.cache".into()),
+            NAME,
+        );
+        assert_eq!(path, Path::new("/run/user/1000").join(NAME));
+    }
+
+    #[test]
+    fn a_short_data_dir_keeps_its_socket() {
+        let data_dir = Path::new("/Users/me/Library/Application Support/rox");
+        let path = choose_socket_dir(
+            None,
+            data_dir,
+            Some("/Users/me/Library/Caches".into()),
+            NAME,
+        );
+        assert_eq!(path, data_dir.join(NAME));
+    }
+
+    #[test]
+    fn a_data_dir_too_deep_to_bind_moves_to_the_cache_dir() {
+        let deep = format!("/private/tmp/{}/rox-data", "x".repeat(80));
+        let path = choose_socket_dir(
+            None,
+            Path::new(&deep),
+            Some("/Users/me/Library/Caches".into()),
+            NAME,
+        );
+
+        assert_eq!(path, Path::new("/Users/me/Library/Caches/rox").join(NAME));
+        assert!(fits(&path));
+    }
+
+    #[test]
+    fn with_nowhere_shorter_the_data_dir_stays() {
+        let deep = PathBuf::from(format!("/private/tmp/{}/rox-data", "x".repeat(80)));
+        assert_eq!(choose_socket_dir(None, &deep, None, NAME), deep.join(NAME));
+    }
 }

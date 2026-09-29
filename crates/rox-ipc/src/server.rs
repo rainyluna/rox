@@ -100,6 +100,7 @@ impl Server {
         }
         // Bind under our own name and rename into place: two racing binds can't
         // delete each other's socket.
+        crate::ensure_socket_dir(path);
         let staging = path.with_extension(format!("{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&staging);
         let listener = UnixListener::bind(&staging).map_err(|e| e.to_string())?;
