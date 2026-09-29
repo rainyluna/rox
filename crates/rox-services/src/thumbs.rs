@@ -126,6 +126,26 @@ impl Thumbs {
     /// Reports Pending while a load runs. A stale entry is served as-is while
     /// it re-reads.
     pub fn get(&mut self, path: &Path, cx: &mut Context<Self>) -> Thumb {
+        self.get_from(path, None, cx)
+    }
+
+    /// A plugin track's cover by its source and key, whether or not the
+    /// track is a library row yet.
+    pub fn get_plugin(&mut self, source: &str, key: &str, cx: &mut Context<Self>) -> Thumb {
+        let path = PathBuf::from(crate::sources::plugin_thumb_key(source, key));
+        let plugin = Some((source.to_string(), key.to_string()));
+
+        self.get_from(&path, plugin, cx)
+    }
+
+    /// `plugin` is the source and key a cover is fetched through when the
+    /// path is a plugin track's cache key.
+    fn get_from(
+        &mut self,
+        path: &Path,
+        plugin: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> Thumb {
         self.clock += 1;
         self.stats.requests += 1;
         if let Some(entry) = self.entries.get_mut(path) {
@@ -135,18 +155,18 @@ impl Thumbs {
                 None => Thumb::Missing,
             };
             if !entry.fresh {
-                self.load(path, cx);
+                self.load(path, plugin, cx);
             }
             return answer;
         }
         if self.conn.is_none() {
             return Thumb::Missing;
         }
-        self.load(path, cx);
+        self.load(path, plugin, cx);
         Thumb::Pending
     }
 
-    fn load(&mut self, path: &Path, cx: &mut Context<Self>) {
+    fn load(&mut self, path: &Path, plugin: Option<(String, String)>, cx: &mut Context<Self>) {
         let Some(conn) = &self.conn else {
             return;
         };
@@ -169,8 +189,14 @@ impl Thumbs {
                     // for the whole wall. Pass the path, not its lossy
                     // string form, so a non-UTF-8 name stays itself.
                     async move {
-                        rox_library::thumbs::thumbnail(&conn, &path)
-                            .or_else(|| crate::sources::cover(&conn, &path.to_string_lossy()))
+                        match plugin {
+                            Some((source, key)) => {
+                                crate::sources::plugin_cover(&conn, &source, &key)
+                            }
+
+                            None => rox_library::thumbs::thumbnail(&conn, &path)
+                                .or_else(|| crate::sources::cover(&conn, &path.to_string_lossy())),
+                        }
                     }
                 })
                 .await;

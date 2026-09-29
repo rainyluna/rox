@@ -4008,3 +4008,25 @@ milkdrop-unfavorite = Rimuovi dai preferiti
 milkdrop-reveal-folder = Mostra cartella
 milkdrop-show-controls = Mostra i controlli
     .description = Precedente, Successivo, Casuale e la stella dei preferiti sopra la visualizzazione mentre il puntatore è sul pannello
+
+## Source browser
+
+panel-catalog-source-browser = Sorgenti esterne
+panel-title-source-browser = Sorgenti esterne
+source-browser-title = Sorgenti esterne
+source-browser-search = Cerca
+source-browser-home = Inizio
+source-browser-results = Risultati per { $query }
+source-browser-empty = Qui non c'è niente
+source-browser-pick = Scegli una sorgente
+source-browser-no-sources = Nessuna sorgente plugin è in esecuzione.
+source-browser-failed = { $source } non ha risposto
+source-browser-pick-failed = Impossibile aggiungere queste tracce alla libreria
+source-browser-sync-failed = Impossibile sincronizzare { $title }
+source-browser-sync = Tieni nella libreria
+source-browser-members = { $count ->
+    [one] { $count } traccia
+   *[other] { $count } tracce
+}
+source-browser-play = Riproduci
+source-browser-play-count = Riproduci { $count } tracce

@@ -43,6 +43,7 @@ use rox_panels::playlists::{PlaylistsConfig, PlaylistsPanel};
 use rox_panels::queue::{QueueConfig, QueuePanel};
 use rox_panels::search::{SearchConfig, SearchPanel};
 use rox_panels::shader::{ShaderConfig, ShaderPanel};
+use rox_panels::source_browser::{SourceBrowserConfig, SourceBrowserPanel};
 use rox_panels::spacer::{SpacerConfig, SpacerPanel};
 use rox_panels::spectrogram::{SpectrogramConfig, SpectrogramPanel};
 use rox_panels::spectrum::{SpectrumConfig, SpectrumPanel};
@@ -596,17 +597,35 @@ pub(crate) static VISUALIZERS: PanelSection = PanelSection {
 /// Hidden unless the Development page turns experimental features on.
 pub(crate) static EXPERIMENTAL: PanelSection = PanelSection {
     group: Some(("panel-catalog-group-experimental", icons::FLASK)),
-    panels: &[PanelDef {
-        label: "panel-catalog-particles",
-        name: "particles",
-        icon: icons::STAR,
-        placement: PanelPlacement::Bottom,
-        build: |state, _, _, cx| {
-            Arc::new(
-                cx.new(|cx| ParticlesPanel::new(state.clone(), ParticlesConfig::default(), cx)),
-            )
+    panels: &[
+        PanelDef {
+            label: "panel-catalog-particles",
+            name: "particles",
+            icon: icons::STAR,
+            placement: PanelPlacement::Bottom,
+            build: |state, _, _, cx| {
+                Arc::new(
+                    cx.new(|cx| ParticlesPanel::new(state.clone(), ParticlesConfig::default(), cx)),
+                )
+            },
         },
-    }],
+        PanelDef {
+            label: "panel-catalog-source-browser",
+            name: "source browser",
+            icon: icons::GLOBE,
+            placement: PanelPlacement::Center,
+            build: |state, _, window, cx| {
+                Arc::new(cx.new(|cx| {
+                    SourceBrowserPanel::new(
+                        state.clone(),
+                        SourceBrowserConfig::default(),
+                        window,
+                        cx,
+                    )
+                }))
+            },
+        },
+    ],
 };
 
 /// A composite can't go inside another composite's slot.

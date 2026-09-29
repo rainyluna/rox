@@ -4057,3 +4057,25 @@ milkdrop-unfavorite = Unfavorite Preset
 milkdrop-reveal-folder = Reveal Folder
 milkdrop-show-controls = Show Controls
     .description = Previous, Next, Random and the favorite star over the visual while the pointer is on the panel
+
+## Source browser
+
+panel-catalog-source-browser = External Sources
+panel-title-source-browser = External Sources
+source-browser-title = External Sources
+source-browser-search = Search
+source-browser-home = Home
+source-browser-results = Results for { $query }
+source-browser-empty = Nothing here
+source-browser-pick = Choose a Source
+source-browser-no-sources = No plugin source is running.
+source-browser-failed = { $source } couldn't answer
+source-browser-pick-failed = Couldn't add these tracks to the library
+source-browser-sync-failed = Couldn't sync { $title }
+source-browser-sync = Keep in the library
+source-browser-members = { $count ->
+    [one] { $count } track
+   *[other] { $count } tracks
+}
+source-browser-play = Play
+source-browser-play-count = Play { $count } Tracks

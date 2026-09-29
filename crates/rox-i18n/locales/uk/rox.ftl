@@ -4020,3 +4020,27 @@ milkdrop-unfavorite = Прибрати з обраного
 milkdrop-reveal-folder = Показати теку
 milkdrop-show-controls = Показувати керування
     .description = Назад, Далі, Випадковий і зірка обраного поверх візуалізації, поки вказівник на панелі
+
+## Source browser
+
+panel-catalog-source-browser = Зовнішні джерела
+panel-title-source-browser = Зовнішні джерела
+source-browser-title = Зовнішні джерела
+source-browser-search = Пошук
+source-browser-home = Головна
+source-browser-results = Результати за запитом { $query }
+source-browser-empty = Тут нічого немає
+source-browser-pick = Виберіть джерело
+source-browser-no-sources = Жодне джерело-плагін не запущене.
+source-browser-failed = { $source } не відповів
+source-browser-pick-failed = Не вдалося додати ці треки до медіатеки
+source-browser-sync-failed = Не вдалося синхронізувати { $title }
+source-browser-sync = Зберігати в медіатеці
+source-browser-members = { $count ->
+    [one] { $count } трек
+    [few] { $count } треки
+    [many] { $count } треків
+   *[other] { $count } треку
+}
+source-browser-play = Відтворити
+source-browser-play-count = Відтворити треки: { $count }

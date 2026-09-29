@@ -3815,3 +3815,24 @@ milkdrop-unfavorite = 取消收藏
 milkdrop-reveal-folder = 显示文件夹
 milkdrop-show-controls = 显示控件
     .description = 指针在面板上时，在视觉效果上显示上一个、下一个、随机和收藏星标
+
+## Source browser
+
+panel-catalog-source-browser = 外部来源
+panel-title-source-browser = 外部来源
+source-browser-title = 外部来源
+source-browser-search = 搜索
+source-browser-home = 首页
+source-browser-results = { $query } 的搜索结果
+source-browser-empty = 这里什么都没有
+source-browser-pick = 选择来源
+source-browser-no-sources = 没有正在运行的插件来源。
+source-browser-failed = { $source } 没有应答
+source-browser-pick-failed = 无法把这些曲目加入媒体库
+source-browser-sync-failed = 无法同步 { $title }
+source-browser-sync = 保留在媒体库中
+source-browser-members = { $count ->
+   *[other] { $count } 首曲目
+}
+source-browser-play = 播放
+source-browser-play-count = 播放 { $count } 首曲目

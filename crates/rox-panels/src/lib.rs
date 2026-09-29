@@ -31,6 +31,7 @@ pub mod playlists;
 pub mod queue;
 pub mod search;
 pub mod shader;
+pub mod source_browser;
 pub mod spacer;
 pub mod spectrogram;
 pub mod spectrum;

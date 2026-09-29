@@ -3816,3 +3816,24 @@ milkdrop-unfavorite = お気に入りから外す
 milkdrop-reveal-folder = フォルダーを表示
 milkdrop-show-controls = コントロールを表示
     .description = ポインターがパネル上にある間、ビジュアルの上に前へ、次へ、ランダム、お気に入りの星を出す
+
+## Source browser
+
+panel-catalog-source-browser = 外部ソース
+panel-title-source-browser = 外部ソース
+source-browser-title = 外部ソース
+source-browser-search = 検索
+source-browser-home = ホーム
+source-browser-results = { $query } の検索結果
+source-browser-empty = 何もありません
+source-browser-pick = ソースを選択
+source-browser-no-sources = 動作中のプラグインソースはありません。
+source-browser-failed = { $source } から応答がありません
+source-browser-pick-failed = これらの曲をライブラリに追加できませんでした
+source-browser-sync-failed = { $title } を同期できませんでした
+source-browser-sync = ライブラリに保持
+source-browser-members = { $count ->
+   *[other] { $count } 曲
+}
+source-browser-play = 再生
+source-browser-play-count = { $count } 曲を再生

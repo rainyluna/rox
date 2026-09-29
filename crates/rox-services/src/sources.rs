@@ -721,23 +721,50 @@ fn fetch_cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
             rox_library::thumbs::store_bytes(&thumbs, &bytes, key)
         }
 
-        // Keyed with the source, since two plugins can hand out the same key.
-        // Subsonic's thumbs keep the bare key so the stored ones stay valid.
-        Origin::Plugin => {
-            let thumb = format!("{source}|{key}");
-
-            if let Some(stored) = rox_library::thumbs::thumbnail(thumbs, Path::new(&thumb)) {
-                return Some(stored);
-            }
-
-            let bytes = crate::plugins::cover(&source, key)?;
-            let thumbs = thumbs.lock().ok()?;
-
-            rox_library::thumbs::store_bytes(&thumbs, &bytes, &thumb)
-        }
+        Origin::Plugin => plugin_thumb(thumbs, &source, key),
 
         Origin::Local | Origin::Radio => None,
     }
+}
+
+/// Keyed with the source, since two plugins can hand out the same key.
+/// Subsonic's thumbs keep the bare key so the stored ones stay valid.
+fn plugin_thumb(thumbs: &Mutex<Connection>, source: &str, key: &str) -> Option<Vec<u8>> {
+    let thumb = plugin_thumb_key(source, key);
+
+    if let Some(stored) = rox_library::thumbs::thumbnail(thumbs, Path::new(&thumb)) {
+        return Some(stored);
+    }
+
+    let bytes = crate::plugins::cover(source, key)?;
+    let thumbs = thumbs.lock().ok()?;
+
+    rox_library::thumbs::store_bytes(&thumbs, &bytes, &thumb)
+}
+
+pub fn plugin_thumb_key(source: &str, key: &str) -> String {
+    format!("{source}|{key}")
+}
+
+/// A plugin track's cover whether or not it's a library row: the source
+/// browser lists tracks long before any of them is picked. Blocking.
+pub fn plugin_cover(thumbs: &Mutex<Connection>, source: &str, key: &str) -> Option<Vec<u8>> {
+    let thumb = plugin_thumb_key(source, key);
+    let now = Instant::now();
+    if MISSES.lock().ok()?.recent(&thumb, now) {
+        return None;
+    }
+
+    let found = plugin_thumb(thumbs, source, key);
+
+    if let Ok(mut misses) = MISSES.lock() {
+        match found {
+            Some(_) => misses.forget(&thumb),
+            None => misses.note(&thumb, now),
+        }
+    }
+
+    found
 }
 
 /// In memory only: a stored miss would outlive the outage that caused it.

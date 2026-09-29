@@ -3946,3 +3946,25 @@ milkdrop-unfavorite = Aus Favoriten entfernen
 milkdrop-reveal-folder = Ordner anzeigen
 milkdrop-show-controls = Steuerung anzeigen
     .description = Zurück, Weiter, Zufall und der Favoritenstern über der Visualisierung, solange der Zeiger auf dem Panel liegt
+
+## Source browser
+
+panel-catalog-source-browser = Externe Quellen
+panel-title-source-browser = Externe Quellen
+source-browser-title = Externe Quellen
+source-browser-search = Suchen
+source-browser-home = Start
+source-browser-results = Ergebnisse für { $query }
+source-browser-empty = Hier ist nichts
+source-browser-pick = Quelle wählen
+source-browser-no-sources = Keine Plugin-Quelle läuft.
+source-browser-failed = { $source } hat nicht geantwortet
+source-browser-pick-failed = Die Titel konnten nicht zur Bibliothek hinzugefügt werden
+source-browser-sync-failed = { $title } konnte nicht synchronisiert werden
+source-browser-sync = In der Bibliothek behalten
+source-browser-members = { $count ->
+    [one] { $count } Titel
+   *[other] { $count } Titel
+}
+source-browser-play = Abspielen
+source-browser-play-count = { $count } Titel abspielen

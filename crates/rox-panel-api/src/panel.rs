@@ -631,14 +631,38 @@ pub fn playlist_item(
     window: &mut Window,
     cx: &mut App,
 ) -> PopupMenu {
+    let with_ids: WithIds = Rc::new(move |then: Then, cx: &mut App| then(ids.clone(), cx));
+
+    playlist_item_deferred(menu, state, with_ids, window, cx)
+}
+
+/// Hands a menu action its ids once they exist: a plugin's browsed tracks
+/// only become rows when the click picks them.
+pub type WithIds = Rc<dyn Fn(Then, &mut App)>;
+
+/// What a [`WithIds`] hands the ids to.
+pub type Then = Box<dyn FnOnce(Vec<i64>, &mut App)>;
+
+/// [`playlist_item`] for tracks that aren't rows yet when the menu opens.
+pub fn playlist_item_deferred(
+    menu: PopupMenu,
+    state: AppState,
+    with_ids: WithIds,
+    window: &mut Window,
+    cx: &mut App,
+) -> PopupMenu {
     let submenu = PopupMenu::build(window, cx, move |mut submenu, _window, cx| {
         let new_state = state.clone();
-        let new_ids = ids.clone();
+        let new_ids = with_ids.clone();
         submenu = submenu.item(
             PopupMenuItem::new(rox_i18n::t!("panel-new-playlist"))
                 .icon(Icon::default().path(icons::PLUS))
                 .on_click(move |_, _, cx| {
-                    crate::openers::playlist_create(new_state.clone(), new_ids.clone(), cx);
+                    let state = new_state.clone();
+                    new_ids(
+                        Box::new(move |ids, cx| crate::openers::playlist_create(state, ids, cx)),
+                        cx,
+                    );
                 }),
         );
         // Static lists only: a smart playlist holds what its query returns.
@@ -654,14 +678,19 @@ pub fn playlist_item(
         }
         for playlist in playlists {
             let add_state = state.clone();
-            let add_ids = ids.clone();
+            let add_ids = with_ids.clone();
             let id = playlist.id;
             submenu = submenu.item(
                 PopupMenuItem::new(SharedString::from(playlist.name)).on_click(move |_, _, cx| {
-                    let add_ids = add_ids.clone();
-                    add_state.library.update(cx, |library, cx| {
-                        library.add_to_playlist(id, &add_ids, cx);
-                    });
+                    let state = add_state.clone();
+                    add_ids(
+                        Box::new(move |ids, cx| {
+                            state.library.update(cx, |library, cx| {
+                                library.add_to_playlist(id, &ids, cx);
+                            });
+                        }),
+                        cx,
+                    );
                 }),
             );
         }

@@ -81,6 +81,7 @@ use rox_panels::playlists::PlaylistsPanel;
 use rox_panels::queue::QueuePanel;
 use rox_panels::search::{SearchConfig, SearchPanel};
 use rox_panels::shader::ShaderPanel;
+use rox_panels::source_browser::SourceBrowserPanel;
 use rox_panels::spacer::SpacerPanel;
 use rox_panels::spectrogram::SpectrogramPanel;
 use rox_panels::spectrum::SpectrumPanel;
@@ -1967,6 +1968,7 @@ fn register_panels(state: &AppState, workspace: WeakEntity<Workspace>, cx: &mut 
     configured!("bookmarks", BookmarksPanel);
     // The stations panel builds its add-row inputs, so it takes a window.
     configured_windowed!("stations", StationsPanel);
+    configured_windowed!("source browser", SourceBrowserPanel);
     configured_windowed!("queue", QueuePanel);
     configured!("queue widget", QueueWidgetPanel);
     configured!("custom controls", ControlsPanel);

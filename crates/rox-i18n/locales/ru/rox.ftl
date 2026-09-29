@@ -3998,3 +3998,27 @@ milkdrop-unfavorite = Убрать из избранного
 milkdrop-reveal-folder = Показать папку
 milkdrop-show-controls = Показывать управление
     .description = Назад, Вперёд, Случайный и звезда избранного поверх визуализации, пока указатель на панели
+
+## Source browser
+
+panel-catalog-source-browser = Внешние источники
+panel-title-source-browser = Внешние источники
+source-browser-title = Внешние источники
+source-browser-search = Поиск
+source-browser-home = Главная
+source-browser-results = Результаты по запросу { $query }
+source-browser-empty = Здесь ничего нет
+source-browser-pick = Выберите источник
+source-browser-no-sources = Ни один источник-плагин не запущен.
+source-browser-failed = { $source } не ответил
+source-browser-pick-failed = Не удалось добавить эти треки в медиатеку
+source-browser-sync-failed = Не удалось синхронизировать { $title }
+source-browser-sync = Хранить в медиатеке
+source-browser-members = { $count ->
+    [one] { $count } трек
+    [few] { $count } трека
+    [many] { $count } треков
+   *[other] { $count } трека
+}
+source-browser-play = Воспроизвести
+source-browser-play-count = Воспроизвести треки: { $count }
