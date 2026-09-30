@@ -1,0 +1,25 @@
+{
+  "id": "internet-archive",
+  "name": "Internet Archive",
+  "version": "0.1.0",
+  "api": 1,
+  "entry": {
+    "script": { "path": "archive.py", "interpreter": "python3" }
+  },
+  "meta": {
+    "author": "rox",
+    "description": "An example source plugin that uses every optional part of the protocol. It browses and plays the Creative Commons and public domain releases in the Internet Archive's netlabels collection.",
+    "website": "https://github.com/zealsprince/rox",
+    "license": "AGPL-3.0-only"
+  },
+  "capabilities": {
+    "source": {
+      "label": "Internet Archive",
+      "scrobble": false,
+      "icon": "icon.svg",
+      "radio": true,
+      "links": true
+    }
+  },
+  "programs": []
+}

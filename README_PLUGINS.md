@@ -5,9 +5,12 @@ syncs and plays it through a program the plugin supplies. The plugin is a folder
 holding a manifest and that program. rox starts the program as a subprocess and
 speaks newline-delimited JSON-RPC 2.0 with it over stdin and stdout.
 
-rox doesn't ship plugins for any service. [`examples/plugins/tones`](examples/plugins/tones/)
-is a working source to copy: it generates sine tones and chords, so it needs no
-network and nothing beyond Python 3's standard library.
+rox doesn't ship plugins for streaming services. Two examples are there to copy, both on
+nothing beyond Python 3's standard library. [`examples/plugins/tones`](examples/plugins/tones/)
+generates sine tones and chords, so it needs no network, and it's the place to start.
+[`examples/plugins/internet-archive`](examples/plugins/internet-archive/) browses the
+Internet Archive's freely licensed netlabel releases and uses every optional part of the
+protocol.
 
 This guide covers plugin API version 1, the only one the host supports.
 
