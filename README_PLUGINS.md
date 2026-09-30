@@ -54,6 +54,9 @@ Some things about the hash matter when you write a plugin:
   writes them. `__pycache__` is hashed, because Python would run a planted `.pyc`.
   rox sets `PYTHONDONTWRITEBYTECODE=1` for every plugin so a Python plugin's first
   import doesn't write one.
+- A program the plugin ships under `bin/` is hashed like every other file. Replacing
+  one there switches the plugin off until it's approved again, the same as editing
+  the script or manifest.
 
 The gate doesn't defend against other software on the machine: anything that can
 write the plugins folder can write rox's settings too. It makes sure nothing runs
@@ -116,13 +119,22 @@ match the folder's name is refused.
 | `meta`                | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
 | `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false.                                                   |
 | `capabilities.panels` | Extra panels listed under the plugin in Add Panel. Optional. See [Panels](#panels).                              |
-| `programs`            | Programs the plugin runs, by name. The page reports each as found on PATH or missing. rox doesn't enforce the list. |
+| `programs`            | Programs the plugin runs, by name. The page checks the plugin's own `bin/` folder, then Program Folders, then PATH, and reports each name as found or missing. rox doesn't enforce the list. |
 | `config_schema`       | JSON Schema for the plugin's settings.                                                                           |
 
-A script entry runs `<interpreter> <path>` from inside the plugin folder. `python3`
-tries `python3`, then `python`, then `py -3` on Windows. `node` tries `node`. Any other
-name is looked up on PATH as written, with Windows' executable extensions tried after
-the bare name. The path has to be a plain relative path to a file in the folder.
+A script entry runs `<interpreter> <path>` from inside the plugin folder. Every
+program name, the interpreter included, is looked up in the plugin's own `bin/`
+folder first, then the folders in Program Folders (Settings > Plugins, and beside
+Convert's ffmpeg row on the Integrations page), then PATH.
+
+On Windows, `python3` tries `py -3`, then `python3`, then `python`. Elsewhere it tries
+`python3`, then `python`.
+rox runs each candidate with `--version` and keeps it only if it prints a Python 3
+line within a few seconds, which skips the Microsoft Store's placeholder and rules
+out a `python` that's actually Python 2. `node` tries `node` with no version check.
+Any other name is looked up as written, with Windows' executable extensions tried
+after the bare name. The path has to be a plain relative path to a file in the
+folder.
 
 A native entry names a binary per platform, keyed `<os>-<arch>` with Rust's names
 (`linux`, `windows`, `macos`; `x86_64`, `aarch64`):
@@ -168,6 +180,9 @@ object per line, UTF-8, each line at most 1 MiB. Every request has an `id`, and 
 answer echoes it with either `result` or `error: {"code": n, "message": ".."}`.
 `jsonrpc` is optional on answers and has to be `"2.0"` when present. `"result": null`
 is a valid answer.
+
+A plugin has to write UTF-8 and flush stdout after every line it writes, whatever
+language it's in. An answer left in a buffer never arrives, and its call times out.
 
 rox can have many requests in flight, and a plugin may answer them in any order. A
 plugin that answers one at a time works, but its own playback then waits behind its
@@ -458,8 +473,18 @@ plugin only fills them.
 
 A plugin gets one process, started by the first call that needs it. Switching a plugin
 on syncs its kept collections, so it starts right away. The process runs in the
-plugin's folder with rox's environment (PATH, HOME and the rest) plus
-`PYTHONDONTWRITEBYTECODE=1`.
+plugin's folder with rox's environment (HOME and the rest), except PATH: that's the
+plugin's own `bin/` folder, then Program Folders, then rox's own PATH, joined the way
+the OS joins one (`:` on Linux and macOS, `;` on Windows). A program the Plugins page
+found is the same file the plugin's own PATH resolves to. Changing Program Folders
+rescans every plugin's `programs` row; a plugin already running keeps its old PATH
+until it next restarts.
+
+rox also sets `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1` and `PYTHONUTF8=1` for
+every plugin. The last two only help a Python plugin, and only cover what rox itself
+starts: running a script by hand, the way [Trying a plugin without
+rox](#trying-a-plugin-without-rox) does, doesn't set them, so a script still has to
+flush after every line and write UTF-8 on its own.
 
 When the plugin exits unexpectedly, every call it had in flight fails, and the next
 call starts it again after 0, 1, 2 or 4 seconds for the first through fourth crash
@@ -476,6 +501,25 @@ whole group, so programs it started go with it. A child that moves itself to ano
 group escapes, as it would from a shell. On Windows the plugin starts with no console
 window and goes into a job object, and stopping it ends everything in the job. A
 grandchild started in the instant between the spawn and the job assignment can escape.
+
+## Platforms
+
+The Flatpak build runs plugins inside rox's own sandbox, which can't see programs on
+the host. The Flatpak runtime includes Python 3, so a script plugin that only needs
+the standard library runs as is. Anything else has to ship under the plugin's own
+`bin/`: a Python zipapp runs through that same Python, and a native Linux binary
+needs its executable bit set before it's dropped in. Program Folders only helps with
+directories the sandbox can already see.
+
+A macOS app launched from Finder or the Dock doesn't inherit a shell's PATH, so
+Homebrew's folders are usually missing from it. Add them to Program Folders. Plugins
+and Convert both search it.
+
+Script plugins need Python installed on the machine running them. Most Linux
+installs already have it. Windows and macOS usually don't.
+
+On Windows, a native plugin's own files can't be replaced or deleted while it's
+running. Switch it off on the Plugins page before updating its folder.
 
 ## Timeouts and caps
 
@@ -532,8 +576,9 @@ tones folder:
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{},"data_dir":"/tmp/tones","platform":"linux-x86_64"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"source.browse","params":{"node":null,"cursor":null}}' \
-  | python3 -B tones.py
+  | python3 -B -u tones.py
 ```
 
 `-B` keeps Python from writing `__pycache__` into the folder, which would change its
-hash.
+hash. `-u` (or `PYTHONUNBUFFERED=1`) flushes stdout after every line. rox sets it for a plugin
+it starts, and a shell doesn't. Without it, answers show up only when the process exits.

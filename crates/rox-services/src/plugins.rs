@@ -509,13 +509,18 @@ fn live_moved() -> bool {
 }
 
 /// Scans the plugins folder off the UI thread, then applies whatever moved.
+/// It probes interpreters afresh, so only the page's Rescan and a Program
+/// Folders edit call it, never the folder watch.
 pub fn rescan(cx: &mut App) {
     let dir = settings::plugins_dir();
 
     cx.spawn(async move |cx| {
         let found = cx
             .background_executor()
-            .spawn(async move { loader::scan(&dir) })
+            .spawn(async move {
+                rox_plugins::manifest::forget_probes();
+                loader::scan(&dir)
+            })
             .await;
 
         let moved = match FOLDERS.write() {

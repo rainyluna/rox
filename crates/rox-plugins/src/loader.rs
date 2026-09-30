@@ -30,7 +30,8 @@ pub struct Loaded {
     pub document: serde_json::Value,
     /// Empty when the folder couldn't be hashed.
     pub hash: String,
-    /// Each program the manifest lists, and whether it's on PATH.
+    /// Each program the manifest lists, and whether it's on the plugin's
+    /// search path.
     pub programs: Vec<(String, bool)>,
     /// Why this folder can't run, if it can't.
     pub error: Option<String>,
@@ -98,7 +99,7 @@ fn load(id: String, dir: PathBuf) -> Loaded {
     let programs = manifest
         .programs
         .iter()
-        .map(|program| (program.clone(), manifest::program_found(program)))
+        .map(|program| (program.clone(), manifest::program_found(program, &dir)))
         .collect();
 
     let (hash, hash_error) = match hash::folder_hash(&dir) {
@@ -274,6 +275,19 @@ mod tests {
         );
         assert_eq!(tones.document["name"], "Tones");
         assert_eq!(tones.programs, vec![("rox-no-such-program".into(), false)]);
+    }
+
+    #[test]
+    fn a_program_the_plugin_ships_counts_as_found() {
+        let scratch = Scratch::new("shipped");
+        scratch.plugin("tones");
+        scratch.write("tones/bin/rox-no-such-program", "binary");
+
+        let found = scan(&scratch.0);
+        assert_eq!(
+            found[0].programs,
+            vec![("rox-no-such-program".into(), true)]
+        );
     }
 
     #[test]

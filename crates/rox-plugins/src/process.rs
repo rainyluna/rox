@@ -12,9 +12,11 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::search;
+
 /// Without it every plugin start pops a console window.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Longest stderr line kept; the rest of the line is dropped.
 const STDERR_LINE: usize = 4096;
@@ -31,17 +33,23 @@ pub struct Pipes {
 }
 
 /// Starts `command` in the plugin folder with its pipes attached. The
-/// plugin inherits rox's environment (PATH to find its own programs, HOME
-/// for their caches), plus the one variable the folder hash needs.
+/// plugin inherits rox's environment (HOME for its programs' caches) with
+/// PATH replaced by the plugin's search path, so what it runs resolves the
+/// way the Plugins page reported it, plus three variables for Python.
 pub fn spawn(id: &str, mut command: Command, dir: &Path) -> Result<(Process, Pipes), String> {
     command
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env("PATH", search::search_path(Some(dir)))
         // A Python plugin's first import would write `__pycache__` into its
         // own folder and change its own hash.
-        .env("PYTHONDONTWRITEBYTECODE", "1");
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        // A piped stdout is block-buffered, so answers would sit unsent.
+        .env("PYTHONUNBUFFERED", "1")
+        // Windows reads piped text in the ANSI code page, not UTF-8.
+        .env("PYTHONUTF8", "1");
 
     #[cfg(unix)]
     {
@@ -313,5 +321,30 @@ mod tests {
             lines(b"abcdefghij\nok\n", 4),
             vec![("abcd".into(), true), ("ok".into(), false)]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plugin_gets_the_python_variables_and_its_bin_first_on_path() {
+        let dir = std::env::temp_dir().join(format!("rox-plugins-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(r#"printf '%s\n%s\n%s\n' "$PYTHONUNBUFFERED" "$PYTHONUTF8" "$PATH""#);
+        let (mut process, pipes) = spawn("env", command, &dir).unwrap();
+
+        let mut out = String::new();
+        let mut stdout = pipes.stdout;
+        stdout.read_to_string(&mut out).unwrap();
+        process.wait_for(Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[..2], ["1", "1"], "{out}");
+
+        let first = std::env::split_paths(lines[2]).next();
+        assert_eq!(first, Some(dir.join("bin")), "{out}");
     }
 }

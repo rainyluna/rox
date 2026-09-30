@@ -45,6 +45,81 @@ pub(super) struct PluginsPage {
     config_dirty: bool,
 }
 
+/// Search terms for the Program Folders row on both pages it sits on.
+pub(super) const PROGRAM_FOLDERS_KEYWORDS: &[&str] = &[
+    "program", "folder", "path", "homebrew", "bin", "ffmpeg", "python", "plugin",
+];
+
+/// The Program Folders field, on this page and beside Convert's ffmpeg row.
+/// One input per page, since search shows both rows at once and an input
+/// drawn twice keeps only the last one's layout for clicks.
+pub(super) struct ProgramFolders {
+    pub(super) plugins: Entity<InputState>,
+    pub(super) convert: Entity<InputState>,
+    /// Edited since the plugins folder was last rescanned for it.
+    dirty: bool,
+    _changes: [Subscription; 2],
+}
+
+impl ProgramFolders {
+    pub(super) fn new(
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> ProgramFolders {
+        let plugins = cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()));
+        let convert = cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()));
+
+        let _changes = [
+            Self::follow(&plugins, convert.clone(), window, cx),
+            Self::follow(&convert, plugins.clone(), window, cx),
+        ];
+
+        ProgramFolders {
+            plugins,
+            convert,
+            dirty: false,
+            _changes,
+        }
+    }
+
+    /// Every keystroke saves and reaches the program lookup, which is cheap.
+    /// The rescan hashes every plugin folder, so it waits for the edit to end.
+    fn follow(
+        input: &Entity<InputState>,
+        twin: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            input,
+            window,
+            move |this: &mut SettingsWindow, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let text = input.read(cx).value().to_string();
+
+                    // `set_value` is silent, so the twin doesn't echo back.
+                    if twin.read(cx).value().as_ref() != text.as_str() {
+                        twin.update(cx, |twin, cx| twin.set_value(text.clone(), window, cx));
+                    }
+
+                    rox_plugins::search::set_extra_dirs(settings::split_folders(&text));
+                    Settings::update(move |s| s.program_folders = text);
+                    this.program_folders.dirty = true;
+                    this.ffmpeg_test = None;
+                    cx.notify();
+                }
+
+                InputEvent::Blur | InputEvent::PressEnter { .. } => {
+                    this.commit_program_folders(cx);
+                }
+
+                _ => {}
+            },
+        )
+    }
+}
+
 pub(super) struct ConfigInput {
     input: Entity<InputState>,
     _changes: Subscription,
@@ -399,6 +474,15 @@ impl SettingsWindow {
         }
     }
 
+    /// Rescans so each plugin's Needs line follows the folders. Running
+    /// plugins keep the PATH they started with. Also run when the page is
+    /// left or the window closes.
+    pub(super) fn commit_program_folders(&mut self, cx: &mut App) {
+        if std::mem::take(&mut self.program_folders.dirty) {
+            host::rescan(cx);
+        }
+    }
+
     /// Restarts any host whose config moved. Also run when the page is left
     /// or the window closes, since those end an edit without a blur.
     pub(super) fn commit_plugin_config(&mut self, cx: &mut App) {
@@ -610,8 +694,13 @@ impl SettingsWindow {
                     panel::toggle(self.plugins_enabled, Self::set_plugins_enabled, cx),
                 )
                 .when(self.plugins_enabled, |rows| {
-                    rows.custom(&keywords, || intro.into_any_element())
-                        .custom(&keywords, || table.into_any_element())
+                    rows.keyed(
+                        "settings-common-program-folders",
+                        PROGRAM_FOLDERS_KEYWORDS,
+                        Input::new(&self.program_folders.plugins).w(px(240.)),
+                    )
+                    .custom(&keywords, || intro.into_any_element())
+                    .custom(&keywords, || table.into_any_element())
                 })
             },
         ))

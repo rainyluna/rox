@@ -620,8 +620,8 @@ mod tests {
         params.apply_graphic_curve(&gains);
         assert_eq!(params.freq(0), BAND_HZ[0]);
         assert_eq!(params.q(0), Q_DEFAULT);
-        for band in 0..BANDS {
-            assert_eq!(params.gain(band), gains[band]);
+        for (band, &gain) in gains.iter().enumerate() {
+            assert_eq!(params.gain(band), gain);
         }
     }
 }

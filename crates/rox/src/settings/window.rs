@@ -390,8 +390,9 @@ struct SettingsWindow {
     /// Holds the Add button: a second press would add the station twice.
     station_probing: bool,
     ffmpeg_path: Entity<InputState>,
-    /// Cleared by an edit to the path.
+    /// Cleared by an edit to the path or the program folders.
     ffmpeg_test: Option<Result<String, String>>,
+    program_folders: plugins_page::ProgramFolders,
     /// CJK text this machine's fonts can only draw through the slow fallback
     /// (see [`crate::cjk_fonts`]). Checked once at open, off the UI thread.
     cjk_fonts_missing: bool,
@@ -841,6 +842,8 @@ impl SettingsWindow {
                 cx.notify();
             }
         });
+        let program_folders =
+            plugins_page::ProgramFolders::new(&settings.program_folders, window, cx);
         // Plus a reload, so the card on someone else's screen follows the
         // typing.
         let discord_first_line = cx.new(|cx| {
@@ -1087,6 +1090,7 @@ impl SettingsWindow {
             station_probing: false,
             ffmpeg_path,
             ffmpeg_test: None,
+            program_folders,
             cjk_fonts_missing: false,
             threshold_scrub: ScrubState::default(),
             storage: None,
@@ -1207,6 +1211,7 @@ impl SettingsWindow {
     fn flush_pending_edits(&mut self, this: WeakEntity<Self>, cx: &mut App) -> Task<()> {
         self.broadcast_moved();
         self.commit_plugin_config(cx);
+        self.commit_program_folders(cx);
 
         self.subsonic_commit(this, cx).unwrap_or(Task::ready(()))
     }

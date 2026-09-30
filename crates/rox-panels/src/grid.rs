@@ -2749,17 +2749,21 @@ mod tests {
 
     #[test]
     fn caption_height_disabled_when_labels_off() {
-        let mut config = GridConfig::default();
-        config.labels = false;
-        config.label_artist = true;
-        config.label_genre = true;
+        let config = GridConfig {
+            labels: false,
+            label_artist: true,
+            label_genre: true,
+            ..Default::default()
+        };
         assert_eq!(config.caption_height(), 0.);
     }
 
     #[test]
     fn caption_height_default_matches_legacy_tile_label_h() {
-        let mut config = GridConfig::default();
-        config.labels = true;
+        let config = GridConfig {
+            labels: true,
+            ..Default::default()
+        };
         // Default has only label_artist on: 24. + 16. = 40.
         assert_eq!(config.caption_height(), 40.);
         assert_eq!(config.caption_height(), rox_panel_kit::wall::TILE_LABEL_H);
@@ -2767,9 +2771,11 @@ mod tests {
 
     #[test]
     fn caption_height_scales_with_active_fields() {
-        let mut config = GridConfig::default();
-        config.labels = true;
-        config.label_artist = false;
+        let mut config = GridConfig {
+            labels: true,
+            label_artist: false,
+            ..Default::default()
+        };
         assert_eq!(config.caption_height(), CAPTION_HEADER_H);
 
         for (i, field) in METADATA_FIELDS.iter().enumerate() {

@@ -5,14 +5,18 @@
 //! field added there later stays additive for plugins built against it.
 //!
 //! The entry resolves to a [`Command`] and nothing else. The paths it names
-//! stay inside the plugin folder; an interpreter comes off PATH through a
-//! fixed alias table.
+//! stay inside the plugin folder; an interpreter comes off the search path
+//! ([`crate::search`]) through a fixed alias table. A `python3` candidate
+//! only counts once it answers `--version` as Python 3.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -36,7 +40,8 @@ pub struct Manifest {
     pub meta: Meta,
     #[serde(default)]
     pub capabilities: Capabilities,
-    /// Shown to the user as found or missing on PATH; rox enforces nothing.
+    /// Shown to the user as found or missing on the search path; rox
+    /// enforces nothing.
     #[serde(default)]
     pub programs: Vec<String>,
     #[serde(default)]
@@ -214,20 +219,24 @@ pub fn platform() -> String {
 /// with the script as its first argument. Nothing about cwd, pipes or
 /// environment; the process module sets those.
 pub fn entry_for(manifest: &Manifest, dir: &Path) -> Result<Command, String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    entry_with(manifest, dir, &platform(), &path)
+    let path = crate::search::search_path(Some(dir));
+    entry_with(manifest, dir, &platform(), &path, &probed)
 }
+
+/// Whether a candidate interpreter, run with its args, is the one it claims.
+type Probe<'a> = &'a dyn Fn(&Path, &[&str]) -> bool;
 
 fn entry_with(
     manifest: &Manifest,
     dir: &Path,
     platform: &str,
     path_var: &OsStr,
+    probe: Probe,
 ) -> Result<Command, String> {
     match &manifest.entry {
         Entry::Script(script) => {
             let file = inside(dir, &script.path)?;
-            let (program, args) = interpreter(&script.interpreter, path_var)
+            let (program, args) = interpreter(&script.interpreter, path_var, probe)
                 .ok_or_else(|| format!("interpreter {} not found", script.interpreter))?;
 
             let mut command = Command::new(program);
@@ -268,12 +277,14 @@ fn inside(dir: &Path, rel: &str) -> Result<PathBuf, String> {
 /// up as written.
 fn aliases(name: &str) -> Vec<(&str, &'static [&'static str])> {
     match name {
+        // The py launcher first on Windows: `python3` and `python` there are
+        // often the Store stub, and `python` can be Python 2 anywhere.
         "python3" => {
-            let mut tries: Vec<(&str, &'static [&'static str])> =
-                vec![("python3", &[]), ("python", &[])];
+            let mut tries: Vec<(&str, &'static [&'static str])> = Vec::new();
             if cfg!(windows) {
                 tries.push(("py", &["-3"]));
             }
+            tries.extend([("python3", &[] as &[&str]), ("python", &[])]);
 
             tries
         }
@@ -284,17 +295,133 @@ fn aliases(name: &str) -> Vec<(&str, &'static [&'static str])> {
     }
 }
 
-/// Whether a program the manifest lists is on PATH. Information for the
-/// Plugins page; nothing is enforced with it.
-pub fn program_found(program: &str) -> bool {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    on_path(program, &path).is_some()
+/// A program's full path, looked up the way a plugin's PATH is built: the
+/// plugin's `bin/` when there's a plugin, the user's extra folders, then PATH.
+pub fn find_program(program: &str, plugin_dir: Option<&Path>) -> Option<PathBuf> {
+    on_path(program, &crate::search::search_path(plugin_dir))
 }
 
-fn interpreter(name: &str, path_var: &OsStr) -> Option<(PathBuf, Vec<&'static str>)> {
-    aliases(name)
-        .into_iter()
-        .find_map(|(program, args)| on_path(program, path_var).map(|found| (found, args.to_vec())))
+/// Whether a program the manifest lists is on the plugin's search path.
+/// Information for the Plugins page; nothing is enforced with it.
+pub fn program_found(program: &str, plugin_dir: &Path) -> bool {
+    find_program(program, Some(plugin_dir)).is_some()
+}
+
+fn interpreter(name: &str, path_var: &OsStr, probe: Probe) -> Option<(PathBuf, Vec<&'static str>)> {
+    // Only the python3 aliases have known impostors (the Store stub, Python
+    // 2); anything else is taken as found.
+    let checked = name == "python3";
+
+    aliases(name).into_iter().find_map(|(program, args)| {
+        let found = on_path(program, path_var)?;
+        let usable = !checked || probe(&found, args);
+
+        usable.then(|| (found, args.to_vec()))
+    })
+}
+
+/// A hung candidate is as good as a missing one.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A candidate: the program found and the args it runs with.
+type Candidate = (PathBuf, Vec<String>);
+
+/// One probe per candidate per session.
+static PROBED: OnceLock<Mutex<HashMap<Candidate, bool>>> = OnceLock::new();
+
+/// Drops every remembered answer, so the next resolve probes again. The
+/// Plugins page's Rescan calls this, which is how a Python installed while
+/// rox runs gets found.
+pub fn forget_probes() {
+    if let Some(cache) = PROBED.get() {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// [`speaks_python3`], remembered.
+fn probed(program: &Path, args: &[&str]) -> bool {
+    let key: Candidate = (
+        program.to_path_buf(),
+        args.iter().map(|arg| arg.to_string()).collect(),
+    );
+    let cache = PROBED.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&known) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return known;
+    }
+
+    let answer = speaks_python3(program, args, PROBE_TIMEOUT);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, answer);
+
+    answer
+}
+
+/// Runs `<program> <args> --version` and wants a clean exit and a "Python 3"
+/// on stdout or stderr (Python 2 prints its version to stderr). That rules
+/// out the Store stub and a `python` that's Python 2.
+fn speaks_python3(program: &Path, args: &[&str], within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::process::CREATE_NO_WINDOW);
+    }
+
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+
+    // Read off-thread so a candidate that never closes its pipes can't hold
+    // the scan past the deadline.
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    };
+    let (sent, output) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let mut err = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        let _ = stderr.read_to_string(&mut err);
+        let _ = sent.send((out, err));
+    });
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let Ok((out, err)) = output.recv_timeout(remaining) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    };
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => break None,
+        }
+    };
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    };
+
+    let says = |text: &str| text.trim_start().starts_with("Python 3");
+    status.success() && (says(&out) || says(&err))
 }
 
 /// The first `PATH` entry holding `program`, trying Windows' executable
@@ -360,6 +487,10 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn accept(_: &Path, _: &[&str]) -> bool {
+        true
     }
 
     fn script_manifest(extra: &str) -> String {
@@ -482,10 +613,24 @@ mod tests {
         scratch.file("bin/a");
         let manifest = parse(&with_entry(r#"{ "native": { "linux-x86_64": "bin/a" } }"#)).unwrap();
 
-        let err = entry_with(&manifest, &scratch.0, "windows-x86_64", OsStr::new("")).unwrap_err();
+        let err = entry_with(
+            &manifest,
+            &scratch.0,
+            "windows-x86_64",
+            OsStr::new(""),
+            &accept,
+        )
+        .unwrap_err();
         assert_eq!(err, "no build for windows-x86_64");
 
-        let command = entry_with(&manifest, &scratch.0, "linux-x86_64", OsStr::new("")).unwrap();
+        let command = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            OsStr::new(""),
+            &accept,
+        )
+        .unwrap();
         assert_eq!(command.get_program(), scratch.0.join("bin/a").as_os_str());
     }
 
@@ -496,8 +641,14 @@ mod tests {
             let entry = format!(r#"{{ "native": {{ "linux-x86_64": {rel:?} }} }}"#);
             let manifest = parse(&with_entry(&entry)).unwrap();
 
-            let err =
-                entry_with(&manifest, &scratch.0, "linux-x86_64", OsStr::new("")).unwrap_err();
+            let err = entry_with(
+                &manifest,
+                &scratch.0,
+                "linux-x86_64",
+                OsStr::new(""),
+                &accept,
+            )
+            .unwrap_err();
             assert!(err.contains("leaves the plugin folder"), "{rel}: {err}");
         }
     }
@@ -511,14 +662,198 @@ mod tests {
         let manifest = parse(&script_manifest("")).unwrap();
 
         // No python3 on this PATH, so the table falls through to python.
-        let command = entry_with(&manifest, &scratch.0, "linux-x86_64", bin.as_os_str()).unwrap();
+        let command = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            bin.as_os_str(),
+            &accept,
+        )
+        .unwrap();
         assert_eq!(command.get_program(), python.as_os_str());
 
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, vec![scratch.0.join("tones.py").as_os_str()]);
 
-        let err = entry_with(&manifest, &scratch.0, "linux-x86_64", OsStr::new("")).unwrap_err();
+        let err = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            OsStr::new(""),
+            &accept,
+        )
+        .unwrap_err();
         assert_eq!(err, "interpreter python3 not found");
+    }
+
+    #[test]
+    fn python3_tries_the_launcher_first_on_windows() {
+        let names: Vec<&str> = aliases("python3").iter().map(|(name, _)| *name).collect();
+
+        match cfg!(windows) {
+            true => assert_eq!(names, ["py", "python3", "python"]),
+            false => assert_eq!(names, ["python3", "python"]),
+        }
+        assert_eq!(aliases("python3")[0].1.is_empty(), !cfg!(windows));
+    }
+
+    #[test]
+    fn a_candidate_the_probe_rejects_is_skipped() {
+        let scratch = Scratch::new("probe");
+        scratch.file("tones.py");
+        let bin = scratch.0.join("bin");
+        let python3 = scratch.file("bin/python3");
+        let python = scratch.file("bin/python");
+        let manifest = parse(&script_manifest("")).unwrap();
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let not_python3 = |program: &Path, _: &[&str]| {
+            asked.borrow_mut().push(program.to_path_buf());
+            program != python3
+        };
+
+        let command = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            bin.as_os_str(),
+            &not_python3,
+        )
+        .unwrap();
+        assert_eq!(command.get_program(), python.as_os_str());
+        assert_eq!(*asked.borrow(), [python3.clone(), python.clone()]);
+
+        let none = |_: &Path, _: &[&str]| false;
+        let err = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            bin.as_os_str(),
+            &none,
+        )
+        .unwrap_err();
+        assert_eq!(err, "interpreter python3 not found");
+    }
+
+    #[test]
+    fn other_interpreters_are_not_probed() {
+        let scratch = Scratch::new("node");
+        scratch.file("tones.py");
+        let node = scratch.file("bin/node");
+        let manifest = parse(
+            &script_manifest("").replace(r#""interpreter": "python3""#, r#""interpreter": "node""#),
+        )
+        .unwrap();
+
+        let refuse = |_: &Path, _: &[&str]| -> bool { panic!("node is never probed") };
+        let command = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            scratch.0.join("bin").as_os_str(),
+            &refuse,
+        )
+        .unwrap();
+        assert_eq!(command.get_program(), node.as_os_str());
+    }
+
+    #[test]
+    fn the_plugin_bin_comes_before_the_extra_folders() {
+        let scratch = Scratch::new("extras");
+        scratch.file("tones.py");
+        let extra = scratch.0.join("extra");
+        let from_extra = scratch.file("extra/python3");
+        let manifest = parse(&script_manifest("")).unwrap();
+
+        let path = crate::search::build(
+            Some(&scratch.0),
+            std::slice::from_ref(&extra),
+            OsStr::new(""),
+        );
+        let command = entry_with(&manifest, &scratch.0, "linux-x86_64", &path, &accept).unwrap();
+        assert_eq!(command.get_program(), from_extra.as_os_str());
+
+        let bundled = scratch.file("bin/python3");
+        let command = entry_with(&manifest, &scratch.0, "linux-x86_64", &path, &accept).unwrap();
+        assert_eq!(command.get_program(), bundled.as_os_str());
+    }
+
+    #[test]
+    fn a_program_in_the_plugin_bin_is_found() {
+        let scratch = Scratch::new("program");
+        let tool = scratch.file("bin/rox-plugins-test-only-tool");
+
+        assert_eq!(
+            find_program("rox-plugins-test-only-tool", Some(&scratch.0)),
+            Some(tool)
+        );
+        assert!(program_found("rox-plugins-test-only-tool", &scratch.0));
+        assert_eq!(find_program("rox-plugins-test-only-tool", None), None);
+    }
+
+    #[cfg(unix)]
+    fn script(scratch: &Scratch, rel: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = scratch.file(rel);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_wants_a_clean_python_3() {
+        let scratch = Scratch::new("real-probe");
+        let two = script(&scratch, "two/python", "echo 'Python 2.7.18' >&2");
+        let failing = script(&scratch, "failing/python", "echo 'Python 3.12.1'; exit 1");
+        let three = script(&scratch, "three/python", "echo 'Python 3.12.1'");
+        let hangs = script(&scratch, "hangs/python", "exec sleep 10");
+
+        let within = Duration::from_secs(5);
+        assert!(!speaks_python3(&two, &[], within), "Python 2");
+        assert!(!speaks_python3(&failing, &[], within), "a failed run");
+        assert!(speaks_python3(&three, &[], within));
+
+        let began = Instant::now();
+        assert!(!speaks_python3(&hangs, &[], Duration::from_millis(200)));
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "killed at the deadline"
+        );
+
+        // Through the cached probe: python3 here is Python 2, so python wins.
+        scratch.file("tones.py");
+        let bin = scratch.0.join("bin");
+        script(&scratch, "bin/python3", "echo 'Python 2.7.18' >&2");
+        let python = script(&scratch, "bin/python", "echo 'Python 3.12.1'");
+        let manifest = parse(&script_manifest("")).unwrap();
+
+        let command = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            bin.as_os_str(),
+            &probed,
+        )
+        .unwrap();
+        assert_eq!(command.get_program(), python.as_os_str());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_forgotten_probe_asks_again() {
+        let scratch = Scratch::new("forget-probe");
+        let python = script(&scratch, "python3", "echo 'Python 2.7.18' >&2");
+        assert!(!probed(&python, &[]));
+
+        // Python 3 installed at the same path while rox runs.
+        script(&scratch, "python3", "echo 'Python 3.12.1'");
+        assert!(!probed(&python, &[]), "remembered until forgotten");
+
+        forget_probes();
+        assert!(probed(&python, &[]));
     }
 
     fn with_panels(panels: &str) -> String {
@@ -619,7 +954,14 @@ mod tests {
         let scratch = Scratch::new("missing");
         let manifest = parse(&script_manifest("")).unwrap();
 
-        let err = entry_with(&manifest, &scratch.0, "linux-x86_64", OsStr::new("")).unwrap_err();
+        let err = entry_with(
+            &manifest,
+            &scratch.0,
+            "linux-x86_64",
+            OsStr::new(""),
+            &accept,
+        )
+        .unwrap_err();
         assert_eq!(err, "entry tones.py is missing");
     }
 }

@@ -1162,9 +1162,8 @@ mod tests {
 
         let mut buffered = 0usize;
         for tick in 1..=2000u64 {
-            if tick <= 16 {
-                tape.append(&bytes(4_000));
-            } else if tick % 25 == 0 {
+            // The 64 kB burst over the first 16 ticks, then 4 kB every 250 ms.
+            if tick <= 16 || tick % 25 == 0 {
                 tape.append(&bytes(4_000));
             }
 

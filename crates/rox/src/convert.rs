@@ -63,16 +63,20 @@ fn command(binary: &str) -> Command {
     command
 }
 
-/// The settings path, else `ffmpeg` in the data folder, else PATH. The data
-/// folder works on every channel: a Flatpak can't run the host's ffmpeg,
-/// but a static build dropped there runs.
+/// The settings path, else `ffmpeg` in the data folder, else the program
+/// folders and PATH. The data folder works on every channel: a Flatpak can't
+/// run the host's ffmpeg, but a static build dropped there runs.
 pub fn binary() -> String {
     let setting = Settings::load().convert.ffmpeg;
-    resolve(&setting, &rox_core::settings::data_dir())
+    resolve(&setting, &rox_core::settings::data_dir(), |program| {
+        rox_plugins::manifest::find_program(program, None)
+    })
 }
 
-/// Split out for tests. [`PROBED`] keys on the result, so a newly dropped build re-probes.
-fn resolve(setting: &str, data_dir: &Path) -> String {
+/// Split out for tests, with the program lookup passed in so they never read
+/// the process-wide program folders. [`PROBED`] keys on the result, so a
+/// newly dropped build or a changed folder list re-probes.
+fn resolve(setting: &str, data_dir: &Path, find: impl FnOnce(&str) -> Option<PathBuf>) -> String {
     let custom = setting.trim();
     if !custom.is_empty() {
         return custom.to_string();
@@ -84,7 +88,10 @@ fn resolve(setting: &str, data_dir: &Path) -> String {
         return dropped.to_string_lossy().into_owned();
     }
 
-    "ffmpeg".to_string()
+    match find("ffmpeg") {
+        Some(found) => found.to_string_lossy().into_owned(),
+        None => "ffmpeg".to_string(),
+    }
 }
 
 /// One spawn per binary per session, keyed so a changed setting re-probes.
@@ -960,13 +967,21 @@ mod tests {
         }
     }
 
+    fn none(_: &str) -> Option<PathBuf> {
+        None
+    }
+
+    fn unused(_: &str) -> Option<PathBuf> {
+        panic!("looked for ffmpeg past an earlier answer");
+    }
+
     #[test]
     fn a_set_path_wins_whatever_the_data_folder_holds() {
         let scratch = Scratch::new("set-path");
         std::fs::write(scratch.0.join("ffmpeg"), b"").unwrap();
 
         assert_eq!(
-            resolve("  /opt/ffmpeg/bin/ffmpeg ", &scratch.0),
+            resolve("  /opt/ffmpeg/bin/ffmpeg ", &scratch.0, unused),
             "/opt/ffmpeg/bin/ffmpeg"
         );
     }
@@ -975,8 +990,8 @@ mod tests {
     fn an_empty_setting_falls_to_path_when_the_data_folder_is_bare() {
         let scratch = Scratch::new("bare-folder");
 
-        assert_eq!(resolve("", &scratch.0), "ffmpeg");
-        assert_eq!(resolve("   ", &scratch.0), "ffmpeg");
+        assert_eq!(resolve("", &scratch.0, none), "ffmpeg");
+        assert_eq!(resolve("   ", &scratch.0, none), "ffmpeg");
     }
 
     #[test]
@@ -985,7 +1000,7 @@ mod tests {
         let dropped = scratch.0.join("ffmpeg");
         std::fs::write(&dropped, b"").unwrap();
 
-        assert_eq!(resolve("", &scratch.0), dropped.to_string_lossy());
+        assert_eq!(resolve("", &scratch.0, unused), dropped.to_string_lossy());
     }
 
     #[test]
@@ -993,7 +1008,20 @@ mod tests {
         let scratch = Scratch::new("folder-not-binary");
         std::fs::create_dir(scratch.0.join("ffmpeg")).unwrap();
 
-        assert_eq!(resolve("", &scratch.0), "ffmpeg");
+        assert_eq!(resolve("", &scratch.0, none), "ffmpeg");
+    }
+
+    #[test]
+    fn a_lookup_hit_is_used_by_its_full_path() {
+        let scratch = Scratch::new("lookup-hit");
+        let found = |program: &str| Some(Path::new("/opt/homebrew/bin").join(program));
+
+        assert_eq!(
+            resolve("", &scratch.0, found),
+            Path::new("/opt/homebrew/bin")
+                .join("ffmpeg")
+                .to_string_lossy()
+        );
     }
 
     fn tags(values: &[(Field, &str)]) -> Vec<(Field, String)> {

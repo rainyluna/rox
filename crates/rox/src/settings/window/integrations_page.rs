@@ -315,6 +315,11 @@ impl SettingsWindow {
                 |rows| {
                     let flatpak = rox_core::install::kind() == rox_core::install::Kind::Flatpak;
                     rows.keyed(
+                        "settings-common-program-folders",
+                        plugins_page::PROGRAM_FOLDERS_KEYWORDS,
+                        Input::new(&self.program_folders.convert).w(px(240.)),
+                    )
+                    .keyed(
                         "settings-integrations-ffmpeg-binary",
                         &["ffmpeg", "convert", "encoder", "binary", "test"],
                         div()

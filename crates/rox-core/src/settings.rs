@@ -475,6 +475,10 @@ pub struct Settings {
     /// Lets plugins run, from the head of the Plugins page. Each plugin
     /// still has its own switch (ADR 30).
     pub plugins_enabled: bool,
+    /// Folders searched for programs ahead of PATH, joined the way PATH is
+    /// on this OS. Plugins and Convert's ffmpeg both look here; parse with
+    /// [`split_folders`].
+    pub program_folders: String,
     /// Whether MCP answers tool calls. The rox-mcp proxy checks it on every
     /// call, so a flip applies to the next tool use.
     pub mcp_enabled: bool,
@@ -1151,6 +1155,18 @@ pub fn set_plugins_enabled(on: bool, cx: &mut App) {
     for window in cx.windows() {
         window.update(cx, |_, window, _| window.refresh()).ok();
     }
+}
+
+/// [`Settings::program_folders`] as a list. Entries are trimmed and empty
+/// ones dropped, so a stray separator or space doesn't add the working
+/// directory to the search.
+pub fn split_folders(text: &str) -> Vec<PathBuf> {
+    std::env::split_paths(text.trim())
+        .filter_map(|dir| {
+            let dir = dir.to_str()?.trim();
+            (!dir.is_empty()).then(|| PathBuf::from(dir))
+        })
+        .collect()
 }
 
 static ACOUSTIC_ANALYSIS: AtomicBool = AtomicBool::new(false);
@@ -3306,6 +3322,7 @@ impl Default for Settings {
             experimental: false,
             ai_enabled: false,
             plugins_enabled: false,
+            program_folders: String::new(),
             mcp_enabled: false,
             acoustic_analysis: false,
             acoustic_auto: false,
@@ -3551,6 +3568,21 @@ mod tests {
     }
 
     #[test]
+    fn program_folders_split_like_path_and_drop_empty_entries() {
+        let joined = std::env::join_paths(["/opt/homebrew/bin", "", " /usr/local/bin "]).unwrap();
+        let text = format!("  {}  ", joined.to_str().unwrap());
+
+        assert_eq!(
+            split_folders(&text),
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin")
+            ]
+        );
+        assert!(split_folders("   ").is_empty());
+    }
+
+    #[test]
     fn portable_takes_a_writable_exe_folder() {
         let dir = scratch("writable");
         let (chosen, portable) = choose_data_dir(true, Some(&dir));
@@ -3571,14 +3603,14 @@ mod tests {
     #[test]
     fn portable_falls_back_when_the_exe_folder_is_read_only() {
         let dir = scratch("readonly");
-        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        let original = std::fs::metadata(&dir).unwrap().permissions();
+        let mut perms = original.clone();
         perms.set_readonly(true);
-        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+        std::fs::set_permissions(&dir, perms).unwrap();
 
         // Root writes anywhere, so there's nothing to check under it.
         if dir_writable(&dir) {
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(&dir, perms);
+            let _ = std::fs::set_permissions(&dir, original);
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
@@ -3587,8 +3619,7 @@ mod tests {
         assert!(!portable);
         assert!(!chosen.starts_with(&dir));
 
-        perms.set_readonly(false);
-        let _ = std::fs::set_permissions(&dir, perms);
+        let _ = std::fs::set_permissions(&dir, original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -13,6 +13,7 @@ pub mod host;
 pub mod loader;
 pub mod manifest;
 pub mod process;
+pub mod search;
 pub mod stream;
 pub mod wire;
 
