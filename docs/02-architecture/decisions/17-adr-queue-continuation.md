@@ -120,3 +120,29 @@ history. A "radio" mode the listener picks separately was dropped on the way, si
 turning on Similar shuffle is turning on radio, which is what it looked like it did
 anyway. Still exactly one provider per draw, and it's built at the point of use so a
 mode switched mid-query can't leave a live one behind.
+
+**Amended 2026-09-29: a context can bring its own provider.** A source plugin's radio
+([ADR 30](30-adr-plugins.md)) is the remote source this ADR said would implement the
+same trait. `Scope` gains `Provided`, a provider handed in with the context, and
+`continuation::draw` takes the batch from it over whatever the mode and the play order
+would pick. Off still ends the queue: the listener's switch outranks a context's taste,
+the same rule Similar shuffle follows. The provider is built in the services layer,
+since it calls a plugin, and `rox-playback` only sees the trait, so the engine still
+doesn't know continuation exists and the playback crate doesn't know plugins do. Its
+`next` writes the station's tracks as picks, rows that play without joining the library
+([ADR 29](29-adr-source-contract.md)), and answers their ids like any provider, so the
+append path is the one every batch takes. A station that runs out reseeds on the last
+of its own tracks heard, so the queue drifts on rather than stopping, and one that only
+returns what already played gets a few more asks before the queue ends. Still one
+provider per draw: a radio that errors ends the queue and never falls back to the mode.
+
+**Amended 2026-09-30: a plugin context continues on its own source.** Andrew's call,
+after a queue of a plugin's tracks ran into the local library when it ran low. That
+was Continue doing what it says, the rest of the library after the context, but a
+listener deep in a service's album hears it as a change of source. A play started
+from a plugin's panel now brings a provided scope when the plugin has a radio: a
+station with no seed yet, which seeds from the last of the plugin's tracks heard when
+the queue first runs low. A plugin without one keeps Continue's library fall-through.
+A provided scope can also save itself with the queue (`Provider::saved`, opaque to
+this crate), and the saved queue carries it, so a station started before a restart
+carries on after it rather than dropping to the library. Off still ends both.

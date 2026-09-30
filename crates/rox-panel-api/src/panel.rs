@@ -479,6 +479,66 @@ pub fn reveal_item(menu: PopupMenu, state: AppState, id: Option<i64>) -> PopupMe
     )
 }
 
+/// A plugin row's source and item, the plugin's own key being the row's
+/// path. None for anything else.
+pub fn plugin_item(key: &rox_library::cue::TrackKey) -> Option<(String, String)> {
+    (key.origin() == rox_library::cue::Origin::Plugin).then(|| {
+        (
+            key.source.to_string(),
+            key.path.to_string_lossy().into_owned(),
+        )
+    })
+}
+
+/// Open in Browser and Copy Link for one plugin track or node, when its
+/// plugin offers links. The plugin names the page at click time
+/// (`source.link`), so the link is never stale.
+pub fn link_items(menu: PopupMenu, source: &str, item: String) -> PopupMenu {
+    if !rox_services::plugins::has_links(source) {
+        return menu;
+    }
+
+    let (open_source, open_item) = (source.to_string(), item.clone());
+    let (copy_source, copy_item) = (source.to_string(), item);
+
+    menu.item(
+        PopupMenuItem::new(rox_i18n::t!("panel-open-in-browser"))
+            .icon(Icon::default().path(icons::EXTERNAL_LINK))
+            .on_click(move |_, _, cx| {
+                follow_link(open_source.clone(), open_item.clone(), true, cx);
+            }),
+    )
+    .item(
+        PopupMenuItem::new(rox_i18n::t!("panel-copy-link"))
+            .icon(Icon::default().path(icons::LINK))
+            .on_click(move |_, _, cx| {
+                follow_link(copy_source.clone(), copy_item.clone(), false, cx);
+            }),
+    )
+}
+
+/// The URL comes from a plugin, so it only ever reaches the user's browser
+/// or clipboard, and only an http or https one gets that far (the wire
+/// checks it).
+fn follow_link(source: String, item: String, open: bool, cx: &mut App) {
+    let task = rox_services::plugins::link(&source, item.clone(), cx);
+
+    cx.spawn(async move |cx| match task.await {
+        Ok(Some(url)) => {
+            cx.update(|cx| match open {
+                true => cx.open_url(&url),
+                false => cx.write_to_clipboard(ClipboardItem::new_string(url)),
+            })
+            .ok();
+        }
+
+        // There's nowhere app-wide to say it, so the log carries it.
+        Ok(None) => log::info!("{source}: {item} has no link"),
+        Err(e) => log::warn!("{source}: link for {item}: {e}"),
+    })
+    .detach();
+}
+
 /// What the Copy submenu can put on the clipboard for one track. Resolved
 /// at click time, so a copy after a rescan reads the file where it is now.
 pub struct CopyText {
@@ -827,6 +887,21 @@ pub fn track_actions(
     } else {
         menu
     };
+    // One plugin row gets its page on the service, when the plugin has one.
+    let plugin = match ids.as_slice() {
+        [id] => state
+            .library
+            .read(cx)
+            .keys_for(&[*id])
+            .ok()
+            .and_then(|keys| keys.first().and_then(plugin_item)),
+        _ => None,
+    };
+    let menu = match plugin {
+        Some((source, item)) => link_items(menu, &source, item),
+        None => menu,
+    };
+
     let menu = copy_ids_submenu(menu, state.clone(), ids, window, cx);
     reveal_item(menu, state, reveal)
 }

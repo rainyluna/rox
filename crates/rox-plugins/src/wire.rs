@@ -7,6 +7,8 @@
 //! at [`MAX_ENTRIES`], and a frame that doesn't parse is the plugin's error,
 //! never a panic. Conversion to library types happens in `rox-services`.
 
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -150,6 +152,20 @@ fn string(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
+/// A click hands a notice's link to the OS, which opens any scheme it has a
+/// handler for, `file:` included. Only a web address gets that far.
+fn web_url(field: &str, url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    let clean = !url.chars().any(|c| c.is_whitespace() || c.is_control());
+
+    match rest {
+        Some(rest) if clean && !rest.is_empty() && !rest.starts_with('/') => Ok(()),
+        _ => Err(format!("{field} isn't an http or https URL")),
+    }
+}
+
 fn list<T>(field: &str, items: &[T]) -> Result<(), String> {
     match items.len() > MAX_ENTRIES {
         true => Err(format!("{field} holds more than {MAX_ENTRIES} items")),
@@ -184,11 +200,84 @@ pub struct Page {
     pub cursor: Option<String>,
     #[serde(default)]
     pub notice: Option<Notice>,
+    /// Other ways to list this place, the `views` feature. Read from a
+    /// place's first page.
+    #[serde(default)]
+    pub views: Vec<View>,
+    /// Which of `views` this page is.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// Extra columns the entries carry values for, the `fields` feature.
+    #[serde(default)]
+    pub fields: Vec<Field>,
+}
+
+/// A column the service knows and a row's tags don't, like a popularity.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Field {
+    pub id: String,
+    pub label: String,
+    pub kind: FieldKind,
+}
+
+/// How a field's values read and sort.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldKind {
+    /// A whole number, shown short (12.3k).
+    Count,
+    /// 0 to 100.
+    Percent,
+    /// `YYYY-MM-DD`, or any prefix of it.
+    Date,
+    Text,
+}
+
+/// A row's values by field id: numbers for counts and percents, strings for
+/// dates and text.
+pub type Values = BTreeMap<String, Value>;
+
+fn values(field: &str, values: &Values) -> Result<(), String> {
+    for (id, value) in values {
+        string(field, id)?;
+        match value {
+            Value::Number(_) => {}
+            Value::String(text) => string(field, text)?,
+            _ => return Err(format!("{field} {id} is neither a number nor a string")),
+        }
+    }
+
+    Ok(())
+}
+
+/// One way to list a place: a filter or an order the service applies.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    pub id: String,
+    pub label: String,
 }
 
 /// The optional parts of API 1 this host reads, sent in `hello`. A host
 /// from before one refuses a result that uses it, so a plugin checks here.
-pub const FEATURES: &[&str] = &["notice"];
+pub const FEATURES: &[&str] = &[
+    "notice",
+    "notice-link",
+    "node-kind",
+    "node-art",
+    "sections",
+    "views",
+    "fields",
+    "tiles",
+    "home",
+];
+
+/// More than a row of chips holds.
+pub const MAX_VIEWS: usize = 12;
+
+/// Columns beside a row's title, which has to keep most of the width.
+pub const MAX_FIELDS: usize = 4;
 
 /// A line the plugin wants shown over a page, like a setting it needs
 /// before it can list anything.
@@ -198,6 +287,19 @@ pub struct Notice {
     pub text: String,
     #[serde(default)]
     pub kind: NoticeKind,
+    #[serde(default)]
+    pub link: Option<NoticeLink>,
+}
+
+/// A web page the notice points at, opened in the browser on a click. The
+/// `notice-link` feature.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NoticeLink {
+    pub url: String,
+    /// The button's label. Empty reads as the host's own.
+    #[serde(default)]
+    pub label: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -219,11 +321,62 @@ impl Checked for Page {
                 return Err("a notice has no text".into());
             }
             string("notice", &notice.text)?;
+
+            if let Some(link) = &notice.link {
+                string("notice link", &link.url)?;
+                string("notice link label", &link.label)?;
+                web_url("a notice link", &link.url)?;
+            }
         }
 
+        if self.views.len() > MAX_VIEWS {
+            return Err(format!("a page offers more than {MAX_VIEWS} views"));
+        }
+
+        for view in &self.views {
+            if view.id.is_empty() || view.label.trim().is_empty() {
+                return Err("a view has an empty id or label".into());
+            }
+            string("view id", &view.id)?;
+            string("view label", &view.label)?;
+        }
+
+        if let Some(view) = &self.view
+            && !self.views.iter().any(|v| &v.id == view)
+        {
+            return Err(format!("the page is view {view:?}, which it doesn't offer"));
+        }
+
+        if self.fields.len() > MAX_FIELDS {
+            return Err(format!("a page declares more than {MAX_FIELDS} fields"));
+        }
+
+        for (ix, field) in self.fields.iter().enumerate() {
+            if field.id.is_empty() || field.label.trim().is_empty() {
+                return Err("a field has an empty id or label".into());
+            }
+            if self.fields[..ix].iter().any(|f| f.id == field.id) {
+                return Err(format!("field {:?} is declared twice", field.id));
+            }
+            string("field id", &field.id)?;
+            string("field label", &field.label)?;
+        }
+
+        // A value for a field the page never declared has no column to go in.
+        let declared = |row: &Values| {
+            row.keys()
+                .find(|id| !self.fields.iter().any(|f| &f.id == *id))
+                .map_or(Ok(()), |id| {
+                    Err(format!(
+                        "a value for field {id:?}, which the page doesn't declare"
+                    ))
+                })
+        };
+
         self.entries.iter().try_for_each(|entry| match entry {
-            Entry::Node(node) => node.check(),
-            Entry::Track(track) => track.check(),
+            Entry::Node(node) => node.check().and_then(|()| declared(&node.values)),
+            Entry::Track(track) => track.check().and_then(|()| declared(&track.values)),
+            Entry::Section(section) => section.check(),
         })
     }
 }
@@ -233,6 +386,47 @@ impl Checked for Page {
 pub enum Entry {
     Node(Node),
     Track(Track),
+    /// A heading over the entries after it, the `sections` feature.
+    Section(Section),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Section {
+    pub title: String,
+    /// How the entries under it show, the `tiles` feature.
+    #[serde(default)]
+    pub layout: Layout,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    #[default]
+    Rows,
+    /// A shelf of cover tiles scrolled sideways, for albums, playlists and
+    /// the like. Tracks read better as rows.
+    Tiles,
+}
+
+impl Checked for Section {
+    fn check(&self) -> Result<(), String> {
+        if self.title.trim().is_empty() {
+            return Err("a section has no title".into());
+        }
+
+        string("section title", &self.title)
+    }
+}
+
+/// What a node is, for its icon: the `node-kind` feature.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeKind {
+    Album,
+    Playlist,
+    Artist,
+    Folder,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -244,6 +438,17 @@ pub struct Node {
     pub subtitle: String,
     #[serde(default)]
     pub collection: bool,
+    #[serde(default)]
+    pub kind: Option<NodeKind>,
+    /// A key for `source.cover`, the `node-art` feature. Empty for none.
+    #[serde(default)]
+    pub art: String,
+    #[serde(default)]
+    pub values: Values,
+    /// The service's home among the roots, the `home` feature. rox can list
+    /// its page under the roots instead of as a node of its own.
+    #[serde(default)]
+    pub home: bool,
 }
 
 impl Checked for Node {
@@ -254,7 +459,9 @@ impl Checked for Node {
 
         string("node id", &self.id)?;
         string("title", &self.title)?;
-        string("subtitle", &self.subtitle)
+        string("subtitle", &self.subtitle)?;
+        string("node art", &self.art)?;
+        values("node value", &self.values)
     }
 }
 
@@ -276,6 +483,9 @@ pub struct Track {
     pub codec: String,
     pub bitrate_kbps: u16,
     pub live: bool,
+    /// The `fields` feature's values. Sync ignores them: a kept row holds
+    /// only its tags.
+    pub values: Values,
 }
 
 impl Checked for Track {
@@ -294,7 +504,9 @@ impl Checked for Track {
             ("codec", &self.codec),
         ]
         .into_iter()
-        .try_for_each(|(field, value)| string(field, value))
+        .try_for_each(|(field, value)| string(field, value))?;
+
+        values("track value", &self.values)
     }
 }
 
@@ -309,6 +521,26 @@ pub struct SyncPage {
     pub cursor: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
+}
+
+/// A batch of a radio seeded from a track or a node, the `radio` capability.
+/// A null `cursor` means the station ran out; the host seeds a new one.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RadioPage {
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+impl Checked for RadioPage {
+    fn check(&self) -> Result<(), String> {
+        list("tracks", &self.tracks)?;
+        cursor(&self.cursor)?;
+
+        self.tracks.iter().try_for_each(Track::check)
+    }
 }
 
 impl Checked for SyncPage {
@@ -385,6 +617,21 @@ impl Read {
             )),
             false => Ok(bytes),
         }
+    }
+}
+
+/// A track's or a node's web page, `source.link`'s answer. rox only opens it
+/// in the browser or copies it, on the user's click, and never fetches it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    pub url: String,
+}
+
+impl Checked for Link {
+    fn check(&self) -> Result<(), String> {
+        string("link", &self.url)?;
+        web_url("a link", &self.url)
     }
 }
 
@@ -540,12 +787,150 @@ mod tests {
         let plain: Page = decode(json!({"entries": [], "notice": {"text": "hi"}})).unwrap();
         assert_eq!(plain.notice.map(|n| n.kind), Some(NoticeKind::Info));
 
+        let linked: Page = decode(json!({
+            "entries": [],
+            "notice": {"text": "Sign in", "link": {"url": "https://example.com/abc", "label": "Sign In"}}
+        }))
+        .unwrap();
+        let link = linked.notice.and_then(|n| n.link).expect("the link parses");
+        assert_eq!(
+            (link.url.as_str(), link.label.as_str()),
+            ("https://example.com/abc", "Sign In")
+        );
+
         for bad in [
             json!({"entries": [], "notice": {"text": " "}}),
             json!({"entries": [], "notice": {"text": "x", "kind": "urgent"}}),
             json!({"entries": [], "notice": {"text": "x", "link": "y"}}),
+            json!({"entries": [], "notice": {"text": "x", "link": {"url": "https://a.b", "extra": 1}}}),
         ] {
             assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn nodes_carry_a_kind_and_art_and_sections_head_them() {
+        let page: Page = decode(json!({
+            "entries": [
+                {"section": {"title": "Albums"}},
+                {"node": {"id": "album:1", "title": "A", "kind": "album", "art": "album:1"}},
+                {"node": {"id": "plain", "title": "B"}}
+            ]
+        }))
+        .unwrap();
+
+        assert!(
+            matches!(&page.entries[0], Entry::Section(s) if s.title == "Albums" && s.layout == Layout::Rows)
+        );
+
+        let shelf: Page =
+            decode(json!({"entries": [{"section": {"title": "New", "layout": "tiles"}}]})).unwrap();
+        assert!(matches!(&shelf.entries[0], Entry::Section(s) if s.layout == Layout::Tiles));
+        assert!(
+            decode::<Page>(json!({"entries": [{"section": {"title": "New", "layout": "cards"}}]}))
+                .is_err()
+        );
+        assert!(
+            matches!(&page.entries[1], Entry::Node(n) if n.kind == Some(NodeKind::Album) && n.art == "album:1")
+        );
+        assert!(
+            matches!(&page.entries[2], Entry::Node(n) if n.kind.is_none() && n.art.is_empty() && !n.home)
+        );
+
+        let roots: Page =
+            decode(json!({"entries": [{"node": {"id": "home", "title": "Home", "home": true}}]}))
+                .unwrap();
+        assert!(matches!(&roots.entries[0], Entry::Node(n) if n.home));
+
+        for bad in [
+            json!({"entries": [{"section": {"title": " "}}]}),
+            json!({"entries": [{"node": {"id": "x", "title": "x", "kind": "genre"}}]}),
+        ] {
+            assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_page_offers_views_and_names_its_own() {
+        let page: Page = decode(json!({
+            "entries": [],
+            "views": [{"id": "all", "label": "All"}, {"id": "albums", "label": "Albums"}],
+            "view": "albums"
+        }))
+        .unwrap();
+        assert_eq!(page.views.len(), 2);
+        assert_eq!(page.view.as_deref(), Some("albums"));
+
+        let many: Vec<Value> = (0..=MAX_VIEWS)
+            .map(|i| json!({"id": i.to_string(), "label": "v"}))
+            .collect();
+
+        for bad in [
+            json!({"entries": [], "views": [{"id": "all", "label": "All"}], "view": "gone"}),
+            json!({"entries": [], "views": [{"id": "", "label": "All"}]}),
+            json!({"entries": [], "views": many}),
+        ] {
+            assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn fields_declare_the_columns_rows_carry_values_for() {
+        let page: Page = decode(json!({
+            "fields": [{"id": "pop", "label": "Popularity", "kind": "percent"}],
+            "entries": [
+                {"track": {"key": "1", "values": {"pop": 78}}},
+                {"node": {"id": "n", "title": "N", "values": {"pop": 40}}},
+                {"track": {"key": "2"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(page.fields[0].kind, FieldKind::Percent);
+        assert!(matches!(&page.entries[0], Entry::Track(t) if t.values["pop"] == 78));
+
+        let five: Vec<Value> = (0..=MAX_FIELDS)
+            .map(|i| json!({"id": i.to_string(), "label": "f", "kind": "count"}))
+            .collect();
+
+        for bad in [
+            json!({"entries": [{"track": {"key": "1", "values": {"pop": 1}}}]}),
+            json!({"fields": [{"id": "a", "label": "A", "kind": "count"}], "entries": [{"track": {"key": "1", "values": {"a": [1]}}}]}),
+            json!({"fields": [{"id": "a", "label": "A", "kind": "rating"}], "entries": []}),
+            json!({"fields": [{"id": "a", "label": "A", "kind": "count"}, {"id": "a", "label": "B", "kind": "count"}], "entries": []}),
+            json!({"fields": five, "entries": []}),
+        ] {
+            assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_radio_page_is_tracks_and_a_cursor() {
+        let page: RadioPage =
+            decode(json!({"tracks": [{"key": "1"}, {"key": "2"}], "cursor": "2"})).unwrap();
+        assert_eq!(page.tracks.len(), 2);
+        assert_eq!(page.cursor.as_deref(), Some("2"));
+
+        assert!(decode::<RadioPage>(json!({"tracks": [{"key": ""}]})).is_err());
+        assert!(decode::<RadioPage>(json!({"tracks": [], "station": "x"})).is_err());
+    }
+
+    #[test]
+    fn a_notice_link_is_only_a_web_address() {
+        for url in ["https://example.com", "http://127.0.0.1:8080/x?y=z"] {
+            assert!(web_url("a link", url).is_ok(), "{url}");
+        }
+
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ms-settings:privacy",
+            "https://",
+            "https:///path",
+            "HTTPS://example.com",
+            "https://example.com/a b",
+            "https://example.com/\n",
+        ] {
+            assert!(web_url("a link", url).is_err(), "{url}");
         }
     }
 
@@ -595,5 +980,20 @@ mod tests {
         let ahead: Open = decode(json!({"stream": "s1", "buffer": "ahead"})).unwrap();
         assert_eq!(ahead.buffer, Some(Buffer::Ahead));
         assert!(decode::<Open>(json!({"stream": "s1", "buffer": "everything"})).is_err());
+    }
+
+    #[test]
+    fn a_link_is_a_web_page_or_nothing() {
+        let link: Link = decode(json!({"url": "https://example.com/track/1"})).unwrap();
+        assert_eq!(link.url, "https://example.com/track/1");
+
+        for bad in [
+            json!({"url": "javascript:alert(1)"}),
+            json!({"url": "file:///etc/passwd"}),
+            json!({"url": "https://example.com/a b"}),
+            json!({"url": "https://example.com", "label": "x"}),
+        ] {
+            assert!(decode::<Link>(bad.clone()).is_err(), "{bad}");
+        }
     }
 }

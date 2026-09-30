@@ -22,9 +22,9 @@ This guide covers plugin API version 1, the only one the host supports.
    programs it runs, and asks you to confirm.
 
 The plugin then shows up under Add Panel > Plugins, which opens the External Sources
-panel on its source. Keep in the library on a collection syncs it into the library.
-Playing or queueing a track plays it without adding it; Add to Library on a track keeps
-it.
+panel on its source. The checkmark that shows when you hover a collection, Keep in the
+Library, syncs it into the library. Playing or queueing a track plays it without adding
+it; Add to Library on a track keeps it.
 
 Remove on the Plugins page drops the plugin's tracks, synced collections, settings and
 approval. Its folder stays where it is.
@@ -117,7 +117,7 @@ match the folder's name is refused.
 | `api`                 | The plugin API version it targets: `1`.                                                                          |
 | `entry`               | Exactly one of `script` or `native`.                                                                             |
 | `meta`                | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
-| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false.                                                   |
+| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. `icon` is optional, see [The icon](#the-icon). `radio: true` says the plugin answers [`source.radio`](#sourceradio). `links: true` says it answers [`source.link`](#sourcelink). |
 | `capabilities.panels` | Extra panels listed under the plugin in Add Panel. Optional. See [Panels](#panels).                              |
 | `programs`            | Programs the plugin runs, by name. The page checks the plugin's own `bin/` folder, then Program Folders, then PATH, and reports each name as found or missing. rox doesn't enforce the list. |
 | `config_schema`       | JSON Schema for the plugin's settings.                                                                           |
@@ -156,6 +156,16 @@ The Plugins page draws `config_schema.properties` as settings rows. It understan
 in plaintext with the rest of rox's account settings. A change restarts the plugin
 with the new config once the edit ends.
 
+### The icon
+
+`capabilities.source.icon` names an SVG in the plugin's folder, like `"icon.svg"`. The
+External Sources panel shows it in its header in place of the source's name, which moves
+to its tooltip. rox draws it as a mask in the theme's text colour, the way it draws its
+own icons, so only its shape counts: colours are ignored, and it reads on every theme. It
+should be square, and at most 64 KiB. An icon that holds an `<image>`, `<feImage>` or
+`<foreignObject>` is refused, since the renderer would read the file one of those names
+from disk. The icon is part of the folder hash like every other file.
+
 A manifest is refused, with the reason on the Plugins page, when:
 
 - it isn't valid JSON, is over 256 KiB, or isn't a plain file
@@ -164,6 +174,8 @@ A manifest is refused, with the reason on the Plugins page, when:
 - `entry` names both kinds or neither
 - there's no native build for this platform, the interpreter isn't on PATH, or the
   entry path leaves the folder or doesn't exist
+- the icon isn't an `.svg`, leaves the folder, doesn't exist, is over 64 KiB, or embeds
+  an image
 - a declared panel has no name or shares one with another, has no `panel_name`, holds
   children, doesn't have `info` as `{ "panel": { ... } }`, or is a `source browser`
   whose `source` isn't the plugin's own `plugin:<id>`
@@ -206,14 +218,16 @@ rolls to `rox.log.1` at 2 MiB. The plugin never sends requests to rox.
 
 | Method           | Params                            | Answers                                          |
 | ---------------- | --------------------------------- | ------------------------------------------------ |
-| `hello`          | `api`, `config`, `data_dir`, `platform` | `{name, version, api}`                     |
-| `source.browse`  | `node`, `cursor`                  | a page of entries                                |
-| `source.search`  | `query`, `cursor`                 | a page of entries                                |
+| `hello`          | `api`, `config`, `data_dir`, `platform`, `features` | `{name, version, api}`           |
+| `source.browse`  | `node`, `cursor`, `view`          | a page of entries                                |
+| `source.search`  | `query`, `cursor`, `view`         | a page of entries                                |
 | `source.sync`    | `collection`, `token`, `cursor`   | a page of tracks with the collection's token     |
 | `source.open`    | `key`                             | a stream id and what rox needs to read it        |
 | `source.read`    | `stream`, `offset`, `len`         | `{data}`, base64                                 |
 | `source.close`   | `stream`                          | null                                             |
 | `source.cover`   | `key`                             | `{mime, data}` with the image base64, or null    |
+| `source.radio`   | `seed`, `cursor`, `count`         | a batch of tracks and where the next starts      |
+| `source.link`    | `item`                            | `{url}` for its web page, or null                |
 | `shutdown`       |                                   | null, then the plugin exits                      |
 
 ### hello
@@ -230,7 +244,8 @@ there are none. The answer's `api` has to be one the host supports, or rox hangs
 
 `features` names the optional parts of API 1 this host reads. A host from before a
 feature refuses a result that uses it, so a plugin uses one only when it's listed, and
-treats a missing `features` as an empty list. This host lists `notice`.
+treats a missing `features` as an empty list. This host lists `notice`, `notice-link`,
+`node-kind`, `node-art`, `sections`, `views`, `fields`, `tiles` and `home`.
 
 ### source.browse and source.search
 
@@ -266,8 +281,51 @@ Search answers in the same page shape, so it can return nodes as well as tracks:
 ← {"jsonrpc":"2.0","id":4,"result":{"entries":[{"track":{"key":"chord:A minor","title":"A minor", ...}}],"cursor":null}}
 ```
 
+A node can say what it is and carry a cover, each when `hello` listed the feature:
+
+- `kind` (`node-kind`) is `album`, `playlist`, `artist` or `folder`, and picks the node's
+  icon. Without one, a collection shows a playlist icon and anything else a folder.
+- `art` (`node-art`) is a key rox passes to `source.cover` for the node's cover, like a
+  track's `key`. It's opaque to rox and only has to mean something to the plugin's own
+  `source.cover`. Without one, the node shows its icon in the same place, so node and
+  track rows line up.
+
+```
+{"node": {"id": "album:500", "title": "Example Album", "subtitle": "Example Artist, 2019", "collection": true, "kind": "album", "art": "album:500"}}
+```
+
+An entry can also be a section, `{"section": {"title": "Albums"}}`, when `hello` listed
+`sections`. rox draws it as a heading over the entries after it, and it can't be opened
+or picked.
+
+With `tiles` listed too, a section can ask for `"layout": "tiles"`. The entries under it,
+up to the next section, show as a shelf: a row of covers over their titles that scrolls
+sideways, the way a service's home page lays out new albums or mixes. A node on a shelf
+opens on a click and a track plays on a double click, the same as their rows. Shelves
+suit nodes with `art`; tracks read better as rows. Without `tiles`, the same section
+shows its entries as rows. A page that's nothing but one tiles section wraps its covers
+into a grid instead, so a node like a list of mixes opens as a wall of them.
+
+```
+{"section": {"title": "New albums", "layout": "tiles"}}
+```
+
+A plugin's pages can be whole screens of these. A node whose page is sections of shelves
+and rows is how a service's home, its new releases or its genres reach rox.
+
 The roots are what the panel shows before anyone searches, so a source with something to
 discover, like a feed or a front page, lists it there as nodes.
+
+A root node can mark itself the service's home with `"home": true`, when `hello` listed
+`home`. rox then leaves it out of the roots and lists its page under them, paging on as
+the user scrolls, so the home needs no click to open. The roots show first and don't wait
+on it. The home page's fields join the roots' columns, but its notice and views don't
+carry over. Only the first node marked home counts, and only among the roots. The user
+can turn this off in the panel's settings, and the node lists like any other.
+
+```
+{"node": {"id": "home", "title": "Home", "home": true}}
+```
 
 Either answer can carry a `notice`, a line rox shows above the entries, or on its own
 when there are none:
@@ -282,6 +340,60 @@ list something. A setup notice comes with a button that opens the Plugins page, 
 the plugin's settings are. rox shows the notice from a place's first page and ignores it
 on later ones. The text is the plugin's own and isn't translated, like the rest of what
 it sends.
+
+A notice can also carry a `link`, which puts a button on it that opens a web page in
+the browser, like a sign-in page the user has to visit:
+
+```
+← {"jsonrpc":"2.0","id":2,"result":{"entries":[],"cursor":null,"notice":{"text":"Sign in at https://example.com/device with the code ABCDE.","link":{"url":"https://example.com/device?code=ABCDE","label":"Sign In"}}}}
+```
+
+Send one only when `hello` listed `notice-link` in `features`. The `url` has to be an
+`http` or `https` address, or the page fails. `label` names the button and is optional;
+without it the button reads Open Link. The page opens only when the user clicks.
+
+#### Views
+
+A place's first page can offer other ways to list it, when `hello` listed `views`: a
+filter or an order the service applies, like search results narrowed to albums, or
+favourites sorted by artist. rox shows them as chips over the list.
+
+```
+← {"jsonrpc":"2.0","id":4,"result":{"entries":[ ... ],"cursor":"50","views":[{"id":"all","label":"All"},{"id":"albums","label":"Albums"}],"view":"all"}}
+```
+
+`views` lists up to 12, each an `id` and a `label`. `view` names the one this page is,
+and has to be one of them. Picking a chip asks for the place again with that `view`, and
+every later page of it carries the same `view`:
+
+```
+→ {"jsonrpc":"2.0","id":5,"method":"source.search","params":{"query":"minor","cursor":null,"view":"albums"}}
+```
+
+rox only sends `view` once the place offered views, so a plugin that offers none never
+sees it. Opening a node, searching again or going up a crumb starts over with no `view`.
+A collection kept in the library lists from the library, so it shows no views.
+
+#### Fields
+
+A page can declare columns the service knows and a track's tags don't, like a
+popularity or a play count, when `hello` listed `fields`. Tracks and nodes carry their
+values under `values`, by field id:
+
+```
+← {"jsonrpc":"2.0","id":4,"result":{"entries":[{"track":{"key":"t1","title":"...","values":{"popularity":78}}}],"cursor":"50","fields":[{"id":"popularity","label":"Popularity","kind":"percent"}]}}
+```
+
+A page declares up to 4 fields, each an `id`, a `label` and a `kind`: `count` (a whole
+number, shown short, like 12k), `percent` (0 to 100), `date` (`YYYY-MM-DD` or a prefix of
+it) or `text`. A value is a number or a string, and a value for a field the page didn't
+declare fails the page. rox takes the fields from a place's first page.
+
+The External Sources panel shows each field as a column at the right of the rows, and its
+heading sorts by it: counts, percents and dates biggest first, text A to Z, rows without
+a value last, each heading's rows kept under it. A sort reads the rest of the list first,
+up to 1,000 rows, since sorting one page would put the wrong rows on top. Fields stay in
+the panel: a track kept in the library holds its tags and nothing from a field.
 
 ### source.sync
 
@@ -362,6 +474,49 @@ Sent when rox drops the stream. Nothing waits on the answer.
 
 `{"mime": "..", "data": ".."}` with the image base64, or null for no cover. rox asks
 only for tracks with no stored cover.
+
+### source.radio
+
+Sent only to a plugin whose manifest says `"radio": true`. rox offers Start Radio on its
+tracks and nodes, and asks for a station seeded from the one picked, a track's `key` or
+a node's `id`:
+
+```
+→ {"jsonrpc":"2.0","id":12,"method":"source.radio","params":{"seed":"t1","cursor":null,"count":20}}
+← {"jsonrpc":"2.0","id":12,"result":{"tracks":[ ...20 tracks... ],"cursor":"20"}}
+```
+
+What the radio started from plays first: the track, or the tracks a node lists (an
+album before its artist's radio), read through `source.browse` in the plugin's default
+view. The station's first batch follows, less anything already in the lead. The rest
+come as the queue runs down, the way rox's own
+continuation fills it, each asking with the last answer's `cursor`. A null `cursor`
+means the station ran out, and rox seeds a new one from the last of the plugin's tracks
+that played. A batch holds at most `count` tracks, 500 at the most. Its tracks play
+without joining the library, the way tracks played from the panel do, and ones that
+already played this session are skipped. A queue started from the plugin's panel,
+say an album, goes on the same way when it runs low, seeded from the last of its tracks
+that played, rather than falling through to the local library. rox saves the station
+with the queue, so it carries on after a restart. A radio's tracks keep coming only while
+continuation is on in rox's playback settings.
+
+### source.link
+
+Sent only to a plugin whose manifest says `"links": true`. rox then offers Open in
+Browser and Copy Link on the plugin's tracks and nodes, everywhere they show: the
+External Sources panel, the queue, the library, playlists, history and what's playing.
+They show on one item at a time, not on a selection. When the user picks one, rox asks
+for the page of the item, a track's `key` or a node's `id`:
+
+```
+→ {"jsonrpc":"2.0","id":13,"method":"source.link","params":{"item":"t1"}}
+← {"jsonrpc":"2.0","id":13,"result":{"url":"https://example.com/track/t1"}}
+```
+
+The `url` has to be an `http` or `https` address, or the call fails. Answer null for an
+item with no page. rox asks on every click rather than keeping the answer, so a link
+can change without anything going stale. The page opens in the user's browser or goes
+to the clipboard, and rox itself never fetches it.
 
 ### shutdown
 
@@ -527,6 +682,7 @@ running. Switch it off on the Plugins page before updating its folder.
 | ---------------------------------------------------- | ------------------------------ |
 | `hello`                                              | 5 s                            |
 | `source.browse`, `source.search`, later sync pages   | 15 s                           |
+| `source.radio`, `source.link`                        | 15 s                           |
 | A sync's first page                                  | 60 s                           |
 | `source.open`                                        | 20 s                           |
 | `source.read`, `source.cover`                        | 10 s                           |
@@ -534,6 +690,10 @@ running. Switch it off on the Plugins page before updating its folder.
 | A line on stdout                                     | 1 MiB                          |
 | A string in a result                                 | 4 KiB                          |
 | Entries or tracks per page                           | 500                            |
+| Views a page offers                                  | 12                             |
+| Fields a page declares                               | 4                              |
+| Rows read to sort by a field                         | 1,000                          |
+| Tracks read from a node to play it or start a radio  | 1,000                          |
 | A read's `len`                                       | 256 KiB asked, 512 KiB at most |
 | A stderr line                                        | 4 KiB                          |
 | Sync pages per collection                            | 2,000                          |

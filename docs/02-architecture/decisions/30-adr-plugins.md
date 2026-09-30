@@ -384,3 +384,42 @@ features the host reads, and a plugin sends a notice only when `notice` is among
 can't answer, rox says why in its own words (plugins off, the plugin switched off,
 changed on disk, gone, failing to load, stopped after crashes) and offers the Plugins
 page, rather than passing on the host's internal error.
+
+**Amended 2026-09-29: radio, fields, and the panel's shape.** Andrew's product calls
+after the first external plugin met the source browser.
+
+- A source may declare `radio` in its capability. rox then offers Start Radio on the
+  plugin's tracks and nodes, and asks `source.radio` with the seed and a cursor for
+  batches of tracks. The first batch plays at once and the rest arrive through queue
+  continuation ([ADR 17](17-adr-queue-continuation.md)'s amendment), so the engine keeps
+  the timeline and the tracks play through rox like any other plugin track. Controlling
+  a service's own player is still outside the set: that's the Tapped and Remote tiers,
+  and this isn't them.
+- A page may declare up to four `fields`, columns the service knows and the tags don't,
+  with values on its tracks and nodes. The source browser shows them and sorts by them,
+  reading the rest of the list first up to a thousand rows, since a sort over one page
+  is a wrong order. They live in the panel only. A kept row holds its tags and nothing
+  from a field, so no library column depends on a plugin being there.
+- A page may offer `views`, filters or orders the service applies, and entries may be
+  `section` headings or nodes with a `kind` and `art` for a cover. A section may ask
+  for `tiles`, which shows its entries as a shelf of covers scrolled sideways, so a
+  plugin can bring a service's home or new releases as the screens they are. The list
+  moved to a virtual list with a height per item to hold them. A page that's only one
+  tiles section wraps into a grid, since it has no rows for a shelf to stack against.
+- A root node may mark itself the service's `home`. The source browser lists the roots
+  at once and follows them with that node's pages, so the service's home reads as the
+  bottom of rox's own Home rather than a node inside it, and the roots never wait on
+  what's usually the service's slowest page. A panel setting, on by default, puts it
+  back as a node.
+- A source may declare `links`. rox then offers Open in Browser and Copy Link on its
+  tracks and nodes in every menu that lists them, and asks `source.link` with the key or
+  id when one is picked. The menu items are rox's own, since a plugin still adds no
+  behaviour inside the UI. The link is asked for at click time and never stored, so a
+  kept row needs no new column and a changed URL is never stale. rox opens it in the
+  browser or copies it, and never fetches it, the rule notice links already follow.
+- A radio plays what it started from before the station: the track, or everything a
+  node lists. A node's play items (Play, Play Next, Add to Queue) read the same list. A source may ship an
+  `icon`, a square SVG drawn as a mask in the theme's colour.
+- Each wire addition is gated by a name in `hello`'s `features`, so a plugin never sends
+  what an older host would refuse. The manifest additions sit under `capabilities`,
+  which ignores keys it doesn't know, so `api` stays 1.

@@ -1149,6 +1149,7 @@ mod tests {
                 .map(|(program, found)| (program.to_string(), *found))
                 .collect(),
             error: error.map(str::to_string),
+            icon: None,
         }
     }
 

@@ -78,6 +78,9 @@ pub enum Scope {
     /// A browse view's ids in order. The library panel windows big views, so this
     /// is how continuation finds the rows below the window.
     View(Arc<Vec<i64>>),
+    /// A context that brought its own provider, like a source's radio. It
+    /// takes the draw over the mode and the order, and Off still ends it.
+    Provided(Arc<dyn Provider + Sync>),
 }
 
 pub struct Seed {
@@ -118,6 +121,13 @@ impl Pick {
 pub trait Provider: Send {
     /// Blocking; called on the background executor.
     fn next(&self, conn: &Connection, seed: &Seed) -> Vec<Pick>;
+
+    /// What a context's own provider saves with the queue, so a restart can
+    /// pick it back up. Opaque here: whoever built it reads it back. None for
+    /// one that can't.
+    fn saved(&self) -> Option<String> {
+        None
+    }
 }
 
 /// How the queue is ordered when a refill is asked for. Checked again on
@@ -143,6 +153,22 @@ pub fn provider(mode: Mode, order: Order) -> Option<Box<dyn Provider>> {
         (Mode::Continue, Order::Browse) => Some(Box::new(Browse)),
         (Mode::Weighted, _) => Some(Box::new(Weighted)),
     }
+}
+
+/// The batch for a dry-out: the context's own provider when it brought one,
+/// otherwise the mode's for the order. Off ends the queue either way.
+pub fn draw(mode: Mode, order: Order, conn: &Connection, seed: &Seed) -> Vec<Pick> {
+    if mode == Mode::Off {
+        return Vec::new();
+    }
+
+    if let Scope::Provided(provided) = &seed.scope {
+        return provided.next(conn, seed);
+    }
+
+    provider(mode, order)
+        .map(|provider| provider.next(conn, seed))
+        .unwrap_or_default()
 }
 
 /// Resume `order` after the *last* seen position, skipping anything seen. The
@@ -672,6 +698,46 @@ mod tests {
         for id in picked(by_sound) {
             assert!(!played.contains(&id), "radio replayed the session");
         }
+    }
+
+    struct Fixed(Vec<i64>);
+
+    impl Provider for Fixed {
+        fn next(&self, _: &Connection, _: &Seed) -> Vec<Pick> {
+            self.0.iter().copied().map(Pick::ungrouped).collect()
+        }
+    }
+
+    #[test]
+    fn a_provided_scope_takes_the_draw_but_off_still_ends_it() {
+        let conn = library(6);
+        let provided = Scope::Provided(Arc::new(Fixed(vec![900, 901])));
+
+        for order in [Order::Browse, Order::Random, Order::Similar] {
+            let batch = draw(
+                Mode::Continue,
+                order,
+                &conn,
+                &seed(provided.clone(), Vec::new(), 3),
+            );
+            assert_eq!(picked(batch), vec![900, 901], "{order:?}");
+        }
+
+        let off = draw(
+            Mode::Off,
+            Order::Browse,
+            &conn,
+            &seed(provided, Vec::new(), 3),
+        );
+        assert!(off.is_empty());
+
+        let plain = draw(
+            Mode::Continue,
+            Order::Browse,
+            &conn,
+            &seed(Scope::Library, Vec::new(), 3),
+        );
+        assert_eq!(plain.len(), 3, "without one, the mode's provider draws");
     }
 
     #[test]

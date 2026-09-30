@@ -2,6 +2,8 @@
 //! everything else falls through to the gpui-component bundle.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{AssetSource, Result, SharedString};
 use rust_embed::RustEmbed;
@@ -338,10 +340,38 @@ fn shipped_json(prefix: &str) -> Vec<(String, Cow<'static, [u8]>)> {
         .collect()
 }
 
+const PLUGIN_ICONS: &str = "plugin-icons/";
+
+/// Icons plugins ship, by asset path. gpui draws an `svg()` only from the
+/// asset source, and that's what tints it like the app's own icons.
+static PLUGIN_ICON_BYTES: LazyLock<RwLock<HashMap<String, Arc<[u8]>>>> =
+    LazyLock::new(Default::default);
+
+/// Makes a plugin's icon loadable and answers its asset path. The path
+/// carries the folder hash, so an edited icon is a new path and gpui's cache
+/// never serves the old one.
+pub fn plugin_icon(id: &str, hash: &str, bytes: &[u8]) -> SharedString {
+    let stamp = hash.get(..16).unwrap_or(hash);
+    let path = format!("{PLUGIN_ICONS}{id}-{stamp}.svg");
+
+    if let Ok(mut icons) = PLUGIN_ICON_BYTES.write() {
+        icons
+            .entry(path.clone())
+            .or_insert_with(|| Arc::from(bytes));
+    }
+
+    path.into()
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path.is_empty() {
             return Ok(None);
+        }
+        if path.starts_with(PLUGIN_ICONS) {
+            let icons = PLUGIN_ICON_BYTES.read().ok();
+            let bytes = icons.and_then(|icons| icons.get(path).cloned());
+            return Ok(bytes.map(|bytes| Cow::Owned(bytes.to_vec())));
         }
         if let Some(f) = Self::get(path) {
             return Ok(Some(f.data));
@@ -361,6 +391,14 @@ impl AssetSource for Assets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plugin_icon_loads_by_the_path_it_was_given() {
+        let path = plugin_icon("tones", "0123456789abcdef0123", b"<svg/>");
+        assert_eq!(path.as_ref(), "plugin-icons/tones-0123456789abcdef.svg");
+        assert_eq!(Assets.load(&path).unwrap().as_deref(), Some(&b"<svg/>"[..]));
+        assert!(Assets.load("plugin-icons/other-0.svg").unwrap().is_none());
+    }
 
     #[test]
     fn every_catalog_icon_resolves() {

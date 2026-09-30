@@ -697,6 +697,11 @@ impl TrackInfoPanel {
             cx,
             Rc::new(move |cx: &App| panel::CopyText::playing(&state, cx).into_iter().collect()),
         );
+        let playing = self.state.player.read(cx).now_playing();
+        let menu = match playing.and_then(|now| panel::plugin_item(&now.key)) {
+            Some((source, item)) => panel::link_items(menu, &source, item),
+            None => menu,
+        };
         let mut menu = menu
             .separator()
             .label(rox_i18n::t!("track-info-menu-overflow"));

@@ -3104,6 +3104,10 @@ pub struct QueueState {
     pub entries: Vec<QueuedTrack>,
     pub cursor: usize,
     pub position_secs: f64,
+    /// The context's own continuation provider, like a source's radio, as it
+    /// saved itself. Empty for none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub station: String,
 }
 
 /// `explicit` marks a hand-queued entry, the only kind the queue panel lists.
@@ -5235,6 +5239,7 @@ mod tests {
                 ],
                 cursor: 1,
                 position_secs: 12.5,
+                station: String::new(),
             }),
             ..SessionState::default()
         };

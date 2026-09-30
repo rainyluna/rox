@@ -1231,6 +1231,26 @@ impl Player {
             .collect()
     }
 
+    /// The next `n` entries the listener hears after the audible one, queued
+    /// or context, with each entry's id for [`jump_to`](Self::jump_to). Clones
+    /// a path per entry, so read it when `queue_rev` or the audible track
+    /// moves, not per frame.
+    pub fn up_next(&self, n: usize) -> Vec<(u64, TrackKey)> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let snap = session.shared.queue_snapshot();
+        let start = self.audible_index(&snap).map(|i| i + 1).unwrap_or(0);
+
+        snap.entries
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .take(n)
+            .map(|e| (e.id, self.key_for(e)))
+            .collect()
+    }
+
     pub fn queued_count(&self) -> usize {
         self.queued().len()
     }
@@ -1300,7 +1320,7 @@ impl Player {
     }
 
     /// Queue at the front of the explicit queue. With nothing loaded this
-    /// starts them.
+    /// loads them paused.
     pub fn play_next(&mut self, keys: Vec<TrackKey>, cx: &mut Context<Self>) {
         let after = self.playing_after();
         self.insert(after, keys, false, cx);
@@ -1332,6 +1352,7 @@ impl Player {
     }
 
     /// Append after anything already queued, before the context resumes.
+    /// With nothing loaded this loads them paused.
     pub fn enqueue(&mut self, keys: Vec<TrackKey>, cx: &mut Context<Self>) {
         let after = self.enqueue_after();
         self.insert(after, keys, false, cx);
@@ -1401,10 +1422,20 @@ impl Player {
         if keys.is_empty() {
             return;
         }
+
+        // Queueing onto nothing loads the queue and waits for Play, the way
+        // a launch restore does. Only a play starts it.
         if self.session.is_none() {
-            self.play(keys, cx);
+            match and_play {
+                true => self.play(keys, cx),
+                false => {
+                    let explicit = vec![true; keys.len()];
+                    self.start_session(keys, 0, Some(0.0), explicit, true, cx);
+                }
+            }
             return;
         }
+
         self.splice(after, keys, None, true, and_play, None, cx);
     }
 
@@ -1821,15 +1852,21 @@ impl Player {
         cx.spawn(async move |this, cx| {
             // Blocking store queries go on the background executor (ADR 14),
             // on their own connection.
+            let provided = matches!(seed.scope, continuation::Scope::Provided(_));
             let picks = cx
                 .background_executor()
                 .spawn(async move {
-                    let provider = continuation::provider(mode, order)?;
                     let conn = store::open(&db_path).ok()?;
-                    Some(provider.next(&conn, &seed))
+                    Some(continuation::draw(mode, order, &conn, &seed))
                 })
                 .await
                 .unwrap_or_default();
+
+            // A provided batch can bring rows the projection hasn't seen,
+            // like a radio's tracks, which it wrote as it drew them.
+            if provided && !picks.is_empty() {
+                cx.update(crate::plugins::reload_library).ok();
+            }
             this.update(cx, |this, cx| {
                 this.continuing = false;
                 this.land_continuation(mode, order, force, picks, cx);
@@ -2003,6 +2040,22 @@ impl Player {
     /// clears the scope (ADR 17).
     pub fn set_scope(&mut self, scope: continuation::Scope) {
         self.scope = scope;
+    }
+
+    /// The context's own provider as it saves itself, for the queue saved at
+    /// close.
+    pub fn station(&self) -> Option<String> {
+        match &self.scope {
+            continuation::Scope::Provided(provided) => provided.saved(),
+            _ => None,
+        }
+    }
+
+    /// Call after `restore_queue`, since starting the session clears the scope.
+    pub fn restore_station(&mut self, saved: &str, cx: &App) {
+        if let Some(scope) = crate::plugins::station_from(saved, cx) {
+            self.scope = scope;
+        }
     }
 
     /// The pool plus the heard ring: the pool forgets the past when a press

@@ -135,7 +135,7 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [14 - Online providers](decisions/14-adr-online-providers.md) | Per-domain provider traits for online enrichment | Decided |
 | [15 - Shared query](decisions/15-adr-global-filter.md) | App-wide search entity panels follow by default, opt out per view | Decided |
 | [16 - Play queue](decisions/16-adr-play-queue.md) | Mutable timeline the engine owns, playlists in the library store | Decided |
-| [17 - Queue continuation](decisions/17-adr-queue-continuation.md) | Single provider feeding the live timeline | Decided |
+| [17 - Queue continuation](decisions/17-adr-queue-continuation.md) | Single provider feeding the live timeline | Decided; a context bringing its own provider added by its amendment |
 | [18 - Tag editor](decisions/18-adr-tag-editor.md) | Shared batch form plus a per-file table, not foobar's per-field step-in | Decided |
 | [19 - Processing chain](decisions/19-adr-processing-chain.md) | DSP chain pre-ring on the decode thread, exclusive output behind the seam | Decided |
 | [20 - Settings split](decisions/20-adr-settings-split.md) | Preferences, look, windows, session, and accounts each in a file of their own | Decided |
@@ -148,4 +148,4 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [27 - i18n](decisions/27-adr-i18n.md) | Fluent messages and ICU4X formatting behind one locale static, en-CA as source | Decided |
 | [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Decided |
 | [29 - Source contract](decisions/29-adr-source-contract.md) | Sources as rows under a source id, in-process, trait and host deferred | Decided; plugin streams, rows by membership and picks kept out of the library added by its amendments, host taken up by 30 |
-| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Decided; one switch opting in and Developer mode added by its amendment |
+| [30 - Plugins](decisions/30-adr-plugins.md) | Plugins as subprocesses bringing something external in, from a closed capability set, audio as bytes they serve | Decided; one switch opting in and Developer mode, then radio, fields and views, added by its amendments |

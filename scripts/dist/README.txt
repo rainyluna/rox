@@ -302,11 +302,32 @@ folder. If any of them change, it switches off until you switch it on
 again. The card then shows what changed.
 
 Browse and search a plugin's source by picking it under Add Panel >
-Plugins, which opens the External Sources panel on it. Keep in the
-library on a collection syncs it into your library. Playing or queueing
-a track plays it without adding it; Add to Library on a track keeps it.
-Remove on the Plugins page drops the plugin's tracks, synced collections
-and settings, and leaves its folder where it is.
+Plugins, which opens the External Sources panel on it. Hover a
+collection and click its checkmark to keep it in your library, which
+syncs it and follows its changes. Playing or queueing a track plays it
+without adding it; Add to Library on a track keeps it. Remove on the
+Plugins page drops the plugin's tracks, synced collections and settings,
+and leaves its folder where it is.
+
+What the panel offers depends on the plugin:
+
+  - Right-click an album, playlist or artist to Play it, Play Next or
+    Add to Queue. Inside one, the same buttons sit over its tracks.
+  - Start Radio plays what you picked, then keeps the queue going with
+    the service's picks. An album or playlist you play goes on the same
+    way when it ends, and a radio carries on after a restart. It stops
+    when continuation is Off in the playback settings.
+  - Chips over a list switch between the plugin's views, like search
+    narrowed to albums. A column heading, like a popularity, sorts by
+    it.
+  - Covers can come as shelves you scroll sideways: shift and the wheel,
+    or a sideways swipe.
+  - Open in Browser and Copy Link take you to an item's page on the
+    service, wherever its tracks show in rox.
+
+While one of the plugin's tracks plays, the panel's top level shows it
+and what's next. Click the plugin's name or logo at the top of the panel
+to get back there.
 
 The Plugin Guide button on the Plugins page opens the guide to writing a
 plugin, with the protocol and an example to copy. It's also at

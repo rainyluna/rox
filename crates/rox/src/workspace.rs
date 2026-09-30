@@ -3620,8 +3620,18 @@ impl Workspace {
                 (!keys.is_empty()).then_some((keys, explicit, cursor, q.position_secs))
             });
             if let Some((keys, explicit, cursor, position_secs)) = queue {
+                let station = settings
+                    .session
+                    .last_queue
+                    .as_ref()
+                    .map(|q| q.station.clone())
+                    .unwrap_or_default();
+
                 state.player.update(cx, |player, cx| {
-                    player.restore_queue(keys, explicit, cursor, position_secs, cx)
+                    player.restore_queue(keys, explicit, cursor, position_secs, cx);
+                    if !station.is_empty() {
+                        player.restore_station(&station, cx);
+                    }
                 });
             } else if let Some(last) = settings.session.last_track {
                 // The same source-aware lookup the queue above takes, for the
@@ -5554,6 +5564,7 @@ impl Workspace {
         // the cursor tracks the last kept entry at or before it so it stays
         // on the playing track. Everything gone (or nothing playing) clears
         // it and the single-track fallback above does the restore.
+        let station = self.state.player.read(cx).station().unwrap_or_default();
         let last_queue = self.state.player.read(cx).queue_state().and_then(
             |(entries, cursor, position_secs)| {
                 let mut tracks = Vec::with_capacity(entries.len());
@@ -5574,6 +5585,7 @@ impl Workspace {
                     entries: tracks,
                     cursor: new_cursor,
                     position_secs,
+                    station,
                 })
             },
         );

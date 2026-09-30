@@ -25,8 +25,11 @@ use rox_core::settings::{self, PluginRecord, Settings, SyncedCollection};
 use rox_library::cue::{PLUGIN_PREFIX, TrackKey};
 use rox_library::locator::{Locator, PluginStream};
 use rox_library::members::{self, PluginTrack};
+use rox_library::rusqlite::Connection;
 use rox_library::store;
+use rox_playback::continuation::{self, Pick};
 use rox_playback::plugin::{Opened, ReadAt};
+use rox_plugins::manifest::SourceCap;
 use rox_plugins::{Host, HostConfig, Loaded, Options, Status, Stream, loader, wire};
 
 use crate::catalog::Library;
@@ -50,11 +53,54 @@ const MAX_SYNC_PAGES: usize = 2000;
 const FIRST_APPLY_WAIT: Duration = Duration::from_secs(10);
 
 /// One page of a browse or search. A `None` cursor is the last page.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Page {
     pub entries: Vec<Entry>,
     pub cursor: Option<String>,
     pub notice: Option<Notice>,
+    /// Other ways the plugin can list this place, and which one this is.
+    pub views: Vec<View>,
+    pub view: Option<String>,
+    /// Columns the plugin fills beside the tags, and each entry's values,
+    /// lined up with `entries`. Shorter than `entries` when rows have none.
+    pub fields: Vec<Field>,
+    pub values: Vec<Values>,
+}
+
+/// A column the plugin's service knows, like a popularity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub id: String,
+    pub label: String,
+    pub kind: FieldKind,
+}
+
+pub use rox_plugins::wire::{FieldKind, MAX_FIELDS};
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldValue {
+    Number(f64),
+    Text(String),
+}
+
+/// One entry's values by field id.
+pub type Values = Vec<(String, FieldValue)>;
+
+fn values_of(wire: wire::Values) -> Values {
+    wire.into_iter()
+        .filter_map(|(id, value)| match value {
+            Value::Number(n) => n.as_f64().map(|n| (id, FieldValue::Number(n))),
+            Value::String(text) => Some((id, FieldValue::Text(text))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A filter or an order the plugin's service applies to a place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct View {
+    pub id: String,
+    pub label: String,
 }
 
 /// What the plugin wants said over a page. `setup` means it needs a setting
@@ -63,6 +109,14 @@ pub struct Page {
 pub struct Notice {
     pub text: String,
     pub setup: bool,
+    pub link: Option<NoticeLink>,
+}
+
+/// A web page a notice offers to open. The host has checked it's http or https.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeLink {
+    pub url: String,
+    pub label: String,
 }
 
 /// Why a plugin source has nothing to answer with, in terms the user can act
@@ -91,9 +145,22 @@ pub enum Entry {
         title: String,
         subtitle: String,
         collection: bool,
+        kind: Option<NodeKind>,
+        /// A key the plugin answers a cover for. Empty for none.
+        art: String,
+        /// The service's home, whose page can follow the roots.
+        home: bool,
     },
     Track(PluginTrack),
+    /// A heading over the entries after it. `tiles` shows them as a shelf of
+    /// covers rather than rows.
+    Section {
+        title: String,
+        tiles: bool,
+    },
 }
+
+pub use rox_plugins::wire::NodeKind;
 
 /// A plugin with a host, and what the host was built from: a new hash or new
 /// config means a new host.
@@ -1065,19 +1132,35 @@ fn track(wire: wire::Track) -> PluginTrack {
 }
 
 fn page(wire: wire::Page) -> Page {
-    let entries = wire
+    let (entries, values) = wire
         .entries
         .into_iter()
         .map(|entry| match entry {
-            wire::Entry::Node(node) => Entry::Node {
-                id: node.id,
-                title: node.title,
-                subtitle: node.subtitle,
-                collection: node.collection,
-            },
-            wire::Entry::Track(t) => Entry::Track(track(t)),
+            wire::Entry::Node(node) => (
+                Entry::Node {
+                    id: node.id,
+                    title: node.title,
+                    subtitle: node.subtitle,
+                    collection: node.collection,
+                    kind: node.kind,
+                    art: node.art,
+                    home: node.home,
+                },
+                values_of(node.values),
+            ),
+            wire::Entry::Track(mut t) => {
+                let values = values_of(std::mem::take(&mut t.values));
+                (Entry::Track(track(t)), values)
+            }
+            wire::Entry::Section(section) => (
+                Entry::Section {
+                    title: section.title,
+                    tiles: section.layout == wire::Layout::Tiles,
+                },
+                Values::new(),
+            ),
         })
-        .collect();
+        .unzip();
 
     Page {
         entries,
@@ -1085,7 +1168,30 @@ fn page(wire: wire::Page) -> Page {
         notice: wire.notice.map(|notice| Notice {
             text: notice.text,
             setup: notice.kind == wire::NoticeKind::Setup,
+            link: notice.link.map(|link| NoticeLink {
+                url: link.url,
+                label: link.label,
+            }),
         }),
+        views: wire
+            .views
+            .into_iter()
+            .map(|view| View {
+                id: view.id,
+                label: view.label,
+            })
+            .collect(),
+        view: wire.view,
+        fields: wire
+            .fields
+            .into_iter()
+            .map(|field| Field {
+                id: field.id,
+                label: field.label,
+                kind: field.kind,
+            })
+            .collect(),
+        values,
     }
 }
 
@@ -1110,33 +1216,396 @@ fn listing(
     })
 }
 
-/// `node: None` asks for the roots.
+/// `node: None` asks for the roots. `view` is one the place's first page
+/// offered, or None for the plugin's default.
 pub fn browse(
     source: &str,
     node: Option<String>,
+    view: Option<String>,
     cursor: Option<String>,
     cx: &App,
 ) -> Task<Result<Page, String>> {
-    listing(
-        source,
-        "source.browse",
-        json!({ "node": node, "cursor": cursor }),
-        cx,
-    )
+    let mut params = json!({ "node": node, "cursor": cursor });
+    with_view(&mut params, view);
+
+    listing(source, "source.browse", params, cx)
 }
 
 pub fn search(
     source: &str,
     query: String,
+    view: Option<String>,
     cursor: Option<String>,
     cx: &App,
 ) -> Task<Result<Page, String>> {
-    listing(
-        source,
-        "source.search",
-        json!({ "query": query, "cursor": cursor }),
-        cx,
-    )
+    let mut params = json!({ "query": query, "cursor": cursor });
+    with_view(&mut params, view);
+
+    listing(source, "source.search", params, cx)
+}
+
+/// Only sent once the plugin offered views, so a plugin that never heard of
+/// them never sees the key.
+fn with_view(params: &mut Value, view: Option<String>) {
+    if let (Some(view), Some(params)) = (view, params.as_object_mut()) {
+        params.insert("view".into(), Value::String(view));
+    }
+}
+
+/// Whether a running plugin's manifest offers a radio.
+pub fn has_radio(source: &str) -> bool {
+    offers(source, |cap| cap.radio)
+}
+
+/// Whether a running plugin's manifest offers links to its tracks and nodes.
+pub fn has_links(source: &str) -> bool {
+    offers(source, |cap| cap.links)
+}
+
+fn offers(source: &str, what: impl Fn(&SourceCap) -> bool) -> bool {
+    running(source).is_some_and(|running| {
+        running
+            .host
+            .manifest()
+            .capabilities
+            .source
+            .as_ref()
+            .is_some_and(what)
+    })
+}
+
+/// The web page of a track's key or a node's id, asked when the user picks
+/// Open in Browser or Copy Link. None when the plugin has no page for it.
+pub fn link(source: &str, item: String, cx: &App) -> Task<Result<Option<String>, String>> {
+    let source = source.to_string();
+
+    cx.background_executor().spawn(async move {
+        await_first_apply(&source);
+        let host = host_for(&source)?;
+
+        let answer = host.call(
+            "source.link",
+            json!({ "item": item }),
+            host.timeouts().listing,
+        )?;
+        if answer.is_null() {
+            return Ok(None);
+        }
+
+        wire::decode::<wire::Link>(answer).map(|link| Some(link.url))
+    })
+}
+
+/// One batch of a station, and where the next starts. Blocking.
+fn radio_page(
+    source: &str,
+    seed: &str,
+    cursor: Option<String>,
+) -> Result<(Vec<PluginTrack>, Option<String>), String> {
+    await_first_apply(source);
+    let host = host_for(source)?;
+
+    let params = json!({ "seed": seed, "cursor": cursor, "count": continuation::BATCH });
+    let page = host
+        .call("source.radio", params, host.timeouts().listing)
+        .and_then(wire::decode::<wire::RadioPage>)?;
+
+    Ok((page.tracks.into_iter().map(track).collect(), page.cursor))
+}
+
+/// A plugin's station, drawn from while the context it started plays (ADR
+/// 17). Its tracks become picks as they're drawn: played, never kept.
+struct Station {
+    source: String,
+    db_path: PathBuf,
+    /// The seed the station plays from, and where its next batch starts. An
+    /// empty seed is a station that follows a play: it seeds from the last of
+    /// the source's tracks heard when the queue first runs low.
+    at: Mutex<(String, Option<String>)>,
+}
+
+/// The saved form of a station: which plugin, and where it had got to.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedStation {
+    source: String,
+    seed: String,
+    cursor: Option<String>,
+}
+
+fn station_db(cx: &App) -> Option<PathBuf> {
+    Some(cx.try_global::<Wiring>()?.library.read(cx).db_path())
+}
+
+/// What a play from a plugin's panel continues with when the queue runs low:
+/// the plugin's radio, where it has one, rather than the local library.
+pub fn follow_on(source: &str, cx: &App) -> Option<continuation::Scope> {
+    if !has_radio(source) {
+        return None;
+    }
+
+    let station = Station {
+        source: source.to_string(),
+        db_path: station_db(cx)?,
+        at: Mutex::new((String::new(), None)),
+    };
+
+    Some(continuation::Scope::Provided(Arc::new(station)))
+}
+
+/// A station saved with the queue, brought back at launch. The plugin may
+/// not be running yet; its first draw waits for the hosts like any call.
+pub fn station_from(saved: &str, cx: &App) -> Option<continuation::Scope> {
+    let saved: SavedStation = serde_json::from_str(saved).ok()?;
+    if !saved.source.starts_with(PLUGIN_PREFIX) {
+        return None;
+    }
+
+    let station = Station {
+        source: saved.source,
+        db_path: station_db(cx)?,
+        at: Mutex::new((saved.seed, saved.cursor)),
+    };
+
+    Some(continuation::Scope::Provided(Arc::new(station)))
+}
+
+/// A station that only hands back what already played gets this many more
+/// asks before the queue ends.
+const STATION_TRIES: usize = 3;
+
+impl continuation::Provider for Station {
+    fn saved(&self) -> Option<String> {
+        let (seed, cursor) = self.at.lock().ok()?.clone();
+        let saved = SavedStation {
+            source: self.source.clone(),
+            seed,
+            cursor,
+        };
+
+        serde_json::to_string(&saved).ok()
+    }
+
+    fn next(&self, conn: &Connection, seed: &continuation::Seed) -> Vec<Pick> {
+        let seen: HashSet<i64> = seed.recent.iter().copied().collect();
+
+        for _ in 0..STATION_TRIES {
+            let Ok(mut at) = self.at.lock() else {
+                return Vec::new();
+            };
+            let (station, cursor) = at.clone();
+
+            // A station that follows a play seeds now, from where it got to.
+            let station = match station.is_empty() {
+                true => match self.last_heard(conn, seed) {
+                    Some(heard) => heard,
+                    None => return Vec::new(),
+                },
+                false => station,
+            };
+
+            let (tracks, next) = match radio_page(&self.source, &station, cursor) {
+                Ok(page) => page,
+                Err(e) => {
+                    log::warn!("{}: radio from {station}: {e}", self.source);
+                    return Vec::new();
+                }
+            };
+
+            // A station that ran out carries on from the last of its tracks
+            // heard, the way a service's own radio drifts.
+            *at = match next {
+                Some(next) => (station, Some(next)),
+                None => (self.last_heard(conn, seed).unwrap_or(station), None),
+            };
+            drop(at);
+
+            let picks = self.pick(&tracks, &seen, seed.count);
+            if !picks.is_empty() {
+                return picks;
+            }
+        }
+
+        Vec::new()
+    }
+}
+
+impl Station {
+    fn last_heard(&self, conn: &Connection, seed: &continuation::Seed) -> Option<String> {
+        seed.recent.iter().rev().find_map(|&id| {
+            let key = store::key_for_id(conn, id).ok().flatten()?;
+            (key.source.as_ref() == self.source).then(|| key.path.to_string_lossy().into_owned())
+        })
+    }
+
+    /// Writes the tracks as picks and answers their ids, less what played.
+    fn pick(&self, tracks: &[PluginTrack], seen: &HashSet<i64>, count: usize) -> Vec<Pick> {
+        let write = || -> Result<Vec<i64>, String> {
+            let mut conn = store::open(&self.db_path).map_err(|e| e.to_string())?;
+            let keys = members::pick(&mut conn, &self.source, tracks).map_err(|e| e.to_string())?;
+
+            Ok(keys
+                .iter()
+                .filter_map(|key| {
+                    let path = key.path.to_string_lossy();
+                    store::id_for_path(&conn, &self.source, &path)
+                        .ok()
+                        .flatten()
+                })
+                .collect())
+        };
+
+        let ids = match write() {
+            Ok(ids) => ids,
+            Err(e) => {
+                log::warn!("{}: radio rows: {e}", self.source);
+                return Vec::new();
+            }
+        };
+
+        let mut kept = HashSet::new();
+        ids.into_iter()
+            .filter(|id| !seen.contains(id) && kept.insert(*id))
+            .take(count)
+            .map(|id| Pick { id, group: None })
+            .collect()
+    }
+}
+
+/// Most of a node's tracks rox reads to play it: an album or a playlist,
+/// not a whole catalogue.
+const NODE_TRACKS: usize = 1000;
+
+/// Pages a node gets to reach [`NODE_TRACKS`], so a plugin paging empty
+/// pages can't keep a play waiting.
+const NODE_PAGES: usize = 50;
+
+/// Every track a node lists, across its pages, in the plugin's default view.
+/// Blocking.
+fn list_node(source: &str, node: &str) -> Result<Vec<PluginTrack>, String> {
+    await_first_apply(source);
+    let host = host_for(source)?;
+    let timeout = host.timeouts().listing;
+
+    let mut tracks = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    for _ in 0..NODE_PAGES {
+        let params = json!({ "node": node, "cursor": cursor });
+        let page = host
+            .call("source.browse", params, timeout)
+            .and_then(wire::decode::<wire::Page>)?;
+
+        tracks.extend(page.entries.into_iter().filter_map(|entry| match entry {
+            wire::Entry::Track(t) => Some(track(t)),
+            _ => None,
+        }));
+
+        cursor = page.cursor;
+        if cursor.is_none() || tracks.len() >= NODE_TRACKS {
+            break;
+        }
+    }
+
+    tracks.truncate(NODE_TRACKS);
+    Ok(tracks)
+}
+
+/// A node's tracks, for playing or queueing it whole.
+pub fn node_tracks(source: &str, node: &str, cx: &App) -> Task<Result<Vec<PluginTrack>, String>> {
+    let (source, node) = (source.to_string(), node.to_string());
+    cx.background_executor()
+        .spawn(async move { list_node(&source, &node) })
+}
+
+/// What a radio starts from, which plays before the station does.
+pub enum RadioSeed {
+    Track(PluginTrack),
+    /// A node's id: its own tracks play first, like an album before its
+    /// artist's radio.
+    Node(String),
+}
+
+/// Plays a station: the seed's own tracks now, then the station's first
+/// batch, and the rest as continuation draws it.
+pub fn start_radio(
+    library: Entity<Library>,
+    player: Entity<Player>,
+    source: &str,
+    seed: RadioSeed,
+    cx: &mut App,
+) -> Task<Result<(), String>> {
+    let source = source.to_string();
+    let db_path = library.read(cx).db_path();
+
+    cx.spawn(async move |cx| {
+        let asked = source.clone();
+        let (seed, lead, (batch, cursor)) = cx
+            .background_executor()
+            .spawn(async move {
+                let (seed, lead) = match seed {
+                    RadioSeed::Track(track) => (track.key.clone(), vec![track]),
+                    RadioSeed::Node(node) => {
+                        let lead = list_node(&asked, &node)?;
+                        (node, lead)
+                    }
+                };
+
+                let first = radio_page(&asked, &seed, None)?;
+                Ok::<_, String>((seed, lead, first))
+            })
+            .await?;
+
+        // The station often opens on the seed itself. Once is enough.
+        let mut tracks = lead;
+        let mut listed: HashSet<String> = tracks.iter().map(|t| t.key.clone()).collect();
+        tracks.extend(batch.into_iter().filter(|t| listed.insert(t.key.clone())));
+
+        if tracks.is_empty() {
+            return Err("the radio came back empty".to_string());
+        }
+
+        let picked = cx
+            .update(|cx| pick(library, &source, tracks, cx))
+            .map_err(|e| e.to_string())?;
+        let keys = picked.await?;
+
+        let station = Station {
+            source,
+            db_path,
+            at: Mutex::new((seed, cursor)),
+        };
+
+        player
+            .update(cx, |player, cx| {
+                player.play_at(keys, 0, cx);
+                // After the play: starting a session clears the scope.
+                player.set_scope(continuation::Scope::Provided(Arc::new(station)));
+            })
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Rows written outside a panel's own write, like a radio's, reach the
+/// views on the next projection.
+pub fn reload_library(cx: &mut App) {
+    let Some(wiring) = cx.try_global::<Wiring>() else {
+        return;
+    };
+
+    let library = wiring.library.clone();
+    library.update(cx, |library, cx| library.reload_projection(cx));
+}
+
+/// The asset path of a loaded plugin's icon, when it ships one.
+pub fn icon(source: &str) -> Option<gpui::SharedString> {
+    let id = source.strip_prefix(PLUGIN_PREFIX)?;
+    let folders = FOLDERS.read().ok()?;
+    let folder = folders
+        .iter()
+        .find(|folder| folder.id == id && folder.runs())?;
+    let bytes = folder.icon.as_deref()?;
+
+    Some(rox_design::assets::plugin_icon(id, &folder.hash, bytes))
 }
 
 /// Every page of one collection. None when the plugin says nothing changed
@@ -1525,6 +1994,37 @@ pub fn live_sources() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_station_saves_where_it_got_to() {
+        let station = Station {
+            source: "plugin:example".into(),
+            db_path: PathBuf::from("/nowhere/library.db"),
+            at: Mutex::new(("t1".into(), Some("40".into()))),
+        };
+
+        let saved = continuation::Provider::saved(&station).expect("a station saves");
+        let back: SavedStation = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            (
+                back.source.as_str(),
+                back.seed.as_str(),
+                back.cursor.as_deref()
+            ),
+            ("plugin:example", "t1", Some("40"))
+        );
+
+        let following = Station {
+            at: Mutex::new((String::new(), None)),
+            ..station
+        };
+        let saved = continuation::Provider::saved(&following).unwrap();
+        let back: SavedStation = serde_json::from_str(&saved).unwrap();
+        assert!(
+            back.seed.is_empty(),
+            "a follow-on station still seeds itself after a restart"
+        );
+    }
 
     #[test]
     fn the_gate_wakes_a_waiter_when_it_opens() {

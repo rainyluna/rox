@@ -1,12 +1,15 @@
 //! The Radio settings page: the stations the library holds, added by URL or
-//! imported from a `.pls` or `.m3u`. Not a Library source, since a station has
-//! no catalog behind it.
+//! imported from a `.pls` or `.m3u`, and capture. Not a Library source, since a
+//! station has no catalog behind it. Capture sits here because it only ever
+//! saves from radio: a plugin stream never reaches it (ADR 30).
 
 use super::*;
 
 impl SettingsWindow {
     pub(super) fn radio_page(&self, q: &Query, cx: &mut Context<Self>) -> PageBody {
-        PageBody::new().section(self.stations_section(q, cx))
+        PageBody::new()
+            .section(self.stations_section(q, cx))
+            .section(self.capture_section(q, cx))
     }
 
     fn stations_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
@@ -299,6 +302,189 @@ impl SettingsWindow {
             .update(cx, |library, cx| library.reload_projection(cx));
         self.stations = read_stations(&self.library, cx);
         cx.notify();
+    }
+
+    /// The warning matters: a station flips its title a few seconds off the
+    /// audio switch, so saved songs carry a little of their neighbours.
+    fn capture_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        Section::new(
+            q,
+            icons::DOWNLOAD,
+            rox_i18n::t!("settings-playback-section-capture"),
+            None,
+            |rows| {
+                let buffer = self.playback.read(cx).live_buffer_secs();
+
+                rows.keyed(
+                    "settings-playback-capture-enable",
+                    &[
+                        "capture", "record", "save", "rip", "radio", "station", "stream",
+                    ],
+                    panel::toggle(self.capture_enabled, Self::set_capture_enabled, cx),
+                )
+                // Capture can't save a song longer than the buffer. Warn, not
+                // Bad: nothing failed.
+                .when(
+                    self.capture_enabled && buffer < settings::DEFAULT_LIVE_BUFFER_SECS,
+                    |rows| {
+                        rows.custom(&["capture", "buffer", "short", "length"], || {
+                            panel::banner(
+                                panel::Tone::Warn,
+                                rox_i18n::t!("settings-playback-capture-buffer-title"),
+                                vec![rox_i18n::t!(
+                                    "settings-playback-capture-buffer-note",
+                                    buffer = settings_ui::fmt_duration_secs(buffer as f32),
+                                    default = settings_ui::fmt_duration_secs(
+                                        settings::DEFAULT_LIVE_BUFFER_SECS as f32
+                                    ),
+                                )],
+                            )
+                            .into_any_element()
+                        })
+                    },
+                )
+                .when(self.capture_enabled, |rows| {
+                    let folder = self.capture_folder.clone();
+
+                    // The renamer's vocabulary; the tip adds the three names a
+                    // broadcast reads its own way.
+                    let notes = vec![
+                        rox_i18n::t!("settings-playback-capture-pattern-station"),
+                        rox_i18n::t!("settings-playback-capture-pattern-source"),
+                        rox_i18n::t!("settings-playback-capture-pattern-date"),
+                    ];
+                    let sample =
+                        capture::Sample::playing(self.playback.read(cx)).unwrap_or_default();
+                    let preview =
+                        capture::preview(self.capture_pattern.read(cx).value().trim(), &sample);
+                    let pattern_input = self.capture_pattern.clone();
+                    let album_input = self.capture_album.clone();
+
+                    rows.row_dyn(
+                        &[
+                            "capture",
+                            "folder",
+                            "where",
+                            "destination",
+                            "save",
+                            "reveal",
+                        ],
+                        rox_i18n::t!("settings-playback-capture-folder"),
+                        Some(self.capture_folder.display().to_string().into()),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(tokens::SPACE_SM)
+                            .child(small_button(
+                                rox_i18n::t!("settings-playback-capture-choose"),
+                                icons::FOLDER,
+                                false,
+                                cx.listener(|this, _, window, cx| {
+                                    this.pick_capture_folder(window, cx)
+                                }),
+                            ))
+                            .child(small_button(
+                                rox_i18n::t!("settings-common-reveal"),
+                                icons::FOLDER,
+                                false,
+                                move |_, _, cx| {
+                                    if let Err(e) = std::fs::create_dir_all(&folder) {
+                                        log::warn!("capture: creating the folder failed: {e}");
+                                        return;
+                                    }
+                                    cx.reveal_path(&folder);
+                                },
+                            )),
+                    )
+                    .custom(
+                        &[
+                            "capture",
+                            "pattern",
+                            "name",
+                            "naming",
+                            "folder",
+                            "structure",
+                        ],
+                        move || {
+                            let note = match preview {
+                                Ok(name) => PatternNote::Preview(rox_i18n::t!(
+                                    "settings-playback-capture-pattern-preview",
+                                    name = name
+                                )),
+
+                                Err(e) => PatternNote::Wrong(e.into()),
+                            };
+
+                            panel::setting_block(
+                                rox_i18n::t!("settings-playback-capture-pattern"),
+                                Some(rox_i18n::t!(
+                                    "settings-playback-capture-pattern.description"
+                                )),
+                                None,
+                                panel::pattern_input(
+                                    "capture-pattern",
+                                    &pattern_input,
+                                    rox_core::pattern::PLACEHOLDERS,
+                                    notes,
+                                    Some(note),
+                                )
+                                .flex_1()
+                                .min_w_0(),
+                            )
+                            .into_any_element()
+                        },
+                    )
+                    .custom(
+                        &["capture", "album", "tag", "station", "singles", "radio"],
+                        move || {
+                            panel::setting_block(
+                                rox_i18n::t!("settings-playback-capture-album"),
+                                Some(rox_i18n::t!("settings-playback-capture-album.description")),
+                                None,
+                                Input::new(&album_input).small(),
+                            )
+                            .into_any_element()
+                        },
+                    )
+                })
+            },
+        )
+    }
+
+    /// The transport's tee reads the file, so write it and tell the service to
+    /// look again.
+    fn set_capture_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.capture_enabled = on;
+        Settings::update(move |s| s.capture.enabled = on);
+        rox_services::capture::apply();
+        cx.notify();
+    }
+
+    fn pick_capture_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = rx.await else {
+                return;
+            };
+            let Some(folder) = paths.pop() else {
+                return;
+            };
+
+            this.update(cx, |this, cx| {
+                this.capture_folder = folder.clone();
+                Settings::update(move |s| s.capture.folder = folder.clone());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 

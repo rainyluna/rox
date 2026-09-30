@@ -63,6 +63,9 @@ What a plugin can do is a short list, and it grows only by a product decision:
   plays, queues, and keeps in playlists like any other source's.
 - List panels under its own name in Add Panel. Each one is a preset of a panel rox
   already ships, set up for the plugin's source.
+- Offer a radio. Started from one of its tracks, albums or artists, the service picks
+  what plays next, and rox keeps playing it through its own engine as the queue runs
+  down.
 
 A plugin can use programs the user has installed, such as a command-line downloader. It
 lists the ones it needs, and rox says which are missing.

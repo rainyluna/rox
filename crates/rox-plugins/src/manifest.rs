@@ -28,6 +28,9 @@ pub const FILE: &str = "plugin.json";
 /// A manifest is a few hundred bytes; this only stops a huge file being read.
 const MAX_BYTES: u64 = 256 * 1024;
 
+/// A logo is a few KiB.
+const MAX_ICON_BYTES: u64 = 64 * 1024;
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -88,6 +91,18 @@ pub struct SourceCap {
     /// Off unless the plugin asks: plugin rows don't scrobble by default.
     #[serde(default)]
     pub scrobble: bool,
+    /// A square SVG in the plugin's folder, drawn as a mask in the theme's
+    /// text colour where the source's name would go. Empty for none.
+    #[serde(default)]
+    pub icon: String,
+    /// Answers `source.radio`: a station seeded from a track or a node,
+    /// which continuation draws from while its context plays.
+    #[serde(default)]
+    pub radio: bool,
+    /// Answers `source.link`: the web page of a track or a node, which rox
+    /// opens or copies on a click.
+    #[serde(default)]
+    pub links: bool,
 }
 
 /// A preset of a core panel kind, listed under the plugin in Add Panel.
@@ -235,7 +250,7 @@ fn entry_with(
 ) -> Result<Command, String> {
     match &manifest.entry {
         Entry::Script(script) => {
-            let file = inside(dir, &script.path)?;
+            let file = inside(dir, &script.path, "entry")?;
             let (program, args) = interpreter(&script.interpreter, path_var, probe)
                 .ok_or_else(|| format!("interpreter {} not found", script.interpreter))?;
 
@@ -250,27 +265,66 @@ fn entry_with(
                 .get(platform)
                 .ok_or_else(|| format!("no build for {platform}"))?;
 
-            Ok(Command::new(inside(dir, rel)?))
+            Ok(Command::new(inside(dir, rel, "entry")?))
         }
     }
 }
 
 /// A plugin's own path, refused if it could name anything outside its folder.
-fn inside(dir: &Path, rel: &str) -> Result<PathBuf, String> {
+fn inside(dir: &Path, rel: &str, what: &str) -> Result<PathBuf, String> {
     let rel_path = Path::new(rel);
     let plain = rel_path
         .components()
         .all(|c| matches!(c, Component::Normal(_)));
     if rel.is_empty() || !plain {
-        return Err(format!("entry path {rel:?} leaves the plugin folder"));
+        return Err(format!("{what} path {rel:?} leaves the plugin folder"));
     }
 
     let full = dir.join(rel_path);
     if !full.is_file() {
-        return Err(format!("entry {rel} is missing"));
+        return Err(format!("{what} {rel} is missing"));
     }
 
     Ok(full)
+}
+
+/// The source icon's bytes, None when the manifest names none.
+pub fn icon_for(manifest: &Manifest, dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    let Some(rel) = manifest
+        .capabilities
+        .source
+        .as_ref()
+        .map(|cap| cap.icon.as_str())
+        .filter(|rel| !rel.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if !rel.to_ascii_lowercase().ends_with(".svg") {
+        return Err(format!("icon {rel} isn't an .svg file"));
+    }
+
+    let path = inside(dir, rel, "icon")?;
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("icon {rel}: {e}"))?
+        .len();
+    if size > MAX_ICON_BYTES {
+        return Err(format!("icon {rel} is over {} KiB", MAX_ICON_BYTES / 1024));
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("icon {rel}: {e}"))?;
+
+    // The SVG renderer reads an image an <image> or <feImage> names from
+    // disk, so an icon that holds one could draw any file the user can read.
+    let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+    if ["<image", "<feimage", "<foreignobject"]
+        .iter()
+        .any(|tag| text.contains(tag))
+    {
+        return Err(format!("icon {rel} embeds an image, which an icon can't"));
+    }
+
+    Ok(Some(bytes))
 }
 
 /// What to try, in order, for an interpreter name. Any other name is looked
@@ -530,7 +584,10 @@ mod tests {
             manifest.capabilities.source,
             Some(SourceCap {
                 label: "Tones".into(),
-                scrobble: false
+                scrobble: false,
+                icon: String::new(),
+                radio: false,
+                links: false,
             })
         );
     }

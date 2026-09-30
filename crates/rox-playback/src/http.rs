@@ -1815,7 +1815,9 @@ mod tests {
 
     #[test]
     fn a_seek_past_the_download_asks_for_a_range_there() {
-        let fake = Fake::serving(bytes(3_000_000), "audio/mp4");
+        // Unpaced, the whole file can land before the seek and no range goes out.
+        let mut fake = Fake::serving(bytes(3_000_000), "audio/mp4");
+        Arc::get_mut(&mut fake).unwrap().pace = Some((Duration::from_millis(1), 16 * 1024));
         let mut opened = whole_open(fake.clone());
 
         read_n(&mut opened.source, 16);

@@ -1464,7 +1464,7 @@ impl LyricsPanel {
             return;
         }
         let subject = subject.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_, cx| {
             let saved = cx
                 .background_executor()
                 .spawn({
@@ -1483,7 +1483,11 @@ impl LyricsPanel {
             if saved.is_none() {
                 return;
             }
-            this.update(cx, |this, cx| this.reload(&subject, cx)).ok();
+
+            // Every panel, not just this one: auto-search is per panel, and
+            // one with it off on the same track already cached "none".
+            cx.update(|cx| rox_panel_api::openers::lyrics_saved(&subject, cx))
+                .ok();
         })
         .detach();
     }

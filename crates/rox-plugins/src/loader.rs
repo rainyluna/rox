@@ -35,6 +35,8 @@ pub struct Loaded {
     pub programs: Vec<(String, bool)>,
     /// Why this folder can't run, if it can't.
     pub error: Option<String>,
+    /// The source icon's SVG, checked by `manifest::icon_for`.
+    pub icon: Option<Vec<u8>>,
 }
 
 impl Loaded {
@@ -52,6 +54,7 @@ impl Loaded {
             hash: String::new(),
             programs: Vec::new(),
             error: Some(error),
+            icon: None,
         }
     }
 }
@@ -107,6 +110,8 @@ fn load(id: String, dir: PathBuf) -> Loaded {
         Err(e) => (String::new(), Some(e)),
     };
 
+    let icon = manifest::icon_for(&manifest, &dir);
+
     // The source id is fixed by the manifest, and the host finds a plugin by
     // its folder, so the two have to agree.
     let error = match manifest.id == id {
@@ -114,7 +119,9 @@ fn load(id: String, dir: PathBuf) -> Loaded {
             "the folder is named {id} but holds plugin {}",
             manifest.id
         )),
-        true => hash_error.or_else(|| manifest::entry_for(&manifest, &dir).err()),
+        true => hash_error
+            .or_else(|| manifest::entry_for(&manifest, &dir).err())
+            .or_else(|| icon.as_ref().err().cloned()),
     };
 
     Loaded {
@@ -125,6 +132,7 @@ fn load(id: String, dir: PathBuf) -> Loaded {
         hash,
         programs,
         error,
+        icon: icon.ok().flatten(),
     }
 }
 
@@ -275,6 +283,58 @@ mod tests {
         );
         assert_eq!(tones.document["name"], "Tones");
         assert_eq!(tones.programs, vec![("rox-no-such-program".into(), false)]);
+    }
+
+    #[test]
+    fn a_source_icon_loads_only_from_a_plain_svg_in_the_folder() {
+        let scratch = Scratch::new("icon");
+        let with_icon = |id: &str, icon: &str| {
+            let manifest = format!(
+                r#"{{
+                    "id": "{id}",
+                    "name": "Tones",
+                    "version": "0.1.0",
+                    "api": 1,
+                    "entry": {{ "native": {{ "{}": "bin/tones" }} }},
+                    "capabilities": {{ "source": {{ "label": "Tones", "icon": "{icon}" }} }}
+                }}"#,
+                manifest::platform()
+            );
+            scratch.write(&format!("{id}/plugin.json"), &manifest);
+            scratch.write(&format!("{id}/bin/tones"), "binary");
+        };
+
+        with_icon("good", "icon.svg");
+        scratch.write("good/icon.svg", "<svg xmlns='http://www.w3.org/2000/svg'/>");
+        with_icon("missing", "icon.svg");
+        with_icon("escapes", "../good/icon.svg");
+        with_icon("png", "icon.png");
+        scratch.write("png/icon.png", "png");
+        with_icon("peeks", "icon.svg");
+        scratch.write("peeks/icon.svg", "<svg><IMAGE href='/etc/passwd'/></svg>");
+
+        let found = scan(&scratch.0);
+        let by_id = |id: &str| found.iter().find(|p| p.id == id).unwrap();
+
+        assert!(by_id("good").runs(), "{:?}", by_id("good").error);
+        assert!(
+            by_id("good")
+                .icon
+                .as_deref()
+                .is_some_and(|b| b.starts_with(b"<svg"))
+        );
+
+        for (id, words) in [
+            ("missing", "is missing"),
+            ("escapes", "leaves the plugin folder"),
+            ("png", "isn't an .svg"),
+            ("peeks", "embeds an image"),
+        ] {
+            let plugin = by_id(id);
+            let error = plugin.error.as_deref().unwrap_or_default();
+            assert!(error.contains(words), "{id}: {error}");
+            assert!(plugin.icon.is_none(), "{id}");
+        }
     }
 
     #[test]
