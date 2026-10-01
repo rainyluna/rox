@@ -15,7 +15,7 @@
   "capabilities": {
     "source": {
       "label": "Internet Archive",
-      "scrobble": false,
+      "scrobble": true,
       "icon": "icon.svg",
       "radio": true,
       "links": true

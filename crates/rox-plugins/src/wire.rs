@@ -271,6 +271,8 @@ pub const FEATURES: &[&str] = &[
     "fields",
     "tiles",
     "home",
+    "open-duration",
+    "go-to",
 ];
 
 /// More than a row of chips holds.
@@ -486,6 +488,9 @@ pub struct Track {
     /// The `fields` feature's values. Sync ignores them: a kept row holds
     /// only its tags.
     pub values: Values,
+    /// The `go-to` feature. Sync ignores it too. Boxed, since most tracks
+    /// leave it out.
+    pub go_to: Option<Box<GoTo>>,
 }
 
 impl Checked for Track {
@@ -506,7 +511,28 @@ impl Checked for Track {
         .into_iter()
         .try_for_each(|(field, value)| string(field, value))?;
 
-        values("track value", &self.values)
+        values("track value", &self.values)?;
+        self.go_to.as_ref().map_or(Ok(()), |go_to| go_to.check())
+    }
+}
+
+/// The nodes a track's album and artists open, for Go to in the source
+/// browser.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GoTo {
+    pub album: Option<Node>,
+    pub artists: Vec<Node>,
+}
+
+impl Checked for GoTo {
+    fn check(&self) -> Result<(), String> {
+        list("go_to artists", &self.artists)?;
+
+        self.album
+            .iter()
+            .chain(&self.artists)
+            .try_for_each(Node::check)
     }
 }
 
@@ -570,6 +596,10 @@ pub struct Open {
     /// Absent reads as whole.
     #[serde(default)]
     pub buffer: Option<Buffer>,
+    /// The stream's length, for a container that doesn't state one. Only
+    /// sent once `hello` listed `open-duration`.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 /// How much of a stream the host may fetch ahead. A plugin can only lower it.
@@ -845,6 +875,37 @@ mod tests {
         for bad in [
             json!({"entries": [{"section": {"title": " "}}]}),
             json!({"entries": [{"node": {"id": "x", "title": "x", "kind": "genre"}}]}),
+        ] {
+            assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_track_names_the_nodes_its_album_and_artists_open() {
+        let page: Page = decode(json!({
+            "entries": [{"track": {"key": "t1", "go_to": {
+                "album": {"id": "album:1", "title": "A", "kind": "album", "collection": true},
+                "artists": [
+                    {"id": "artist:1", "title": "B", "kind": "artist"},
+                    {"id": "artist:2", "title": "C", "kind": "artist"}
+                ]
+            }}}]
+        }))
+        .unwrap();
+
+        let Entry::Track(track) = &page.entries[0] else {
+            panic!("not a track");
+        };
+        let go_to = track.go_to.as_ref().unwrap();
+        assert_eq!(go_to.album.as_ref().unwrap().id, "album:1");
+        assert_eq!(go_to.artists.len(), 2);
+
+        let bare: Page = decode(json!({"entries": [{"track": {"key": "t2"}}]})).unwrap();
+        assert!(matches!(&bare.entries[0], Entry::Track(t) if t.go_to.is_none()));
+
+        for bad in [
+            json!({"entries": [{"track": {"key": "t", "go_to": {"album": {"id": "", "title": "A"}}}}]}),
+            json!({"entries": [{"track": {"key": "t", "go_to": {"label": "A"}}}]}),
         ] {
             assert!(decode::<Page>(bad.clone()).is_err(), "{bad}");
         }

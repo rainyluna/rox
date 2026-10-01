@@ -234,6 +234,12 @@ fn continuation_wanted(playing: bool, stop_after: bool) -> bool {
     playing && !stop_after
 }
 
+/// What every surface that offers Similar shuffle is gated on: an analyzed
+/// library, or a plugin whose radio draws it for its own tracks.
+pub fn similar_ready() -> bool {
+    rox_core::settings::similarity_ready() || crate::plugins::any_radio()
+}
+
 /// Whether engaging Similar should draw a radio batch now, ahead of the
 /// browse-order tracks still queued, instead of waiting for the floor. Off
 /// still wins, as it does in [`continuation::provider`].
@@ -2944,11 +2950,12 @@ impl Player {
         self.settings.session.shuffle
     }
 
-    /// Similar falls back to Random until the library is described. The
-    /// setting keeps Similar, so describing the library brings it back.
+    /// Similar falls back to Random while there's nothing to draw it from.
+    /// The setting keeps Similar, so describing the library or starting a
+    /// plugin with a radio brings it back.
     pub fn shuffle_mode(&self) -> ShuffleMode {
         let mode = self.settings.session.shuffle_mode;
-        if mode == ShuffleMode::Similar && !rox_core::settings::similarity_ready() {
+        if mode == ShuffleMode::Similar && !similar_ready() {
             return ShuffleMode::Random;
         }
         mode
@@ -4138,6 +4145,7 @@ mod tests {
                 source: source.into(),
                 key: "album/a.flac".into(),
                 live: true,
+                duration_ms: Some(180_000),
             })
         );
         assert!(live_flags(&locators)[0]);

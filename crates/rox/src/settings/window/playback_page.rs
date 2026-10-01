@@ -251,7 +251,7 @@ impl SettingsWindow {
     fn playback_behavior_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
         // The switch permits the pass but doesn't run it. The mode stays listed
         // so its row can say what's missing.
-        let analyzed = settings::similarity_ready();
+        let analyzed = rox_services::player::similar_ready();
         let shuffle_mode = self.playback.read(cx).shuffle_mode();
         let continuation = self.playback.read(cx).continuation_mode();
         Section::new(

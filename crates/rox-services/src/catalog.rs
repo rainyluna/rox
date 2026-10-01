@@ -1710,8 +1710,8 @@ impl Library {
 
     /// Ids stay put through [`store::rename_within`], so ratings and joins stay
     /// attached. The reattach passes refresh the path snapshots playlist
-    /// members and listens keep for when a row is pruned; the watch path never
-    /// runs them.
+    /// members, listens and bookmarks keep for when a row is pruned; the watch
+    /// path never runs them.
     pub fn rename_files(&mut self, moves: Vec<(PathBuf, PathBuf)>, cx: &mut Context<Self>) {
         if moves.is_empty() {
             return;
@@ -1725,7 +1725,9 @@ impl Library {
                 }
             }
             if failure.is_none()
-                && let Err(e) = playlists::reattach(conn).and_then(|_| listens::reattach(conn))
+                && let Err(e) = playlists::reattach(conn)
+                    .and_then(|_| listens::reattach(conn))
+                    .and_then(|_| bookmarks::reattach(conn))
             {
                 failure = Some(format!("library: {e}"));
             }

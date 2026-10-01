@@ -13,6 +13,7 @@ pub mod engine;
 pub mod eq;
 pub mod fingerprint;
 pub mod gain;
+pub mod growing;
 pub mod http;
 pub mod icy;
 pub mod latency;

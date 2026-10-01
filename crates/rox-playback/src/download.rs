@@ -12,6 +12,7 @@
 //! it. The bytes live until the last [`Buffered`] handle to them goes, and
 //! the engine only ever publishes weak ones.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,10 @@ const CHUNK: usize = 256 * 1024;
 /// How long a read waits for the download to bring its bytes.
 const READ_WAIT: Duration = Duration::from_secs(10);
 
+/// How often a trailing reader looks up from its wait to check it's still
+/// wanted.
+const TRAIL_POLL: Duration = Duration::from_millis(200);
+
 /// What the seekbar and the waveform read of a download.
 pub trait Buffered: Send + Sync {
     fn length(&self) -> u64;
@@ -38,6 +43,11 @@ pub trait Buffered: Send + Sync {
 
     /// The container's extension, empty when unknown.
     fn hint(&self) -> &str;
+
+    /// Up to `len` bytes at `offset` once they're here, empty past the end.
+    /// Never moves the download, so a reader trailing it can't pull it away
+    /// from what's playing. None once it failed, stopped, or `stop` is set.
+    fn trail(&self, offset: u64, len: usize, stop: &AtomicBool) -> Option<Vec<u8>>;
 }
 
 /// The [`ReadAt`] the decoder reads through. Dropping it stops the download.
@@ -309,6 +319,82 @@ impl Buffered for Inner {
     fn hint(&self) -> &str {
         &self.hint
     }
+
+    fn trail(&self, offset: u64, len: usize, stop: &AtomicBool) -> Option<Vec<u8>> {
+        if offset >= self.length || len == 0 {
+            return Some(Vec::new());
+        }
+
+        let mut state = self.state.lock().ok()?;
+        loop {
+            if let Some((_, end)) = state.covering(offset) {
+                return Some(state.slice(offset, end.min(offset + len as u64)));
+            }
+
+            if state.failed.is_some() || state.stopped || stop.load(Ordering::Relaxed) {
+                return None;
+            }
+
+            state = self.changed.wait_timeout(state, TRAIL_POLL).ok()?.0;
+        }
+    }
+}
+
+/// A download read from behind, for a decode that trails it: every read
+/// waits for its bytes instead of asking for them.
+pub(crate) struct Trailing {
+    buffered: Arc<dyn Buffered>,
+    pos: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl Trailing {
+    pub(crate) fn new(buffered: Arc<dyn Buffered>, stop: Arc<AtomicBool>) -> Trailing {
+        Trailing {
+            buffered,
+            pos: 0,
+            stop,
+        }
+    }
+}
+
+impl std::io::Read for Trailing {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let bytes = self
+            .buffered
+            .trail(self.pos, out.len(), &self.stop)
+            .ok_or_else(|| std::io::Error::other("the download went away"))?;
+
+        out[..bytes.len()].copy_from_slice(&bytes);
+        self.pos += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+}
+
+impl std::io::Seek for Trailing {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        let length = self.buffered.length();
+        let to = match from {
+            std::io::SeekFrom::Start(at) => Some(at),
+            std::io::SeekFrom::End(by) => length.checked_add_signed(by),
+            std::io::SeekFrom::Current(by) => self.pos.checked_add_signed(by),
+        };
+
+        self.pos = to.ok_or_else(|| std::io::Error::other("a seek before the start"))?;
+        Ok(self.pos)
+    }
+}
+
+impl symphonia::core::io::MediaSource for Trailing {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    /// Unstated, so the probe skips its scan for tags at the end: that read
+    /// would wait out the whole download. A seek to the end still answers.
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Whether a stream this shape is downloaded whole.
@@ -435,6 +521,40 @@ mod tests {
 
         wait_complete(&buffered);
         assert_eq!(&buffered.bytes().unwrap()[..], &pattern(len)[..]);
+    }
+
+    #[test]
+    fn a_trailing_reader_waits_for_bytes_without_moving_the_download() {
+        let len = CHUNK * 8;
+        let (_download, buffered, _) = download_paced(len, usize::MAX, Duration::from_millis(5));
+        let stop = AtomicBool::new(false);
+
+        let far = (CHUNK * 6 + 7) as u64;
+        assert_eq!(
+            buffered.trail(far, 10, &stop).unwrap(),
+            pattern(len)[far as usize..][..10]
+        );
+
+        // The download went front to back: the bytes before the trailing read
+        // all came first, since it never asked for a jump.
+        let ranges = buffered.ranges();
+        assert_eq!(ranges.first().map(|r| r.0), Some(0));
+        assert!(ranges.len() == 1, "no gap was jumped: {ranges:?}");
+
+        assert_eq!(buffered.trail(len as u64, 10, &stop), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_trailing_reader_lets_go_when_stopped_or_dropped() {
+        let len = CHUNK * 4;
+        let (download, buffered, _) = download_paced(len, usize::MAX, Duration::from_millis(50));
+
+        let stop = AtomicBool::new(true);
+        assert_eq!(buffered.trail((len - 1) as u64, 1, &stop), None);
+
+        drop(download);
+        let stop = AtomicBool::new(false);
+        assert_eq!(buffered.trail((len - 1) as u64, 1, &stop), None);
     }
 
     #[test]

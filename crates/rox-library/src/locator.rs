@@ -37,6 +37,9 @@ pub struct PluginStream {
     pub key: String,
     /// No end, no seek, no duration.
     pub live: bool,
+    /// The row's length, the last word on it when neither the container nor
+    /// the plugin's open states one.
+    pub duration_ms: Option<u32>,
 }
 
 impl Locator {
@@ -140,6 +143,7 @@ mod tests {
             source: "plugin:demo".into(),
             key: "a.flac".into(),
             live: false,
+            duration_ms: None,
         });
 
         assert_eq!(stream.path(), None);

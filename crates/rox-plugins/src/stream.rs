@@ -62,6 +62,8 @@ pub struct Stream {
     pub live: bool,
     /// False when the plugin asked for read-ahead only.
     pub buffer_whole: bool,
+    /// What the plugin says the stream runs, for a container that doesn't.
+    pub duration_ms: Option<u64>,
     options: Options,
     ahead: Mutex<Ahead>,
     memory: AtomicU64,
@@ -154,6 +156,7 @@ impl Stream {
             seekable,
             live: open.live,
             buffer_whole: open.buffer != Some(wire::Buffer::Ahead),
+            duration_ms: open.duration_ms.filter(|ms| *ms > 0),
             options: Options { chunk, ..options },
             ahead: Mutex::new(Ahead::default()),
             memory: AtomicU64::new(0),

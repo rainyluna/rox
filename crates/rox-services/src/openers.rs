@@ -48,6 +48,7 @@ mod tests {
             source: "plugin:demo".into(),
             key: "a.flac".into(),
             live: false,
+            duration_ms: None,
         };
         let opener = current().expect("installed");
         assert_eq!(opener(&stream).err().as_deref(), Some("asked for a.flac"));

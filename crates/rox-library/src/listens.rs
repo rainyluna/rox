@@ -469,7 +469,8 @@ pub struct TrackPlays {
     /// A station's listen carries the song's own tags, so this is the only way
     /// to tell. False once the track is gone.
     pub live: bool,
-    /// Empty once the track is gone: the snapshot never kept it.
+    /// Falls back to the snapshot like the path. Empty for a listen whose
+    /// row was already gone when it was filed.
     pub source: String,
 }
 
@@ -509,7 +510,7 @@ const SNAPSHOT_COLUMNS: &str = "CASE WHEN t.remote_live THEN l.title
      COALESCE(t.duration_ms, 0), COALESCE(t.codec, ''), COALESCE(t.bitrate, 0),
      COALESCE(t.sample_rate, 0), COALESCE(t.bit_depth, 0),
      COALESCE(t.rating, 0), COALESCE(t.path, l.path),
-     COALESCE(t.remote_live, 0), COALESCE(t.source, '')";
+     COALESCE(t.remote_live, 0), COALESCE(t.source, l.source)";
 
 /// Newest first; 0 and i64::MAX read everything.
 pub fn recent(
@@ -1419,6 +1420,10 @@ mod tests {
         assert_eq!(
             recent[0].path, "/m/1.mp3",
             "and the snapshot path keeps the cover column resolvable"
+        );
+        assert_eq!(
+            recent[0].source, "local",
+            "and the snapshot source keeps the source column filled"
         );
         let artists = rollup(&conn, Rollup::Artist, 0, i64::MAX, 10, false).unwrap();
         assert_eq!(artists[0].name, "A");

@@ -1,0 +1,130 @@
+A sprite naming a freed atlas texture is skipped instead of panicking.
+
+A cached view replays the primitives it painted last, so a sprite can
+outlive the texture behind it when an image is dropped before that view
+repaints. `z1-remove-asset-drops-textures` frees textures as soon as an
+asset goes. In the crash that prompted this, two atlas pages holding
+now-playing covers were freed a second before a frame indexed one of them
+and `BladeAtlasStorage`'s `unwrap` took the app down. `get_texture_info` now answers None for a
+freed texture, the renderer skips that batch for the frame, and the first
+miss per texture logs a warning naming it so the early drop can be found.
+Blade only: Metal and DirectX keep their own atlases.
+
+Diffed against the tree with every earlier patch applied.
+
+diff -ruN -x .rox-stamp -x target a/src/platform/blade/blade_atlas.rs b/src/platform/blade/blade_atlas.rs
+--- a/src/platform/blade/blade_atlas.rs	2026-09-30 19:37:01.017003463 -0600
++++ b/src/platform/blade/blade_atlas.rs	2026-09-30 19:37:16.560950800 -0600
+@@ -8,7 +8,7 @@
+ use collections::FxHashMap;
+ use etagere::BucketedAtlasAllocator;
+ use parking_lot::Mutex;
+-use std::{borrow::Cow, ops, sync::Arc};
++use std::{borrow::Cow, collections::HashSet, ops, sync::Arc};
+ 
+ pub(crate) struct BladeAtlas(Mutex<BladeAtlasState>);
+ 
+@@ -25,6 +25,8 @@
+     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+     initializations: Vec<AtlasTextureId>,
+     uploads: Vec<PendingUpload>,
++    /// Freed textures a sprite has named, so each one logs once.
++    missing: HashSet<AtlasTextureId>,
+ }
+ 
+ #[cfg(gles)]
+@@ -54,6 +56,7 @@
+             tiles_by_key: Default::default(),
+             initializations: Vec::new(),
+             uploads: Vec::new(),
++            missing: HashSet::new(),
+         }))
+     }
+ 
+@@ -71,12 +74,19 @@
+         lock.upload_belt.flush(sync_point);
+     }
+ 
+-    pub fn get_texture_info(&self, id: AtlasTextureId) -> BladeTextureInfo {
+-        let lock = self.0.lock();
+-        let texture = &lock.storage[id];
+-        BladeTextureInfo {
+-            raw_view: texture.raw_view,
++    /// rox patch: None for a texture that's already been freed. A sprite
++    /// painted before an image was dropped can still name one, from a cached
++    /// view that hasn't repainted since. The renderer skips that batch for the
++    /// frame instead of panicking on it, and the first miss per texture logs
++    /// so the early drop can be traced.
++    pub fn get_texture_info(&self, id: AtlasTextureId) -> Option<BladeTextureInfo> {
++        let mut lock = self.0.lock();
++        let raw_view = lock.storage.get(id).map(|texture| texture.raw_view);
++        if raw_view.is_none() && lock.missing.insert(id) {
++            log::warn!("blade atlas: a sprite named freed texture {id:?}, skipped until it repaints");
+         }
++
++        raw_view.map(|raw_view| BladeTextureInfo { raw_view })
+     }
+ }
+ 
+@@ -297,6 +307,14 @@
+ }
+ 
+ impl BladeAtlasStorage {
++    fn get(&self, id: AtlasTextureId) -> Option<&BladeAtlasTexture> {
++        let textures = match id.kind {
++            crate::AtlasTextureKind::Monochrome => &self.monochrome_textures,
++            crate::AtlasTextureKind::Polychrome => &self.polychrome_textures,
++        };
++        textures.textures.get(id.index as usize)?.as_ref()
++    }
++
+     fn destroy(&mut self, gpu: &gpu::Context) {
+         for mut texture in self.monochrome_textures.drain().flatten() {
+             texture.destroy(gpu);
+diff -ruN -x .rox-stamp -x target a/src/platform/blade/blade_renderer.rs b/src/platform/blade/blade_renderer.rs
+--- a/src/platform/blade/blade_renderer.rs	2026-09-30 19:37:01.020328088 -0600
++++ b/src/platform/blade/blade_renderer.rs	2026-09-30 19:37:01.036381010 -0600
+@@ -2245,7 +2245,9 @@
+                         sprites.push(sprite.clone());
+                         index += 1;
+                     }
+-                    let tex_info = self.atlas.get_texture_info(texture_id);
++                    let Some(tex_info) = self.atlas.get_texture_info(texture_id) else {
++                        continue;
++                    };
+                     let instance_buf =
+                         unsafe { self.instance_belt.alloc_typed(&sprites, &self.gpu) };
+                     let mut encoder = pass.with(&self.pipelines.mono_sprites);
+@@ -2277,7 +2279,9 @@
+                         sprites.push(sprite.clone());
+                         index += 1;
+                     }
+-                    let tex_info = self.atlas.get_texture_info(texture_id);
++                    let Some(tex_info) = self.atlas.get_texture_info(texture_id) else {
++                        continue;
++                    };
+                     let instance_buf =
+                         unsafe { self.instance_belt.alloc_typed(&sprites, &self.gpu) };
+                     let mut encoder = pass.with(&self.pipelines.poly_sprites);
+@@ -2566,7 +2570,9 @@
+                     texture_id,
+                     sprites,
+                 } => {
+-                    let tex_info = self.atlas.get_texture_info(texture_id);
++                    let Some(tex_info) = self.atlas.get_texture_info(texture_id) else {
++                        continue;
++                    };
+                     let instance_buf =
+                         unsafe { self.instance_belt.alloc_typed(sprites, &self.gpu) };
+                     let mut encoder = pass.with(&self.pipelines.mono_sprites);
+@@ -2589,7 +2595,9 @@
+                     texture_id,
+                     sprites,
+                 } => {
+-                    let tex_info = self.atlas.get_texture_info(texture_id);
++                    let Some(tex_info) = self.atlas.get_texture_info(texture_id) else {
++                        continue;
++                    };
+                     let instance_buf =
+                         unsafe { self.instance_belt.alloc_typed(sprites, &self.gpu) };
+                     let mut encoder = pass.with(&self.pipelines.poly_sprites);

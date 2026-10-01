@@ -19,8 +19,8 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::{
@@ -41,6 +41,7 @@ use rox_panel_kit::expr::Expr;
 use rox_services::cues::{Cue, CuesChanged};
 use serde::{Deserialize, Serialize};
 
+use rox_playback::growing::Growing;
 use rox_playback::{LiveGap, StreamState, engine};
 use rox_viz::AudioFeed;
 
@@ -271,6 +272,154 @@ enum Peaks {
     /// A track with no file and nothing stored: its waveform is decoded
     /// from the download that plays it, once that's all in.
     Waiting,
+    /// The same, drawn as it comes in while the track has a length.
+    Building(Building),
+}
+
+/// Bars filling in over a remote track's length, the rest the stand-in.
+struct Building {
+    shown: Option<(Arc<PeakLanes>, Arc<Arrivals>)>,
+    growth: Growth,
+    /// The whole download is in and its exact decode is running, so this
+    /// only holds the picture until that lands.
+    finishing: bool,
+}
+
+enum Growth {
+    /// A decode right behind the download, off the UI thread.
+    Trailing(Trailing),
+    /// Past the download cap nothing is kept to read ahead, so the audio
+    /// tap is binned at the playhead as it plays.
+    Tap {
+        growing: Growing,
+        cursor: u64,
+        pull: Vec<f32>,
+    },
+}
+
+/// Lanes, and which of their bins came in.
+type Grown = (PeakLanes, Vec<bool>);
+
+/// When each bin first came in, on the epoch clock. A bar fades in from
+/// the stand-in off these instead of flipping the frame its bins land.
+type Arrivals = Vec<Option<f32>>;
+
+/// Dropping it stops the decode, so a track change never leaves one waiting
+/// on a download nobody plays.
+struct Trailing {
+    latest: Arc<Mutex<Option<Grown>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Trailing {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Building {
+    fn trailing(download: Arc<dyn rox_playback::download::Buffered>, secs: f64) -> Building {
+        let trailing = Trailing {
+            latest: Default::default(),
+            stop: Default::default(),
+        };
+        let (latest, stop) = (Arc::clone(&trailing.latest), Arc::clone(&trailing.stop));
+
+        // Its own thread: it spends most of its life waiting on the network,
+        // which would hold an executor thread the whole time.
+        let spawned = std::thread::Builder::new()
+            .name("waveform-trail".into())
+            .spawn(move || {
+                let result = engine::decode_peaks_trailing(
+                    download,
+                    secs,
+                    PEAK_BINS,
+                    stop,
+                    |lanes, known| *latest.lock().unwrap() = Some((lanes, known)),
+                );
+                if let Err(e) = result {
+                    log::debug!("waveform: the trailing decode ended early: {e}");
+                }
+            });
+        if let Err(e) = spawned {
+            log::warn!("waveform: could not start the trailing decode: {e}");
+        }
+
+        Building {
+            shown: None,
+            growth: Growth::Trailing(trailing),
+            finishing: false,
+        }
+    }
+
+    fn tap(feed: &AudioFeed, secs: f64) -> Building {
+        let total = (secs * f64::from(feed.sample_rate())).round() as u64;
+
+        Building {
+            shown: None,
+            growth: Growth::Tap {
+                growing: Growing::new(PEAK_BINS, total, true),
+                cursor: feed.written(),
+                pull: Vec::new(),
+            },
+            finishing: false,
+        }
+    }
+
+    /// Takes up what came in since the last paint. `position` is where the
+    /// newest audible frame sits; `now` stamps the bins that are new.
+    fn advance(&mut self, feed: &AudioFeed, position: f64, now: f32) {
+        let grown = match &mut self.growth {
+            Growth::Trailing(trailing) => trailing.latest.lock().unwrap().take(),
+
+            Growth::Tap {
+                growing,
+                cursor,
+                pull,
+            } => {
+                *cursor = feed.since(*cursor, pull);
+                let frames = (pull.len() / 2) as u64;
+                if frames == 0 {
+                    return;
+                }
+
+                let newest = (position * f64::from(feed.sample_rate())).round() as u64;
+                growing.add(newest.saturating_sub(frames), pull);
+
+                Some(growing.snapshot())
+            }
+        };
+
+        let Some((lanes, known)) = grown else {
+            return;
+        };
+
+        // A bin keeps the time it first came in, so a later snapshot never
+        // restarts its fade.
+        let before = self
+            .shown
+            .as_ref()
+            .map_or(&[][..], |(_, arrived)| arrived.as_slice());
+        let arrived = known
+            .iter()
+            .enumerate()
+            .map(|(i, &came)| before.get(i).copied().flatten().or(came.then_some(now)))
+            .collect();
+
+        self.shown = Some((Arc::new(lanes), Arc::new(arrived)));
+    }
+
+    fn trails(&self) -> bool {
+        matches!(self.growth, Growth::Trailing(_))
+    }
+
+    /// The exact decode took over: hold the picture, stop filling it.
+    fn finish(&mut self) {
+        self.finishing = true;
+        if let Growth::Trailing(trailing) = &self.growth {
+            trailing.stop.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn display_lanes(set: &[Vec<PeakBin>], split: bool) -> &[Vec<PeakBin>] {
@@ -290,6 +439,8 @@ enum Shape {
     Placeholder,
     /// The playhead is live while this is the target, frozen once retired.
     Peaks(Arc<PeakLanes>, bool, f32),
+    /// Peaks with bins still to come, which draw as the stand-in.
+    Building(Arc<PeakLanes>, Arc<Arrivals>, bool, f32),
     /// Oldest at the left. Every column is played, so no ghost half and no
     /// playhead.
     Live(Arc<Vec<PeakBin>>),
@@ -306,6 +457,8 @@ impl Shape {
         match (self, other) {
             (Shape::Blank, Shape::Blank) | (Shape::Placeholder, Shape::Placeholder) => true,
             (Shape::Peaks(a, sa, _), Shape::Peaks(b, sb, _)) => Arc::ptr_eq(a, b) && sa == sb,
+            // Filling in happens in place, bin by bin, never as a morph.
+            (Shape::Building(.., sa, _), Shape::Building(.., sb, _)) => sa == sb,
             // The trace and the drawn shape move in place like the playhead:
             // morphing into their own next frame would fight the scroll.
             (Shape::Live(_), Shape::Live(_)) | (Shape::Motion(..), Shape::Motion(..)) => true,
@@ -317,7 +470,9 @@ impl Shape {
     /// stand-in).
     fn lanes(&self) -> Option<usize> {
         match self {
-            Shape::Peaks(set, split, _) => Some(display_lanes(set, *split).len().max(1)),
+            Shape::Peaks(set, split, _) | Shape::Building(set, _, split, _) => {
+                Some(display_lanes(set, *split).len().max(1))
+            }
             // One row: the tap is mixed to mono on the way in, and the drawn shape
             // has no channels.
             Shape::Live(_) | Shape::Motion(..) => Some(1),
@@ -696,7 +851,10 @@ impl WaveformPanel {
         hint: String,
         cx: &mut Context<Self>,
     ) {
-        self.peaks = Peaks::Decoding;
+        match &mut self.peaks {
+            Peaks::Building(building) => building.finish(),
+            peaks => *peaks = Peaks::Decoding,
+        }
         let generation = self.generation;
 
         cx.spawn(async move |this, cx| {
@@ -725,6 +883,58 @@ impl WaveformPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// A remote track's waveform, moved along every paint: the exact decode
+    /// once the whole download is in, and the bars that came in until then.
+    /// A track with no length has no timeline to lay them on, so it keeps
+    /// the stand-in.
+    fn grow(
+        &mut self,
+        position: f64,
+        duration: Option<f64>,
+        key: &TrackKey,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.peaks {
+            Peaks::Waiting
+            | Peaks::Building(Building {
+                finishing: false, ..
+            }) => {}
+            _ => return,
+        }
+
+        // Two short locks, no disk.
+        let download = self.state.player.read(cx).buffered();
+        if let Some(download) = &download
+            && let Some(bytes) = download.bytes()
+        {
+            let hint = download.hint().to_string();
+            self.decode_download(key.clone(), bytes, hint, cx);
+            return;
+        }
+
+        let Some(secs) = duration.filter(|secs| *secs > 0.0) else {
+            return;
+        };
+
+        // A download that shows up after the tap started, on a slow open,
+        // takes over from it.
+        let fresh = match &self.peaks {
+            Peaks::Building(building) => download.is_some() && !building.trails(),
+            _ => true,
+        };
+        if fresh {
+            self.peaks = Peaks::Building(match download {
+                Some(download) => Building::trailing(download, secs),
+                None => Building::tap(&self.feed, secs),
+            });
+        }
+
+        if let Peaks::Building(building) = &mut self.peaks {
+            let now = self.epoch.elapsed().as_secs_f32();
+            building.advance(&self.feed, position, now);
+        }
     }
 
     /// The same shape refreshes in place; a different one starts a morph. An
@@ -940,19 +1150,37 @@ fn bucket(lane: &[PeakBin], i: usize, count: usize) -> Option<PeakBin> {
     if lane.is_empty() {
         return None;
     }
-    let per = lane.len() as f32 / count as f32;
+
+    Some(fold_bins(&lane[bin_range(lane.len(), i, count)], |_| 1.0))
+}
+
+/// The bins display bar `i` of `count` covers. Never empty while `len` isn't.
+fn bin_range(len: usize, i: usize, count: usize) -> std::ops::Range<usize> {
+    let per = len as f32 / count as f32;
     let from = (i as f32 * per) as usize;
-    let to = (((i + 1) as f32 * per) as usize).clamp(from + 1, lane.len());
-    let bins = &lane[from..to];
-    let folded = bins.iter().fold(PeakBin::default(), |acc, bin| PeakBin {
-        lo: acc.lo.min(bin.lo),
-        hi: acc.hi.max(bin.hi),
-        rms: acc.rms + bin.rms * bin.rms,
-    });
-    Some(PeakBin {
+    let to = (((i + 1) as f32 * per) as usize).clamp(from + 1, len);
+
+    from..to
+}
+
+/// `scale` shrinks a bin toward flat by its index in `bins`.
+fn fold_bins(bins: &[PeakBin], scale: impl Fn(usize) -> f32) -> PeakBin {
+    let folded = bins
+        .iter()
+        .enumerate()
+        .fold(PeakBin::default(), |acc, (k, bin)| {
+            let s = scale(k);
+            PeakBin {
+                lo: acc.lo.min(bin.lo * s),
+                hi: acc.hi.max(bin.hi * s),
+                rms: acc.rms + (bin.rms * s).powi(2),
+            }
+        });
+
+    PeakBin {
         rms: (folded.rms / bins.len() as f32).sqrt(),
         ..folded
-    })
+    }
 }
 
 /// Both layers' extents in strip-local y and their colors; the morph
@@ -1089,20 +1317,7 @@ fn sample(
 ) -> Bar {
     match shape {
         Shape::Blank => Bar::flat(center, palette::alpha(palette::text_muted(), 0)),
-        Shape::Placeholder => {
-            let bar = placeholder_bar(i, lane, count, t, max_bar);
-            // A fixed share: two layers without pretending to a loudness it has no
-            // track for.
-            let band = bar * 0.45;
-            Bar {
-                top: center - bar,
-                bottom: center + bar,
-                band_top: center - band,
-                band_bottom: center + band,
-                envelope: placeholder_tint(),
-                band: placeholder_tint(),
-            }
-        }
+        Shape::Placeholder => placeholder_sample(i, lane, count, t, center, max_bar),
         // No ghost half: every column already played. The trace is cut to this
         // bar count, so the fold only runs on the frame between a resize and the
         // restart.
@@ -1128,35 +1343,129 @@ fn sample(
         ),
         Shape::Peaks(set, split, progress) => {
             let data = display_lanes(set, *split);
-            let extremes = match data.len() {
-                0 => None,
-                1 => bucket(&data[0], i, count),
-                n if n == lanes => bucket(&data[lane], i, count),
-                // A morph across a split flip or a channel-count change: fold the lanes
-                // into one silhouette for every row.
-                _ => data
-                    .iter()
-                    .filter_map(|lane| bucket(lane, i, count))
-                    .reduce(|a, b| PeakBin {
-                        lo: a.lo.min(b.lo),
-                        hi: a.hi.max(b.hi),
-                        rms: a.rms.max(b.rms),
-                    }),
-            };
-            let Some(bin) = extremes else {
-                return Bar::flat(center, palette::alpha(palette::accent(), 0));
-            };
-
             let played = x_mid <= progress.clamp(0.0, 1.0) * w;
-            let (envelope, band) = if played {
-                layers
-            } else {
-                (ghost(layers.0), ghost(layers.1))
-            };
-
-            envelope_bar(bin, center, max_bar, envelope, band)
+            let fold = |lane: &[PeakBin]| bucket(lane, i, count);
+            peaks_sample(data, lane, lanes, &fold, played, center, max_bar, layers)
         }
+        Shape::Building(set, arrived, split, progress) => building_sample(
+            set, arrived, *split, *progress, lane, lanes, i, count, x_mid, w, t, center, max_bar,
+            layers,
+        ),
     }
+}
+
+/// A bar none of whose bins came in yet is the stand-in. From its first
+/// bin on it eases into the peaks, and bins that land later grow in from
+/// flat, so a bar a publish splits doesn't step.
+#[allow(clippy::too_many_arguments)]
+fn building_sample(
+    set: &[Vec<PeakBin>],
+    arrived: &[Option<f32>],
+    split: bool,
+    progress: f32,
+    lane: usize,
+    lanes: usize,
+    i: usize,
+    count: usize,
+    x_mid: f32,
+    w: f32,
+    t: f32,
+    center: f32,
+    max_bar: f32,
+    layers: (Rgba, Rgba),
+) -> Bar {
+    let stand_in = placeholder_sample(i, lane, count, t, center, max_bar);
+    if arrived.is_empty() {
+        return stand_in;
+    }
+
+    let range = bin_range(arrived.len(), i, count);
+    let fade = |at: f32| ((t - at) / tokens::EASE_SECS).clamp(0.0, 1.0);
+    let Some(u) = arrived[range.clone()]
+        .iter()
+        .flatten()
+        .map(|&at| fade(at))
+        .reduce(f32::max)
+    else {
+        return stand_in;
+    };
+
+    // Relative to the bar's own fade: bins that landed with the first come
+    // in whole, so the common case is a plain crossfade with no dip.
+    let scale = |k: usize| {
+        arrived[range.start + k].map_or(0.0, |at| (fade(at) / u.max(f32::EPSILON)).min(1.0))
+    };
+    let fold = |bins: &[PeakBin]| bins.get(range.clone()).map(|bins| fold_bins(bins, scale));
+
+    let data = display_lanes(set, split);
+    let played = x_mid <= progress.clamp(0.0, 1.0) * w;
+    let peaks = peaks_sample(data, lane, lanes, &fold, played, center, max_bar, layers);
+    if u >= 1.0 {
+        return peaks;
+    }
+
+    stand_in.mix(&peaks, u * u * (3.0 - 2.0 * u))
+}
+
+fn placeholder_sample(
+    i: usize,
+    lane: usize,
+    count: usize,
+    t: f32,
+    center: f32,
+    max_bar: f32,
+) -> Bar {
+    let bar = placeholder_bar(i, lane, count, t, max_bar);
+    // A fixed share: two layers without pretending to a loudness it has no
+    // track for.
+    let band = bar * 0.45;
+    Bar {
+        top: center - bar,
+        bottom: center + bar,
+        band_top: center - band,
+        band_bottom: center + band,
+        envelope: placeholder_tint(),
+        band: placeholder_tint(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn peaks_sample(
+    data: &[Vec<PeakBin>],
+    lane: usize,
+    lanes: usize,
+    fold: &dyn Fn(&[PeakBin]) -> Option<PeakBin>,
+    played: bool,
+    center: f32,
+    max_bar: f32,
+    layers: (Rgba, Rgba),
+) -> Bar {
+    let extremes = match data.len() {
+        0 => None,
+        1 => fold(&data[0]),
+        n if n == lanes => fold(&data[lane]),
+        // A morph across a split flip or a channel-count change: fold the lanes
+        // into one silhouette for every row.
+        _ => data
+            .iter()
+            .filter_map(|lane| fold(lane))
+            .reduce(|a, b| PeakBin {
+                lo: a.lo.min(b.lo),
+                hi: a.hi.max(b.hi),
+                rms: a.rms.max(b.rms),
+            }),
+    };
+    let Some(bin) = extremes else {
+        return Bar::flat(center, palette::alpha(palette::accent(), 0));
+    };
+
+    let (envelope, band) = if played {
+        layers
+    } else {
+        (ghost(layers.0), ghost(layers.1))
+    };
+
+    envelope_bar(bin, center, max_bar, envelope, band)
 }
 
 /// Split shapes repeat the blend per row, the lane layout following the
@@ -1295,7 +1604,7 @@ fn paint_morph(
     );
 
     for (shape, weight) in [(from, 1.0 - u), (to, u)] {
-        let Shape::Peaks(_, _, progress) = shape else {
+        let (Shape::Peaks(_, _, progress) | Shape::Building(.., progress)) = shape else {
             continue;
         };
         if let Some(marker) = marker {
@@ -1773,13 +2082,8 @@ impl WaveformPanel {
                 self.start_remote(now.key.clone(), cx);
             }
 
-            // Asked every paint while waiting: two short locks, no disk.
-            if matches!(self.peaks, Peaks::Waiting)
-                && let Some(download) = self.state.player.read(cx).buffered()
-                && let Some(bytes) = download.bytes()
-            {
-                let hint = download.hint().to_string();
-                self.decode_download(now.key.clone(), bytes, hint, cx);
+            if now.path().is_none() && !live {
+                self.grow(now.position_secs, now.duration_secs, &now.key, cx);
             }
         }
 
@@ -1885,8 +2189,31 @@ impl WaveformPanel {
                 self.message(rox_i18n::t!("waveform-unavailable"))
                     .into_any_element()
             }
-            (Some(_), Peaks::Decoding | Peaks::Waiting) => {
+            (Some(_), Peaks::Decoding | Peaks::Waiting)
+            | (Some(_), Peaks::Building(Building { shown: None, .. })) => {
                 self.retarget(Shape::Placeholder);
+                self.strip(marker, ab, marks.clone(), cues.clone(), Vec::new())
+                    .into_any_element()
+            }
+            (
+                Some(now),
+                Peaks::Building(Building {
+                    shown: Some((lanes, known)),
+                    ..
+                }),
+            ) => {
+                let progress = now
+                    .duration_secs
+                    .filter(|d| *d > 0.0)
+                    .map(|d| (now.position_secs / d) as f32)
+                    .unwrap_or(0.0);
+                hover_duration = now.duration_secs.filter(|d| *d > 0.0);
+                self.retarget(Shape::Building(
+                    lanes.clone(),
+                    known.clone(),
+                    self.config.split_channels,
+                    progress,
+                ));
                 self.strip(marker, ab, marks.clone(), cues.clone(), Vec::new())
                     .into_any_element()
             }
@@ -1915,7 +2242,8 @@ impl WaveformPanel {
         }
 
         let morphing = self.morph_at.elapsed().as_secs_f32() < tokens::EASE_SECS;
-        let generating = matches!(self.to, Shape::Placeholder);
+        // A building strip animates its stand-in bars and polls for the next.
+        let generating = matches!(self.to, Shape::Placeholder | Shape::Building(..));
         let settling = between_tracks || morphing || generating;
         if wants_frames(self.config.live, live && playing, playing, settling) {
             window.request_animation_frame();
@@ -2026,6 +2354,130 @@ mod tests {
             .collect();
         feed.push(&samples);
         feed
+    }
+
+    #[test]
+    fn a_building_strip_draws_known_bins_and_the_stand_in_elsewhere() {
+        let mut lanes = vec![vec![PeakBin::default(); 4]];
+        lanes[0][1] = PeakBin {
+            lo: -0.8,
+            hi: 0.8,
+            rms: 0.5,
+        };
+        let arrived = vec![None, Some(0.0), None, None];
+        let shape = Shape::Building(Arc::new(lanes), Arc::new(arrived), false, 1.0);
+        let layers = (palette::accent(), palette::accent());
+        let bar = |i, t| {
+            sample(
+                &shape,
+                0,
+                1,
+                i,
+                4,
+                i as f32 + 0.5,
+                4.0,
+                t,
+                50.0,
+                40.0,
+                layers,
+            )
+        };
+
+        assert_eq!(
+            bar(0, 1.0).envelope,
+            placeholder_tint(),
+            "nothing came in here"
+        );
+        assert_eq!(
+            bar(1, 1.0).envelope,
+            palette::accent(),
+            "a played bin in full"
+        );
+        assert!(bar(1, 1.0).top < 50.0 - 30.0, "at its own height");
+    }
+
+    #[test]
+    fn a_bar_eases_in_from_the_stand_in() {
+        // One bar over two bins: a quiet one, then a loud one.
+        let bin = |reach: f32| PeakBin {
+            lo: -reach,
+            hi: reach,
+            rms: reach / 2.0,
+        };
+        let lanes = Arc::new(vec![vec![bin(0.1), bin(0.8)]]);
+        let shape = |arrived| Shape::Building(lanes.clone(), Arc::new(arrived), false, 1.0);
+        let layers = (palette::accent(), palette::accent());
+        let top = |shape: &Shape, t| sample(shape, 0, 1, 0, 1, 0.5, 1.0, t, 50.0, 40.0, layers).top;
+
+        let both = shape(vec![Some(0.0), Some(0.0)]);
+        let stand_in = |t| placeholder_sample(0, 0, 1, t, 50.0, 40.0).top;
+        let full = top(&both, tokens::EASE_SECS);
+        assert_eq!(
+            top(&both, 0.0),
+            stand_in(0.0),
+            "the frame it lands, still the stand-in"
+        );
+
+        let mid = tokens::EASE_SECS / 2.0;
+        let half = top(&both, mid);
+        let (lo, hi) = (stand_in(mid).min(full), stand_in(mid).max(full));
+        assert!(lo < half && half < hi, "halfway, between the two: {half}");
+
+        // The loud bin landing after the quiet one has filled in starts flat
+        // and grows, so the bar doesn't jump the frame it lands.
+        let quiet = shape(vec![Some(0.0), None]);
+        let late = shape(vec![Some(0.0), Some(1.0)]);
+        assert_eq!(
+            top(&late, 1.0),
+            top(&quiet, 1.0),
+            "no step the frame it lands"
+        );
+        assert_eq!(
+            top(&late, 1.0 + tokens::EASE_SECS),
+            full,
+            "at the loud bin's height once it's in"
+        );
+    }
+
+    #[test]
+    fn the_tap_bins_what_plays_at_the_playhead() {
+        let feed = AudioFeed::new();
+        feed.set_sample_rate(48_000);
+        let mut building = Building::tap(&feed, 10.0);
+
+        feed.push(&vec![0.5; 4800 * 2]);
+        building.advance(&feed, 5.0, 0.0);
+
+        let (_, arrived) = building.shown.expect("something drew");
+        let lit: Vec<usize> = (0..arrived.len())
+            .filter(|&i| arrived[i].is_some())
+            .collect();
+        let mid = PEAK_BINS / 2;
+        assert!(
+            lit.first().is_some_and(|&i| i > mid - 30) && lit.last().is_some_and(|&i| i <= mid),
+            "the tenth of a second before the middle: {lit:?}"
+        );
+    }
+
+    #[test]
+    fn a_bin_keeps_the_time_it_came_in() {
+        let feed = AudioFeed::new();
+        feed.set_sample_rate(48_000);
+        let mut building = Building::tap(&feed, 10.0);
+
+        feed.push(&vec![0.5; 4800 * 2]);
+        building.advance(&feed, 5.0, 1.0);
+        feed.push(&vec![0.5; 4800 * 2]);
+        building.advance(&feed, 5.1, 2.0);
+
+        let (_, arrived) = building.shown.expect("something drew");
+        let stamps: Vec<f32> = arrived.iter().flatten().copied().collect();
+        assert_eq!(
+            stamps.first(),
+            Some(&1.0),
+            "the first batch keeps its stamp"
+        );
+        assert_eq!(stamps.last(), Some(&2.0), "the second batch gets its own");
     }
 
     #[test]

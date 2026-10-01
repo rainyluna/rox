@@ -778,6 +778,22 @@ pub fn track_actions(
     cx: &mut App,
     on_play: impl Fn(&mut Window, &mut App) + 'static,
 ) -> PopupMenu {
+    track_actions_with(menu, state, ids, play_label, None, window, cx, on_play)
+}
+
+/// [`track_actions`] with a surface's own item right under Play Next, like a
+/// plugin's Play Similar.
+#[allow(clippy::too_many_arguments)]
+pub fn track_actions_with(
+    menu: PopupMenu,
+    state: AppState,
+    ids: Vec<i64>,
+    play_label: impl Into<SharedString>,
+    after_next: Option<PopupMenuItem>,
+    window: &mut Window,
+    cx: &mut App,
+    on_play: impl Fn(&mut Window, &mut App) + 'static,
+) -> PopupMenu {
     let files = state.library.read(cx).local_ids(&ids);
     let reveal = files.first().copied();
     let mark_ids = ids.clone();
@@ -809,6 +825,7 @@ pub fn track_actions(
                     queue_tracks(&next_state, &next_ids, true, cx);
                 }),
         )
+        .when_some(after_next, |menu, item| menu.item(item))
         .item(
             PopupMenuItem::new(rox_i18n::t!("panel-add-to-queue"))
                 .icon(Icon::default().path(icons::LIST_MUSIC))

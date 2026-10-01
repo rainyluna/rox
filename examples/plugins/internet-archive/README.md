@@ -20,7 +20,7 @@ Python 3 has to be on PATH as `python3` or `python`, or as `py` on Windows.
 - Search answers with shelves of releases and netlabels, and a view for each on its own.
 - A release is a collection: Keep in the library puts it in your library and keeps it in step.
 - Covers come from the release's own image when it ships one small enough, and the Archive's thumbnail otherwise (`node-art`, `source.cover`).
-- Start Radio plays on through the same artist, then the same label, then the same genre (`source.radio`). Open in Browser and Copy Link go to the item's page on the Archive (`source.link`).
+- Play Similar plays on through the same artist, then the same label, then the same genre (`source.radio`). Open in Browser and Copy Link go to the item's page on the Archive (`source.link`).
 - A line over the roots says where the music comes from and links to the collection (`notice`, `notice-link`).
 
 Each of these is sent only when `hello` listed it, so an older rox gets plain rows.

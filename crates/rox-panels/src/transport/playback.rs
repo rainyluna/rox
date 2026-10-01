@@ -32,6 +32,7 @@ use crate::rating_ui;
 use crate::settings::ShuffleMode;
 use crate::source::TrackSource;
 use rox_panel_api::actions::{PLAYBACK_TIP_SCOPE, TogglePlayback};
+use rox_services::plugins;
 
 use super::{default_true, transport_panel};
 
@@ -551,7 +552,7 @@ impl TransportPanel {
         };
         // A button whose menu would hold one row isn't a button with a menu.
         // Until something is described, shuffle and the draw lose their hold.
-        if button != ModeButton::Crossfade && !crate::settings::similarity_ready() {
+        if button != ModeButton::Crossfade && !crate::player::similar_ready() {
             return panel::icon_control(
                 icon,
                 color,
@@ -1014,20 +1015,42 @@ impl TransportPanel {
         cx.notify();
     }
 
-    /// Similar reads as Random until something has been described, the same
-    /// fallback shuffle has. The pick itself stays, so analyzing later brings
-    /// it back.
+    /// Similar reads as Random while there's nothing to draw it from, the
+    /// same fallback shuffle has. The pick itself stays, so analyzing later
+    /// brings it back.
     fn random_mode(&self) -> RandomMode {
-        if self.config.random_mode == RandomMode::Similar && !crate::settings::similarity_ready() {
+        if self.config.random_mode == RandomMode::Similar && !crate::player::similar_ready() {
             return RandomMode::Random;
         }
         self.config.random_mode
     }
 
-    /// The player does both draws; this hands over the library.
+    /// The player does both library draws; this hands over the library. A
+    /// plugin track playing draws Similar from its plugin's radio instead.
     fn play_draw(&mut self, cx: &mut Context<Self>) {
         let library = self.state.library.clone();
-        let mode = self.random_mode();
+        let mut mode = self.random_mode();
+
+        if mode == RandomMode::Similar {
+            let player = self.state.player.clone();
+            if let Some(task) = plugins::play_similar_to_playing(library.clone(), player, cx) {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = task.await {
+                            log::warn!("play similar: {e}");
+                        }
+                    })
+                    .detach();
+                return;
+            }
+
+            // Similar open only through a plugin has nothing to draw a local
+            // track's neighbours from.
+            if !crate::settings::similarity_ready() {
+                mode = RandomMode::Random;
+            }
+        }
+
         self.state.player.update(cx, |player, cx| match mode {
             RandomMode::Random => player.play_random(&library, cx),
             RandomMode::Similar => player.play_similar(&library, cx),

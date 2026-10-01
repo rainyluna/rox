@@ -8,6 +8,7 @@
 //! down. A browsed track only becomes a library row when it's played, queued
 //! or added to a playlist, through a pick.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
@@ -21,13 +22,14 @@ use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, Sizable, VirtualListScrollHandle, v_virtual_list};
 use rox_core::QUEUE_CAP;
+use rox_core::fmt::fmt_num;
 use rox_core::settings::{Settings, SyncedCollection};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::{PLUGIN_PREFIX, TrackKey, source_id};
 use rox_library::members::{self, PluginTrack};
 use rox_services::plugins::{
-    self, Entry, Field, FieldKind, FieldValue, NodeKind, Notice, NoticeLink, Page, RadioSeed,
-    Unavailable, Values, View,
+    self, Entry, Field, FieldKind, FieldValue, GoTo, NodeKind, Notice, NoticeLink, Page, RadioSeed,
+    Target, Unavailable, Values, View,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,9 +39,10 @@ use crate::design::{palette, tokens};
 use crate::panel::{self, AppState, FlickState, PanelChrome, PanelSettings, Then, Tone, WithIds};
 use crate::panel_settings;
 use crate::player::fmt_time;
+use crate::playing_bars::{self, PlayingBars};
 use crate::query::search::{SearchBox, SearchEvent};
 use crate::selection::SelectionEvent;
-use crate::settings::ui::icon_button;
+use crate::settings::ui::{SmallButton, icon_button};
 use crate::thumbs::Thumb;
 
 /// Every row is two lines tall, node or track.
@@ -57,8 +60,21 @@ const ART: Pixels = px(32.);
 /// Rows share it so the keep button shows on the hovered row only.
 const NODE_ROW: &str = "source-node-row";
 
+/// The same for tiles.
+const NODE_TILE: &str = "source-node-tile";
+
+/// Where a keep button sits: beside a row's chevron, or over a tile's cover.
+#[derive(Clone, Copy, PartialEq)]
+enum KeepOn {
+    Row,
+    Tile,
+}
+
 /// A field's column: a short number or a date.
 const FIELD_W: Pixels = px(64.);
+
+/// Three digits, for the rare album that runs past 99.
+const TRACK_NO_W: Pixels = px(20.);
 
 /// Sorting by a field reads the rest of the list first, up to this many rows.
 const SORT_CAP: usize = 1000;
@@ -160,6 +176,20 @@ fn node_glyph(kind: Option<NodeKind>, collection: bool) -> &'static str {
     }
 }
 
+fn go_to_item(
+    label: SharedString,
+    target: Target,
+    panel: WeakEntity<SourceBrowserPanel>,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label)
+        .icon(Icon::default().path(node_glyph(target.kind, target.collection)))
+        .on_click(move |_, _, cx| {
+            panel
+                .update(cx, |this, cx| this.go(this.gone_to(&target), cx))
+                .ok();
+        })
+}
+
 /// How a node's tracks go into the queue.
 #[derive(Clone, Copy)]
 enum NodePlay {
@@ -200,6 +230,10 @@ struct Crumb {
     /// Set on the crumb search results leave when one of them opens, so the
     /// way back to them stays.
     query: Option<String>,
+    /// The node can be kept, so the place offers the switch.
+    collection: bool,
+    /// An album's tracks show their numbers.
+    kind: Option<NodeKind>,
 }
 
 /// Where the list is: a path down the tree, or a search's results, in one
@@ -224,6 +258,57 @@ impl Place {
     fn is_root(&self) -> bool {
         self.trail.is_empty() && self.query.is_none()
     }
+
+    /// Where Go to's node goes. A node already on the trail is stepped back
+    /// to. An album or artist page gives way to the next one, so hopping
+    /// between them doesn't stack crumbs. Anywhere else it opens on from the
+    /// place shown, so the way back is where the track was.
+    fn going_to(mut self, target: &Target) -> Place {
+        if let Some(at) = self
+            .trail
+            .iter()
+            .position(|crumb| crumb.query.is_none() && crumb.id == target.id)
+        {
+            self.trail.truncate(at + 1);
+            self.query = None;
+            self.view = None;
+            return self;
+        }
+
+        if self
+            .node()
+            .is_some_and(|crumb| matches!(crumb.kind, Some(NodeKind::Album | NodeKind::Artist)))
+        {
+            self.trail.pop();
+        }
+
+        self.opening(Crumb {
+            id: target.id.clone(),
+            title: target.title.clone(),
+            query: None,
+            collection: target.collection,
+            kind: target.kind,
+        })
+    }
+
+    /// This place with `crumb` opened from it.
+    fn opening(mut self, crumb: Crumb) -> Place {
+        self.view = None;
+
+        // Results a node opened from stay a crumb to go back to.
+        if let Some(query) = self.query.take() {
+            self.trail.push(Crumb {
+                id: String::new(),
+                title: query.clone(),
+                query: Some(query),
+                collection: false,
+                kind: None,
+            });
+        }
+
+        self.trail.push(crumb);
+        self
+    }
 }
 
 /// What an answer did to the list.
@@ -237,6 +322,13 @@ enum Landed {
     },
     Appended,
     Failed,
+}
+
+/// The place a play started from, and what it sent, so Home can lead back
+/// while one of those tracks plays.
+struct PlayedFrom {
+    place: Place,
+    keys: HashSet<String>,
 }
 
 struct Pending {
@@ -278,6 +370,8 @@ struct Listing {
     /// `entries` and sorted with them.
     fields: Vec<Field>,
     values: Vec<Values>,
+    /// Every page's Go to nodes, by track key.
+    go_to: HashMap<String, GoTo>,
     /// The field the list is sorted by, None for the plugin's order.
     sort: Option<String>,
     home: Home,
@@ -357,6 +451,7 @@ impl Listing {
                 self.fields = page.fields;
                 self.values = page.values;
                 self.values.resize(self.entries.len(), Values::new());
+                self.go_to = page.go_to;
                 self.sort = None;
                 self.home = Home::None;
                 Landed::Replaced { moved }
@@ -381,6 +476,7 @@ impl Listing {
                 self.entries.extend(page.entries);
                 self.values.extend(page.values);
                 self.values.resize(self.entries.len(), Values::new());
+                self.go_to.extend(page.go_to);
                 Landed::Appended
             }
         }
@@ -461,12 +557,21 @@ pub struct SourceBrowserPanel {
     picking: HashSet<String>,
     playing: Option<TrackKey>,
     opening: Option<TrackKey>,
+    /// The player isn't paused. The bars park on a pause, so a resume has to
+    /// wake them.
+    audible: bool,
+    bars: Rc<RefCell<PlayingBars>>,
+    played_from: Option<PlayedFrom>,
+    /// The next page to land scrolls to the playing row.
+    reveal_playing: bool,
     /// What plays after the audible track, read when the queue or the track
     /// moves.
     up_next: Vec<(u64, TrackKey)>,
     queue_rev: Option<u64>,
     /// The Up Next entry a click picked. A double click plays it.
     queue_picked: Option<u64>,
+    /// The Now Playing or Up Next entry a right press opened the menu on.
+    queue_menu: Option<(u64, TrackKey)>,
     /// A pick or sync that failed, as a headline and the plugin's reason.
     failure: Option<(SharedString, String)>,
     /// By row: the list only appends until a new place replaces it, which
@@ -522,8 +627,13 @@ impl SourceBrowserPanel {
             let playing = player.now_playing().map(|now| now.key);
             let opening = player.opening();
             let queue_rev = player.queue_rev();
+            let audible = player.is_playing();
 
-            if this.playing == playing && this.opening == opening && this.queue_rev == queue_rev {
+            if this.playing == playing
+                && this.opening == opening
+                && this.queue_rev == queue_rev
+                && this.audible == audible
+            {
                 return;
             }
 
@@ -541,6 +651,7 @@ impl SourceBrowserPanel {
             this.playing = playing;
             this.opening = opening;
             this.queue_rev = queue_rev;
+            this.audible = audible;
             cx.notify();
         });
 
@@ -567,9 +678,13 @@ impl SourceBrowserPanel {
         });
         let _search_events = cx.subscribe_in(&search, window, Self::on_search_event);
 
-        let (playing, opening) = {
+        let (playing, opening, audible) = {
             let player = state.player.read(cx);
-            (player.now_playing().map(|now| now.key), player.opening())
+            (
+                player.now_playing().map(|now| now.key),
+                player.opening(),
+                player.is_playing(),
+            )
         };
 
         let mut panel = SourceBrowserPanel {
@@ -584,9 +699,14 @@ impl SourceBrowserPanel {
             picking: HashSet::new(),
             playing,
             opening,
+            audible,
+            bars: PlayingBars::shared(),
+            played_from: None,
+            reveal_playing: false,
             up_next: Vec::new(),
             queue_rev: None,
             queue_picked: None,
+            queue_menu: None,
             failure: None,
             selected: HashSet::new(),
             anchor: None,
@@ -812,6 +932,12 @@ impl SourceBrowserPanel {
             self.read_rest_for_sort(cx);
         }
 
+        // Only the first page is looked at: a row further down stays where
+        // it is rather than the list paging to it.
+        if std::mem::take(&mut self.reveal_playing) && !failed {
+            self.jump_to_playing(cx);
+        }
+
         self.resolve_ids(cx);
         cx.notify();
     }
@@ -846,6 +972,18 @@ impl SourceBrowserPanel {
         self.picking.insert(node.clone());
         cx.notify();
 
+        // The place shown, when it's the node, or the node a row opens.
+        let from = match self.listing.place.node() {
+            Some(crumb) if crumb.id == node => Some(self.listing.place.clone()),
+            _ => self
+                .listing
+                .entries
+                .iter()
+                .position(|entry| matches!(entry, Entry::Node { id, .. } if *id == node))
+                .and_then(|ix| self.opened(ix)),
+        }
+        .unwrap_or_else(|| self.listing.place.clone());
+
         let task = plugins::node_tracks(self.source(), &node, cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -854,7 +992,7 @@ impl SourceBrowserPanel {
 
                 match result {
                     Ok(tracks) if !tracks.is_empty() => match how {
-                        NodePlay::Play => this.play(tracks, 0, cx),
+                        NodePlay::Play => this.play(tracks, 0, from, cx),
                         NodePlay::Next => this.queue(tracks, true, cx),
                         NodePlay::Queue => this.queue(tracks, false, cx),
                     },
@@ -878,7 +1016,7 @@ impl SourceBrowserPanel {
 
     /// Plays the plugin's station from a row: the row's own tracks first,
     /// then the station. `busy` is the row's key or id, spinning meanwhile.
-    fn start_radio(
+    fn play_similar(
         &mut self,
         seed: RadioSeed,
         busy: String,
@@ -889,7 +1027,7 @@ impl SourceBrowserPanel {
         self.picking.insert(busy.clone());
         cx.notify();
 
-        let task = plugins::start_radio(
+        let task = plugins::play_similar(
             self.state.library.clone(),
             self.state.player.clone(),
             self.source(),
@@ -903,7 +1041,7 @@ impl SourceBrowserPanel {
                 this.picking.remove(&busy);
                 if let Err(e) = result {
                     this.failure = Some((
-                        rox_i18n::t!("source-browser-radio-failed", title = title),
+                        rox_i18n::t!("source-browser-similar-failed", title = title),
                         e,
                     ));
                 }
@@ -1134,8 +1272,20 @@ impl SourceBrowserPanel {
     /// The tracks become the playing context, as a library run does, so
     /// playback carries on through them (ADR 16).
     /// Plays from the tracks, and goes on with the plugin's radio when they
-    /// run out, where it has one.
-    fn play(&mut self, tracks: Vec<PluginTrack>, start: usize, cx: &mut Context<Self>) {
+    /// run out, where it has one. `from` is the place Home leads back to
+    /// while these tracks play.
+    fn play(
+        &mut self,
+        tracks: Vec<PluginTrack>,
+        start: usize,
+        from: Place,
+        cx: &mut Context<Self>,
+    ) {
+        self.played_from = Some(PlayedFrom {
+            place: from,
+            keys: tracks.iter().map(|track| track.key.clone()).collect(),
+        });
+
         let player = self.state.player.clone();
         let source = self.source().to_string();
         let busy = tracks.get(start).map(|track| track.key.clone());
@@ -1172,13 +1322,13 @@ impl SourceBrowserPanel {
         let rows: Vec<usize> = (0..self.listing.entries.len()).collect();
         let tracks = self.tracks_at(&rows);
         match how {
-            NodePlay::Play => self.play(tracks, 0, cx),
+            NodePlay::Play => self.play(tracks, 0, self.listing.place.clone(), cx),
             NodePlay::Next => self.queue(tracks, true, cx),
             NodePlay::Queue => self.queue(tracks, false, cx),
         }
     }
 
-    /// Play, Play Next, Add to Queue and Start Radio for the place shown,
+    /// Play, Play Next, Add to Queue and Add to Library for the place shown,
     /// when it's a node that lists tracks: an album, a playlist, a mix.
     fn place_actions(&self, cx: &mut Context<Self>) -> Option<Div> {
         let node = self.listing.place.node()?;
@@ -1200,22 +1350,7 @@ impl SourceBrowserPanel {
             })
         };
 
-        let radio = plugins::has_radio(self.source()).then(|| {
-            let (panel, id, title) = (panel.clone(), node.id.clone(), node.title.clone());
-            crate::settings::ui::small_button(
-                rox_i18n::t!("source-browser-start-radio"),
-                icons::RADIO,
-                busy,
-                move |_, _, cx| {
-                    let (id, title) = (id.clone(), title.clone());
-                    panel
-                        .update(cx, |this, cx| {
-                            this.start_radio(RadioSeed::Node(id.clone()), id, title, cx)
-                        })
-                        .ok();
-                },
-            )
-        });
+        let keep = node.collection.then(|| self.keep_action(node, cx));
 
         Some(
             div()
@@ -1239,8 +1374,73 @@ impl SourceBrowserPanel {
                     icons::LIST_MUSIC,
                     NodePlay::Queue,
                 ))
-                .children(radio),
+                .children(keep),
         )
+    }
+
+    /// The listed row of the playing track, on the pages read so far.
+    fn playing_row(&self) -> Option<usize> {
+        let playing = self.playing.as_ref()?;
+        if playing.source.as_ref() != self.source() {
+            return None;
+        }
+
+        self.listing.entries.iter().position(|entry| {
+            matches!(entry, Entry::Track(track) if playing.path.as_os_str() == track.key.as_str())
+        })
+    }
+
+    /// Picks the playing row and scrolls it to the middle, the History
+    /// panel's way.
+    fn jump_to_playing(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.playing_row() else {
+            return;
+        };
+
+        self.select(row, Modifiers::default(), cx);
+        if let Some(item) = visual_of(&layout(&self.listing.entries, self.columns()), row) {
+            self.scroll.scroll_to_item(item, ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    /// Opens the place the playing track was played from and finds its row
+    /// there once the list lands.
+    fn back_to_playing(&mut self, cx: &mut Context<Self>) {
+        let Some(from) = self.played_from.as_ref() else {
+            return;
+        };
+
+        self.reveal_playing = true;
+        self.go(from.place.clone(), cx);
+    }
+
+    /// The place's keep switch, the row button's twin for someone already
+    /// inside the collection.
+    fn keep_action(&self, node: &Crumb, cx: &mut Context<Self>) -> SmallButton {
+        let synced = self.is_synced(&node.id);
+        let busy = self.syncing.contains(&node.id);
+
+        let (label, icon) = match synced {
+            true => (
+                rox_i18n::t!("source-browser-remove-from-library"),
+                icons::MINUS,
+            ),
+            false => (rox_i18n::t!("source-browser-add-to-library"), icons::PLUS),
+        };
+
+        let panel = cx.entity().downgrade();
+        let (id, title) = (node.id.clone(), node.title.clone());
+        crate::settings::ui::small_button(label, icon, busy, move |_, _, cx| {
+            let (id, title) = (id.clone(), title.clone());
+            panel
+                .update(cx, |this, cx| {
+                    if !this.syncing.contains(&id) {
+                        this.set_synced(id, title, !synced, cx);
+                    }
+                })
+                .ok();
+        })
     }
 
     /// The listed tracks around a row, from it onward. Every one is picked
@@ -1255,7 +1455,7 @@ impl SourceBrowserPanel {
 
         let (window, start) = play_window(rows.len(), at, QUEUE_CAP);
         let tracks = self.tracks_at(&rows[window]);
-        self.play(tracks, start, cx);
+        self.play(tracks, start, self.listing.place.clone(), cx);
     }
 
     fn queue(&mut self, tracks: Vec<PluginTrack>, next: bool, cx: &mut Context<Self>) {
@@ -1295,29 +1495,42 @@ impl SourceBrowserPanel {
     /// A node opens; a track plays.
     fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
         match self.listing.entries.get(ix) {
-            Some(Entry::Node { id, title, .. }) => {
-                let mut place = self.listing.place.clone();
-                place.view = None;
-                // Results a node opened from stay a crumb to go back to.
-                if let Some(query) = place.query.take() {
-                    place.trail.push(Crumb {
-                        id: String::new(),
-                        title: query.clone(),
-                        query: Some(query),
-                    });
+            Some(Entry::Node { .. }) => {
+                if let Some(place) = self.opened(ix) {
+                    self.go(place, cx);
                 }
-                place.trail.push(Crumb {
-                    id: id.clone(),
-                    title: title.clone(),
-                    query: None,
-                });
-                self.go(place, cx);
             }
 
             Some(Entry::Track(_)) => self.play_from(ix, cx),
 
             Some(Entry::Section { .. }) | None => {}
         }
+    }
+
+    /// Where opening the node at `ix` goes.
+    fn opened(&self, ix: usize) -> Option<Place> {
+        let Some(Entry::Node {
+            id,
+            title,
+            collection,
+            kind,
+            ..
+        }) = self.listing.entries.get(ix)
+        else {
+            return None;
+        };
+
+        Some(self.listing.place.clone().opening(Crumb {
+            id: id.clone(),
+            title: title.clone(),
+            query: None,
+            collection: *collection,
+            kind: *kind,
+        }))
+    }
+
+    fn gone_to(&self, target: &Target) -> Place {
+        self.listing.place.clone().going_to(target)
     }
 
     /// Keeps the first `depth` crumbs. The crumb being shown reloads, which
@@ -1504,7 +1717,7 @@ impl SourceBrowserPanel {
                     rows => {
                         let tracks = self.tracks_at(rows);
                         if !tracks.is_empty() {
-                            self.play(tracks, 0, cx);
+                            self.play(tracks, 0, self.listing.place.clone(), cx);
                         }
                     }
                 }
@@ -1566,7 +1779,22 @@ impl SourceBrowserPanel {
                     .flatten()
                     .map(|banner| div().flex_none().p(tokens::SPACE_SM).child(banner)),
             )
-            .children(self.now_playing(cx))
+            // Its own menu: the list's reads rows of the listing, not the queue.
+            // Every context menu takes the same element id, so this one sits
+            // under an id of its own, or it shares the list's open state and
+            // neither menu's clicks land.
+            .children(self.now_playing(cx).map(|block| {
+                let weak = cx.entity().downgrade();
+                div()
+                    .id("source-queue-menu")
+                    .flex_none()
+                    .child(block.context_menu(move |menu, window, cx| {
+                        let Some(this) = weak.upgrade() else {
+                            return menu;
+                        };
+                        this.update(cx, |this, cx| this.queue_row_menu(menu, window, cx))
+                    }))
+            }))
             // One menu over the whole list. A menu per row shares one element
             // state across the rows and never opens.
             .child(self.list(cx).context_menu({
@@ -1805,13 +2033,22 @@ impl SourceBrowserPanel {
                 .child(text)
         };
 
+        let back = self.back_link(&playing, cx);
+        let title = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(heading(rox_i18n::t!("source-browser-now-playing")))
+            .children(back);
+
         let block = div()
             .flex_none()
             .flex()
             .flex_col()
             .border_b_1()
             .border_color(palette::border())
-            .child(heading(rox_i18n::t!("source-browser-now-playing")))
+            .child(title)
             .child(self.queue_row("source-now", 0, &playing, None, cx));
 
         let next = self
@@ -1827,6 +2064,67 @@ impl SourceBrowserPanel {
                 .child(heading(rox_i18n::t!("source-browser-up-next")))
                 .children(next),
         })
+    }
+
+    /// The place the playing track was played from, named the way its crumb
+    /// reads, while it's one of the tracks that play sent.
+    fn back_link(&self, playing: &TrackKey, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let from = self.played_from.as_ref()?;
+        if playing.source.as_ref() != self.source()
+            || !from.keys.contains(playing.path.to_string_lossy().as_ref())
+        {
+            return None;
+        }
+
+        let name: SharedString = match (&from.place.query, from.place.trail.last()) {
+            (Some(query), _) => rox_i18n::t!("source-browser-results", query = query.clone()),
+            (None, Some(crumb)) => crumb.title.clone().into(),
+            (None, None) => return None,
+        };
+
+        Some(
+            div()
+                .id("source-back-to-playing")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.))
+                .min_w_0()
+                .mx(tokens::SPACE_SM)
+                .mt(tokens::SPACE_SM)
+                .mb(tokens::SPACE_XS)
+                .px(tokens::SPACE_XS)
+                .rounded(tokens::RADIUS)
+                .cursor_pointer()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .hover(|link| {
+                    link.bg(palette::bg_control_hover())
+                        .text_color(palette::text())
+                })
+                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.back_to_playing(cx)))
+                .child(div().min_w_0().truncate().child(name))
+                .child(
+                    svg()
+                        .flex_none()
+                        .path(icons::CHEVRON_RIGHT)
+                        .size(px(12.))
+                        .text_color(palette::text_muted()),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The bars over a cover while its track is the one playing.
+    fn playing_art(&self, key: &str, cx: &mut Context<Self>) -> AnyElement {
+        let feed = self.state.player.read(cx).feed();
+        div()
+            .relative()
+            .flex_none()
+            .size(ART)
+            .child(self.art(key, icons::MUSIC, cx))
+            .child(playing_bars::overlay(self.bars.clone(), feed, ART))
+            .into_any_element()
     }
 
     /// One queue entry by its tags. An Up Next entry, `entry`, picks on a
@@ -1845,9 +2143,13 @@ impl SourceBrowserPanel {
             None => (key.path.to_string_lossy().into_owned(), String::new()),
         };
 
-        let art = match key.source.as_ref() == self.source() {
-            true => self.art(&key.path.to_string_lossy(), icons::MUSIC, cx),
-            false => self.art("", icons::MUSIC, cx),
+        let path = match key.source.as_ref() == self.source() {
+            true => key.path.to_string_lossy().into_owned(),
+            false => String::new(),
+        };
+        let art = match entry {
+            None => self.playing_art(&path, cx),
+            Some(_) => self.art(&path, icons::MUSIC, cx),
         };
 
         let picked = entry.is_some() && entry == self.queue_picked;
@@ -1862,6 +2164,20 @@ impl SourceBrowserPanel {
             .px(tokens::SPACE_SM)
             .when(picked, |row| {
                 row.bg(palette::alpha(palette::accent(), 0x26))
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let key = key.clone();
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    // An Up Next row is picked like a left press would. Now
+                    // Playing's entry is whichever is audible when pressed.
+                    if let Some(entry) = entry {
+                        window.focus(&this.focus);
+                        this.pick_up_next(entry, cx);
+                    }
+
+                    let entry = entry.or_else(|| this.state.player.read(cx).playing_entry());
+                    this.queue_menu = entry.map(|entry| (entry, key.clone()));
+                })
             })
             .when_some(entry, |row, entry| {
                 row.cursor_pointer()
@@ -1909,6 +2225,88 @@ impl SourceBrowserPanel {
         }
 
         cx.notify();
+    }
+
+    /// The Queue panel's menu for a Now Playing or Up Next row, with Play
+    /// Similar where the track's plugin has a radio.
+    fn queue_row_menu(
+        &mut self,
+        menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PopupMenu {
+        let Some((entry, key)) = self.queue_menu.clone() else {
+            return self.dropdown_menu(menu, window, cx);
+        };
+
+        let panel = cx.entity().downgrade();
+        let play = move |_: &mut Window, cx: &mut App| {
+            panel
+                .update(cx, |this, cx| this.play_up_next(entry, cx))
+                .ok();
+        };
+
+        let on_play = play.clone();
+        let player = self.state.player.clone();
+        let mut menu = menu
+            .item(
+                PopupMenuItem::new(rox_i18n::t!("library-play"))
+                    .icon(Icon::default().path(icons::PLAY))
+                    .on_click(move |_, window, cx| on_play(window, cx)),
+            )
+            .item(
+                PopupMenuItem::new(rox_i18n::t!("queue-remove", count = 1u64))
+                    .icon(Icon::default().path(icons::CLOSE))
+                    .on_click(move |_, _, cx| {
+                        player.read(cx).remove_many_from_queue(vec![entry]);
+                    }),
+            );
+
+        let similar = self.similar_from_key(&key, cx);
+        match self.state.library.read(cx).id_for_key(&key) {
+            Some(id) => {
+                menu = panel::track_actions_with(
+                    menu.separator(),
+                    self.state.clone(),
+                    vec![id],
+                    rox_i18n::t!("queue-play-now"),
+                    similar,
+                    window,
+                    cx,
+                    play,
+                );
+            }
+
+            None => menu = menu.when_some(similar, |menu, item| menu.item(item)),
+        }
+
+        self.dropdown_menu(menu.separator(), window, cx)
+    }
+
+    /// Play Similar from a queued track of this panel's plugin, read back from
+    /// the row the plugin gave, when the plugin has a radio.
+    fn similar_from_key(&self, key: &TrackKey, cx: &mut Context<Self>) -> Option<PopupMenuItem> {
+        if key.source.as_ref() != self.source() || !plugins::has_radio(self.source()) {
+            return None;
+        }
+
+        let item = key.path.to_string_lossy().into_owned();
+        let track = rox_library::store::open(&self.state.library.read(cx).db_path())
+            .ok()
+            .and_then(|conn| members::track(&conn, self.source(), &item).ok().flatten())?;
+
+        let panel = cx.entity().downgrade();
+        Some(
+            PopupMenuItem::new(rox_i18n::t!("library-play-similar"))
+                .icon(Icon::default().path(icons::RADIO))
+                .on_click(move |_, _, cx| {
+                    let (busy, title) = (track.key.clone(), track.title.clone());
+                    let seed = RadioSeed::Track(track.clone());
+                    panel
+                        .update(cx, |this, cx| this.play_similar(seed, busy, title, cx))
+                        .ok();
+                }),
+        )
     }
 
     fn pick_view(&mut self, view: String, cx: &mut Context<Self>) {
@@ -2285,8 +2683,9 @@ impl SourceBrowserPanel {
     /// One entry as a cover over its title. A node opens on a click, a track
     /// plays on a double click, the way their rows do.
     fn tile(&self, ix: usize, side: Pixels, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (title, second, art, glyph, node) = match self.listing.entries.get(ix)? {
+        let (title, second, art, glyph, node, keep) = match self.listing.entries.get(ix)? {
             Entry::Node {
+                id,
                 title,
                 subtitle,
                 art,
@@ -2299,6 +2698,10 @@ impl SourceBrowserPanel {
                 art.clone(),
                 node_glyph(*kind, *collection),
                 true,
+                collection.then(|| {
+                    let synced = self.is_synced(id);
+                    self.keep_button(ix, id, title, synced, KeepOn::Tile, cx)
+                }),
             ),
 
             Entry::Track(track) => (
@@ -2307,6 +2710,7 @@ impl SourceBrowserPanel {
                 track.key.clone(),
                 icons::MUSIC,
                 false,
+                None,
             ),
 
             Entry::Section { .. } => return None,
@@ -2325,10 +2729,18 @@ impl SourceBrowserPanel {
                         .rounded(tokens::RADIUS)
                         .border_color(palette::accent()),
                 )
-            });
+            })
+            .children(keep.map(|keep| {
+                div()
+                    .absolute()
+                    .top(tokens::SPACE_XS)
+                    .right(tokens::SPACE_XS)
+                    .child(keep)
+            }));
 
         let tile = div()
             .id(("source-tile", ix))
+            .group(NODE_TILE)
             .flex_none()
             .w(side)
             .flex()
@@ -2440,7 +2852,7 @@ impl SourceBrowserPanel {
 
         let glyph = node_glyph(kind, collection);
 
-        let keep = collection.then(|| self.keep_button(ix, &id, &title, synced, cx));
+        let keep = collection.then(|| self.keep_button(ix, &id, &title, synced, KeepOn::Row, cx));
 
         self.row_shell(ix, cx)
             .group(NODE_ROW)
@@ -2458,13 +2870,15 @@ impl SourceBrowserPanel {
             .into_any_element()
     }
 
-    /// Shows on the hovered row, and stays once the collection is kept.
+    /// Shows on the hovered row or tile, and stays once the collection is
+    /// kept.
     fn keep_button(
         &self,
         ix: usize,
         id: &str,
         title: &str,
         synced: bool,
+        on: KeepOn,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let syncing = self.syncing.contains(id);
@@ -2482,7 +2896,10 @@ impl SourceBrowserPanel {
                 .into_any_element(),
 
             false => svg()
-                .path(icons::CHECK)
+                .path(match (on, synced) {
+                    (KeepOn::Tile, false) => icons::PLUS,
+                    _ => icons::CHECK,
+                })
                 .size(px(14.))
                 .text_color(match synced {
                     true => palette::accent(),
@@ -2491,8 +2908,13 @@ impl SourceBrowserPanel {
                 .into_any_element(),
         };
 
+        let (element, group) = match on {
+            KeepOn::Row => ("source-keep", NODE_ROW),
+            KeepOn::Tile => ("source-tile-keep", NODE_TILE),
+        };
+
         div()
-            .id(("source-keep", ix))
+            .id((element, ix))
             .flex_none()
             .size(px(24.))
             .flex()
@@ -2500,19 +2922,30 @@ impl SourceBrowserPanel {
             .justify_center()
             .rounded(tokens::RADIUS)
             .cursor_pointer()
-            .when(synced, |button| {
-                button.bg(palette::alpha(palette::accent(), 0x26))
+            // Over a cover the button needs an opaque floor, or the art
+            // shows through the glyph. A kept one says so in its glyph.
+            .map(|button| match (on, synced) {
+                (KeepOn::Tile, _) => button
+                    .bg(palette::bg_menu_opaque())
+                    .hover(|button| button.bg(palette::bg_control_hover_opaque())),
+
+                (KeepOn::Row, true) => button
+                    .bg(palette::alpha(palette::accent(), 0x26))
+                    .hover(|button| button.bg(palette::bg_control_hover())),
+
+                (KeepOn::Row, false) => {
+                    button.hover(|button| button.bg(palette::bg_control_hover()))
+                }
             })
             .when(!synced && !syncing, |button| {
                 button
                     .opacity(0.)
-                    .group_hover(NODE_ROW, |button| button.opacity(1.))
+                    .group_hover(group, |button| button.opacity(1.))
             })
-            .hover(|button| button.bg(palette::bg_control_hover()))
             .tooltip(move |window, cx| {
                 gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
-            // The press stops here, or it would open the row too.
+            // The press stops here, or it would open the row or tile too.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                 if !this.syncing.contains(&node) {
@@ -2584,13 +3017,32 @@ impl SourceBrowserPanel {
             ms => fmt_time(f64::from(ms) / 1000.0).into(),
         };
 
+        let album = self
+            .listing
+            .place
+            .node()
+            .is_some_and(|crumb| crumb.kind == Some(NodeKind::Album));
+        let number = album.then(|| {
+            div()
+                .flex_none()
+                .w(TRACK_NO_W)
+                .text_right()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(fmt_num(track.track_no))
+        });
+
         self.row_shell(ix, cx)
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
                     this.activate(ix, cx);
                 }
             }))
-            .child(self.art(&track.key, icons::MUSIC, cx))
+            .children(number)
+            .child(match playing {
+                true => self.playing_art(&track.key, cx),
+                false => self.art(&track.key, icons::MUSIC, cx),
+            })
             .child(Self::two_lines(
                 track.title.clone().into(),
                 track.artist.clone().into(),
@@ -2736,16 +3188,12 @@ impl SourceBrowserPanel {
             true => self.selected_rows(),
             false => vec![row],
         };
-        let radio = (rows.len() == 1)
-            .then(|| self.radio_item(row, cx))
+        let similar = (rows.len() == 1)
+            .then(|| self.similar_item(row, cx))
             .flatten();
         let tracks = self.tracks_at(&rows);
         if tracks.is_empty() {
-            let menu = self.node_items(menu, &rows, cx);
-            let menu = match radio {
-                Some(item) => menu.item(item),
-                None => menu,
-            };
+            let menu = self.node_items(menu, &rows, similar, cx);
             let menu = match (rows.as_slice(), self.listing.entries.get(row)) {
                 ([_], Some(Entry::Node { id, .. })) => {
                     panel::link_items(menu, self.source(), id.clone())
@@ -2776,17 +3224,18 @@ impl SourceBrowserPanel {
             panel
                 .update(cx, |this, cx| match single {
                     Some(ix) => this.play_from(ix, cx),
-                    None => this.play(tracks, 0, cx),
+                    None => this.play(tracks, 0, this.listing.place.clone(), cx),
                 })
                 .ok();
         };
 
         let menu = match ids {
-            Some(ids) => panel::track_actions(
+            Some(ids) => panel::track_actions_with(
                 menu,
                 self.state.clone(),
                 ids,
                 play_label,
+                similar,
                 window,
                 cx,
                 on_play,
@@ -2795,25 +3244,95 @@ impl SourceBrowserPanel {
             // The shared menu brings its own links; a track not in the
             // library yet gets them here.
             None => {
-                let menu =
-                    self.unpicked_menu(menu, tracks.clone(), play_label, on_play, window, cx);
+                let menu = self.unpicked_menu(
+                    menu,
+                    tracks.clone(),
+                    play_label,
+                    on_play,
+                    similar,
+                    window,
+                    cx,
+                );
                 match tracks.as_slice() {
                     [track] => panel::link_items(menu, self.source(), track.key.clone()),
                     _ => menu,
                 }
             }
         };
-        let menu = match radio {
-            Some(item) => menu.item(item),
-            None => menu,
+        let menu = match tracks.as_slice() {
+            [track] => self.go_to_submenu(menu, &track.key, window, cx),
+            _ => menu,
         };
         let menu = self.library_item(menu, tracks, cx);
 
         self.dropdown_menu(menu.separator(), window, cx)
     }
 
-    /// Start Radio, when the plugin has one, seeded from the row.
-    fn radio_item(&self, row: usize, cx: &mut Context<Self>) -> Option<PopupMenuItem> {
+    /// Go to the track's album or one of its artists, when the plugin named
+    /// them. The node the list is already showing isn't offered.
+    fn go_to_submenu(
+        &self,
+        menu: PopupMenu,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PopupMenu {
+        let Some(go_to) = self.listing.go_to.get(key) else {
+            return menu;
+        };
+
+        let here = self.listing.place.node().map(|crumb| crumb.id.as_str());
+        let elsewhere = |target: &&Target| Some(target.id.as_str()) != here;
+        let album = go_to.album.iter().find(elsewhere).cloned();
+        let artists: Vec<Target> = go_to.artists.iter().filter(elsewhere).cloned().collect();
+
+        if album.is_none() && artists.is_empty() {
+            return menu;
+        }
+
+        let panel = cx.entity().downgrade();
+        let submenu = PopupMenu::build(window, cx, move |mut submenu, window, cx| {
+            if let Some(album) = album {
+                let label = rox_i18n::t!("source-browser-go-to-album");
+                submenu = submenu.item(go_to_item(label, album, panel.clone()));
+            }
+
+            let label = rox_i18n::t!("source-browser-go-to-artist");
+            match artists.as_slice() {
+                [] => {}
+
+                [artist] => {
+                    submenu = submenu.item(go_to_item(label, artist.clone(), panel.clone()));
+                }
+
+                // Several artists get one entry each, by name.
+                several => {
+                    let several = several.to_vec();
+                    let names = PopupMenu::build(window, cx, move |mut names, _, _| {
+                        for artist in several {
+                            let name = SharedString::from(artist.title.clone());
+                            names = names.item(go_to_item(name, artist, panel.clone()));
+                        }
+                        names
+                    });
+                    submenu = submenu.item(
+                        PopupMenuItem::submenu(label, names)
+                            .icon(Icon::default().path(icons::USER)),
+                    );
+                }
+            }
+
+            submenu
+        });
+
+        menu.item(
+            PopupMenuItem::submenu(rox_i18n::t!("source-browser-go-to"), submenu)
+                .icon(Icon::default().path(icons::ARROW_RIGHT)),
+        )
+    }
+
+    /// Play Similar, when the plugin has a radio, seeded from the row.
+    fn similar_item(&self, row: usize, cx: &mut Context<Self>) -> Option<PopupMenuItem> {
         if !plugins::has_radio(self.source()) {
             return None;
         }
@@ -2826,7 +3345,7 @@ impl SourceBrowserPanel {
 
         let panel = cx.entity().downgrade();
         Some(
-            PopupMenuItem::new(rox_i18n::t!("source-browser-start-radio"))
+            PopupMenuItem::new(rox_i18n::t!("library-play-similar"))
                 .icon(Icon::default().path(icons::RADIO))
                 .on_click(move |_, _, cx| {
                     let (busy, title) = (busy.clone(), title.clone());
@@ -2836,7 +3355,7 @@ impl SourceBrowserPanel {
                                 Some(Entry::Track(track)) => RadioSeed::Track(track.clone()),
                                 _ => RadioSeed::Node(busy.clone()),
                             };
-                            this.start_radio(seed, busy, title, cx)
+                            this.play_similar(seed, busy, title, cx)
                         })
                         .ok();
                 }),
@@ -2845,7 +3364,13 @@ impl SourceBrowserPanel {
 
     /// Play, Play Next and Add to Queue for nodes: everything they list,
     /// read from the plugin first.
-    fn node_items(&self, menu: PopupMenu, rows: &[usize], cx: &mut Context<Self>) -> PopupMenu {
+    fn node_items(
+        &self,
+        menu: PopupMenu,
+        rows: &[usize],
+        similar: Option<PopupMenuItem>,
+        cx: &mut Context<Self>,
+    ) -> PopupMenu {
         let nodes: Vec<String> = rows
             .iter()
             .filter_map(|&ix| match self.listing.entries.get(ix) {
@@ -2881,6 +3406,7 @@ impl SourceBrowserPanel {
             icons::SKIP_FORWARD,
             NodePlay::Next,
         ))
+        .when_some(similar, |menu, item| menu.item(item))
         .item(item(
             rox_i18n::t!("panel-add-to-queue"),
             icons::LIST_MUSIC,
@@ -2967,12 +3493,14 @@ impl SourceBrowserPanel {
         .detach();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn unpicked_menu(
         &self,
         menu: PopupMenu,
         tracks: Vec<PluginTrack>,
         play_label: SharedString,
         on_play: impl Fn(&mut Window, &mut App) + 'static,
+        similar: Option<PopupMenuItem>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PopupMenu {
@@ -3001,6 +3529,7 @@ impl SourceBrowserPanel {
                 icons::SKIP_FORWARD,
                 |this, tracks, cx| this.queue(tracks, true, cx),
             ))
+            .when_some(similar, |menu, item| menu.item(item))
             .item(item(
                 rox_i18n::t!("panel-add-to-queue"),
                 icons::LIST_MUSIC,
@@ -3173,6 +3702,22 @@ impl Panel for SourceBrowserPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PopupMenu {
+        let menu = match self.playing_row() {
+            Some(_) => {
+                let panel = cx.entity().downgrade();
+                menu.item(
+                    PopupMenuItem::new(rox_i18n::t!("source-browser-jump-to-playing"))
+                        .icon(Icon::default().path(icons::LOCATE))
+                        .on_click(move |_, _, cx| {
+                            panel.update(cx, |this, cx| this.jump_to_playing(cx)).ok();
+                        }),
+                )
+                .separator()
+            }
+
+            None => menu,
+        };
+
         let menu =
             panel_settings::rename_item(menu, &cx.entity(), self.tab_panel.clone(), window, cx);
         let menu = panel_settings::settings_item(menu, &cx.entity(), cx);
@@ -3352,6 +3897,8 @@ mod tests {
                 id: id.to_string(),
                 title: id.to_string(),
                 query: None,
+                collection: true,
+                kind: None,
             }],
             ..Place::default()
         }
@@ -3609,6 +4156,47 @@ mod tests {
     }
 
     #[test]
+    fn go_to_steps_back_or_sideways_instead_of_stacking() {
+        let target = |id: &str, kind| Target {
+            id: id.to_string(),
+            title: id.to_string(),
+            collection: kind == NodeKind::Album,
+            kind: Some(kind),
+        };
+        let trail = |place: &Place| -> Vec<String> {
+            place
+                .trail
+                .iter()
+                .map(|crumb| crumb.title.clone())
+                .collect()
+        };
+
+        // From a playlist the way back stays.
+        let album = at("liked").going_to(&target("showgirl", NodeKind::Album));
+        assert_eq!(trail(&album), ["liked", "showgirl"]);
+
+        let artist = album.going_to(&target("taylor", NodeKind::Artist));
+        assert_eq!(trail(&artist), ["liked", "taylor"], "an album gives way");
+
+        let opened = artist.clone().opening(Crumb {
+            id: "midnights".into(),
+            title: "midnights".into(),
+            query: None,
+            collection: true,
+            kind: Some(NodeKind::Album),
+        });
+        let back = opened.going_to(&target("taylor", NodeKind::Artist));
+        assert_eq!(back, artist, "a node on the trail is stepped back to");
+
+        let searched = Place {
+            query: Some("swift".into()),
+            ..Place::default()
+        };
+        let from_results = searched.going_to(&target("taylor", NodeKind::Artist));
+        assert_eq!(trail(&from_results), ["swift", "taylor"]);
+    }
+
+    #[test]
     fn rereading_a_place_is_not_a_move() {
         let mut listing = Listing::default();
         let first = listing.begin(Some(at("liked")));
@@ -3670,6 +4258,8 @@ mod tests {
                 id: "liked".into(),
                 title: "Liked".into(),
                 query: None,
+                collection: true,
+                kind: None,
             }],
             query: Some("tones".into()),
             view: None,
@@ -3683,6 +4273,8 @@ mod tests {
                 id: String::new(),
                 title: "tones".into(),
                 query: Some("tones".into()),
+                collection: false,
+                kind: None,
             }],
             ..Place::default()
         };

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use gpui::{App, Entity, Global, Task};
 use serde_json::{Value, json};
 
-use rox_core::settings::{self, PluginRecord, Settings, SyncedCollection};
+use rox_core::settings::{self, PluginRecord, Settings, ShuffleMode, SyncedCollection};
 use rox_library::cue::{PLUGIN_PREFIX, TrackKey};
 use rox_library::locator::{Locator, PluginStream};
 use rox_library::members::{self, PluginTrack};
@@ -65,6 +65,36 @@ pub struct Page {
     /// lined up with `entries`. Shorter than `entries` when rows have none.
     pub fields: Vec<Field>,
     pub values: Vec<Values>,
+    /// Where each track's album and artists open, by track key. Keyed rather
+    /// than lined up, so it needs no care when rows sort or drop out.
+    pub go_to: HashMap<String, GoTo>,
+}
+
+/// The nodes Go to opens for one track.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GoTo {
+    pub album: Option<Target>,
+    pub artists: Vec<Target>,
+}
+
+/// A node Go to opens, with what a place needs to show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub id: String,
+    pub title: String,
+    pub collection: bool,
+    pub kind: Option<NodeKind>,
+}
+
+impl From<wire::Node> for Target {
+    fn from(node: wire::Node) -> Self {
+        Target {
+            id: node.id,
+            title: node.title,
+            collection: node.collection,
+            kind: node.kind,
+        }
+    }
 }
 
 /// A column the plugin's service knows, like a popularity.
@@ -967,6 +997,7 @@ fn open(stream: &PluginStream) -> Result<Opened, String> {
         length: opened.length,
         seekable: opened.seekable,
         buffer_whole: opened.buffer_whole,
+        duration_ms: opened.duration_ms,
         reader: Box::new(Reader(opened)),
     })
 }
@@ -1132,6 +1163,8 @@ fn track(wire: wire::Track) -> PluginTrack {
 }
 
 fn page(wire: wire::Page) -> Page {
+    let mut go_to = HashMap::new();
+
     let (entries, values) = wire
         .entries
         .into_iter()
@@ -1150,6 +1183,10 @@ fn page(wire: wire::Page) -> Page {
             ),
             wire::Entry::Track(mut t) => {
                 let values = values_of(std::mem::take(&mut t.values));
+                if let Some(nodes) = t.go_to.take() {
+                    go_to.insert(t.key.clone(), go_to_of(*nodes));
+                }
+
                 (Entry::Track(track(t)), values)
             }
             wire::Entry::Section(section) => (
@@ -1192,6 +1229,14 @@ fn page(wire: wire::Page) -> Page {
             })
             .collect(),
         values,
+        go_to,
+    }
+}
+
+fn go_to_of(wire: wire::GoTo) -> GoTo {
+    GoTo {
+        album: wire.album.map(Target::from),
+        artists: wire.artists.into_iter().map(Target::from).collect(),
     }
 }
 
@@ -1255,6 +1300,26 @@ fn with_view(params: &mut Value, view: Option<String>) {
 /// Whether a running plugin's manifest offers a radio.
 pub fn has_radio(source: &str) -> bool {
     offers(source, |cap| cap.radio)
+}
+
+/// Whether any running plugin offers a radio, which is enough for Similar
+/// shuffle to have something to draw from without acoustic analysis.
+pub fn any_radio() -> bool {
+    if !allowed() {
+        return false;
+    }
+
+    HOSTS.read().is_ok_and(|table| {
+        table.values().any(|running| {
+            running
+                .host
+                .manifest()
+                .capabilities
+                .source
+                .as_ref()
+                .is_some_and(|cap| cap.radio)
+        })
+    })
 }
 
 /// Whether a running plugin's manifest offers links to its tracks and nodes.
@@ -1322,6 +1387,8 @@ struct Station {
     /// empty seed is a station that follows a play: it seeds from the last of
     /// the source's tracks heard when the queue first runs low.
     at: Mutex<(String, Option<String>)>,
+    /// The track Play Similar started from, which never plays as part of it.
+    skip: Option<String>,
 }
 
 /// The saved form of a station: which plugin, and where it had got to.
@@ -1330,6 +1397,8 @@ struct SavedStation {
     source: String,
     seed: String,
     cursor: Option<String>,
+    #[serde(default)]
+    skip: Option<String>,
 }
 
 fn station_db(cx: &App) -> Option<PathBuf> {
@@ -1347,6 +1416,7 @@ pub fn follow_on(source: &str, cx: &App) -> Option<continuation::Scope> {
         source: source.to_string(),
         db_path: station_db(cx)?,
         at: Mutex::new((String::new(), None)),
+        skip: None,
     };
 
     Some(continuation::Scope::Provided(Arc::new(station)))
@@ -1364,6 +1434,7 @@ pub fn station_from(saved: &str, cx: &App) -> Option<continuation::Scope> {
         source: saved.source,
         db_path: station_db(cx)?,
         at: Mutex::new((saved.seed, saved.cursor)),
+        skip: saved.skip,
     };
 
     Some(continuation::Scope::Provided(Arc::new(station)))
@@ -1380,6 +1451,7 @@ impl continuation::Provider for Station {
             source: self.source.clone(),
             seed,
             cursor,
+            skip: self.skip.clone(),
         };
 
         serde_json::to_string(&saved).ok()
@@ -1437,11 +1509,19 @@ impl Station {
         })
     }
 
-    /// Writes the tracks as picks and answers their ids, less what played.
+    /// Writes the tracks as picks and answers their ids, less what played
+    /// and the track Play Similar started from.
     fn pick(&self, tracks: &[PluginTrack], seen: &HashSet<i64>, count: usize) -> Vec<Pick> {
+        let tracks: Vec<PluginTrack> = tracks
+            .iter()
+            .filter(|track| self.skip.as_ref() != Some(&track.key))
+            .cloned()
+            .collect();
+
         let write = || -> Result<Vec<i64>, String> {
             let mut conn = store::open(&self.db_path).map_err(|e| e.to_string())?;
-            let keys = members::pick(&mut conn, &self.source, tracks).map_err(|e| e.to_string())?;
+            let keys =
+                members::pick(&mut conn, &self.source, &tracks).map_err(|e| e.to_string())?;
 
             Ok(keys
                 .iter()
@@ -1525,9 +1605,10 @@ pub enum RadioSeed {
     Node(String),
 }
 
-/// Plays a station: the seed's own tracks now, then the station's first
-/// batch, and the rest as continuation draws it.
-pub fn start_radio(
+/// Play Similar: a node's own tracks now, then the station's first batch,
+/// and the rest as continuation draws it under Similar shuffle, which this
+/// turns on. A track seeds the station without playing itself.
+pub fn play_similar(
     library: Entity<Library>,
     player: Entity<Player>,
     source: &str,
@@ -1539,25 +1620,27 @@ pub fn start_radio(
 
     cx.spawn(async move |cx| {
         let asked = source.clone();
-        let (seed, lead, (batch, cursor)) = cx
+        let (seed, lead, skip, (batch, cursor)) = cx
             .background_executor()
             .spawn(async move {
-                let (seed, lead) = match seed {
-                    RadioSeed::Track(track) => (track.key.clone(), vec![track]),
+                let (seed, lead, skip) = match seed {
+                    RadioSeed::Track(track) => (track.key.clone(), Vec::new(), Some(track.key)),
                     RadioSeed::Node(node) => {
                         let lead = list_node(&asked, &node)?;
-                        (node, lead)
+                        (node, lead, None)
                     }
                 };
 
                 let first = radio_page(&asked, &seed, None)?;
-                Ok::<_, String>((seed, lead, first))
+                Ok::<_, String>((seed, lead, skip, first))
             })
             .await?;
 
-        // The station often opens on the seed itself. Once is enough.
+        // The station often opens on its seed, which already led or is the
+        // track asked to be skipped.
         let mut tracks = lead;
         let mut listed: HashSet<String> = tracks.iter().map(|t| t.key.clone()).collect();
+        listed.extend(skip.clone());
         tracks.extend(batch.into_iter().filter(|t| listed.insert(t.key.clone())));
 
         if tracks.is_empty() {
@@ -1573,6 +1656,7 @@ pub fn start_radio(
             source,
             db_path,
             at: Mutex::new((seed, cursor)),
+            skip,
         };
 
         player
@@ -1580,9 +1664,41 @@ pub fn start_radio(
                 player.play_at(keys, 0, cx);
                 // After the play: starting a session clears the scope.
                 player.set_scope(continuation::Scope::Provided(Arc::new(station)));
+                player.shuffle_in_mode(ShuffleMode::Similar, cx);
             })
             .map_err(|e| e.to_string())
     })
+}
+
+/// Play Similar from the playing track, when it's a plugin's and the plugin
+/// has a radio. None otherwise, so the library's own Similar can answer.
+pub fn play_similar_to_playing(
+    library: Entity<Library>,
+    player: Entity<Player>,
+    cx: &mut App,
+) -> Option<Task<Result<(), String>>> {
+    let key = player.read(cx).now_playing()?.key;
+    if key.origin() != rox_library::cue::Origin::Plugin {
+        return None;
+    }
+
+    let source = key.source.to_string();
+    if !has_radio(&source) {
+        return None;
+    }
+
+    // The row as the plugin gave it, so the pick that leads rewrites nothing.
+    let conn = store::open(&library.read(cx).db_path()).ok()?;
+    let item = key.path.to_string_lossy();
+    let track = members::track(&conn, &source, &item).ok().flatten()?;
+
+    Some(play_similar(
+        library,
+        player,
+        &source,
+        RadioSeed::Track(track),
+        cx,
+    ))
 }
 
 /// Rows written outside a panel's own write, like a radio's, reach the
@@ -2001,6 +2117,7 @@ mod tests {
             source: "plugin:example".into(),
             db_path: PathBuf::from("/nowhere/library.db"),
             at: Mutex::new(("t1".into(), Some("40".into()))),
+            skip: Some("t1".into()),
         };
 
         let saved = continuation::Provider::saved(&station).expect("a station saves");
@@ -2013,6 +2130,7 @@ mod tests {
             ),
             ("plugin:example", "t1", Some("40"))
         );
+        assert_eq!(back.skip.as_deref(), Some("t1"), "the seed stays skipped");
 
         let following = Station {
             at: Mutex::new((String::new(), None)),

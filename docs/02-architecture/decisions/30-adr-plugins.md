@@ -388,7 +388,8 @@ page, rather than passing on the host's internal error.
 **Amended 2026-09-29: radio, fields, and the panel's shape.** Andrew's product calls
 after the first external plugin met the source browser.
 
-- A source may declare `radio` in its capability. rox then offers Start Radio on the
+- A source may declare `radio` in its capability. rox then offers Start Radio (Play
+  Similar since, see below) on the
   plugin's tracks and nodes, and asks `source.radio` with the seed and a cursor for
   batches of tracks. The first batch plays at once and the rest arrive through queue
   continuation ([ADR 17](17-adr-queue-continuation.md)'s amendment), so the engine keeps
@@ -423,3 +424,49 @@ after the first external plugin met the source browser.
 - Each wire addition is gated by a name in `hello`'s `features`, so a plugin never sends
   what an older host would refuse. The manifest additions sit under `capabilities`,
   which ignores keys it doesn't know, so `api` stays 1.
+
+**Amended 2026-09-30: a stream's length.** A fragmented MP4 without a segment index,
+which is what a plugin gets by joining a DASH service's segments, doesn't state its
+length. Without one the seekbar can't seek and the waveform has no timeline to lay bars
+on. `source.open` may now answer `duration_ms`, gated by `open-duration`. The
+container's own length still wins, the plugin's stated one comes next, and the track's
+`duration_ms` from browse or sync is the last resort. A stated length stands in for the
+container's everywhere the engine reads one. The decode still ends where the bytes do.
+
+**Amended 2026-09-30: a station with no seed.** A service offers a station before
+anything plays, and Start Radio with nothing to seed one did nothing. A source may
+declare `personal_radio` beside `radio`, and then `source.radio` may come with a null
+seed. The plugin picks the station and names its seed in the answer, so from there on
+it's an ordinary seeded station: continuation, saving and the run-out reseed don't
+change. The declaration sits in the manifest rather than `hello`, since it's the
+plugin's ability the host asks about, and a host that doesn't know it never sends a
+null seed.
+
+**Amended 2026-09-30: Go to.** A track in the source browser can open its album or one
+of its artists, the way a service's own client does. A track may carry `go_to`, gated by
+`go-to`: the nodes its album and artists open, in the shape of browse nodes. rox builds
+Go to in the track's menu from them. A node already on the trail is stepped back to,
+and an album or artist page gives way to the next one, so hopping between them doesn't
+stack crumbs. From anywhere else the node opens on from the place shown, so going back
+returns to the track. The nodes ride on the page instead of coming from a method
+asked at click time, because a menu is built whole when it opens: an answer that arrives
+later can't list several artists by name or hide an album the track doesn't have. Go to
+lives in the source browser alone, where a plugin's nodes can open. Sync ignores
+`go_to`, so a kept row holds its tags and nothing more.
+
+**Amended 2026-09-30: Play Similar instead of radio buttons.** Andrew's product call
+after living with the radio. The source browser's header button grew a station from
+whatever the place offered, which meant the first track of a playlist or the same
+favourite on every press, and it did what Similar shuffle already does under another
+name. The button is gone, and so is `personal_radio`, which only it asked for: a host
+no longer sends a null seed, and a manifest that still declares it loads as before,
+since `capabilities` ignores keys it doesn't know. Start Radio in a row's menu is now
+Play Similar. It plays the station and turns Similar shuffle on. A node's tracks
+still lead its station, but a track only seeds one and never plays in it, the way the
+library's own Play Similar leaves out the track it started from. A running
+plugin with a radio is enough to offer Similar without acoustic analysis, since its
+own tracks draw from its station. A local queue under Similar with nothing analyzed
+has no neighbours to draw, so its refill widens into the weighted draw, the same way a
+thin pool does. The random
+button's Similar draw starts Play Similar from a playing plugin track. Continuing a
+queue started from a plugin's panel with its radio doesn't change.

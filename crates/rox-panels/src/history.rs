@@ -38,6 +38,7 @@ use crate::track_ui::track_cells;
 use crate::track_ui::track_columns::{self, Column, ColumnHost, GroupTrack, HeadingHost};
 use rox_services::catalog::LocalCopy;
 use rox_services::history::HistoryEvent;
+use rox_services::plugins;
 
 const ROW_H: f32 = 30.;
 
@@ -110,7 +111,7 @@ fn never_sorts() -> Vec<(SharedString, NeverSort)> {
     ]
 }
 
-/// Last Played is the record's own column, drawn here. Rebuilt per call so a
+/// Last Played and Source are the record's own columns, drawn here. Rebuilt per call so a
 /// locale switch relabels.
 fn columns() -> Vec<Column> {
     vec![
@@ -155,6 +156,11 @@ fn columns() -> Vec<Column> {
             default_on: false,
         },
         Column {
+            key: "source",
+            label: rox_i18n::t!("columns-source"),
+            default_on: false,
+        },
+        Column {
             key: "plays",
             label: rox_i18n::t!("status-item-plays"),
             default_on: true,
@@ -175,6 +181,13 @@ fn columns() -> Vec<Column> {
             default_on: true,
         },
     ]
+}
+
+/// How the source column names a source.
+struct SourceMark {
+    label: SharedString,
+    /// A plugin's own icon, where it ships one.
+    icon: Option<SharedString>,
 }
 
 /// An album heading (Recent view only), or a track by index into `tracks`.
@@ -253,6 +266,9 @@ pub struct HistoryPanel {
     /// its cover and what a double click plays. Resolved once per refresh,
     /// since the cover column asks every visible row every frame.
     locals: Vec<Option<LocalCopy>>,
+    /// Keyed on the source string. Resolved per refresh, since both lookups
+    /// take a lock.
+    sources: HashMap<String, SourceMark>,
     search: Entity<SearchBox>,
     /// Applied on the next render, where a window exists to set the input.
     resync_box: bool,
@@ -345,6 +361,7 @@ impl HistoryPanel {
             tracks: Vec::new(),
             readings: HashMap::new(),
             locals: Vec::new(),
+            sources: HashMap::new(),
             search,
             resync_box: false,
             selection_ids,
@@ -419,6 +436,21 @@ impl HistoryPanel {
             })
             .collect();
         self.locals = library.local_copies(&names);
+
+        let mut sources = HashMap::new();
+        for t in &self.tracks {
+            if t.source.is_empty() || sources.contains_key(&t.source) {
+                continue;
+            }
+
+            let mark = SourceMark {
+                label: SharedString::from(rox_library::cue::source_label(&t.source)),
+                icon: plugins::icon(&t.source),
+            };
+            sources.insert(t.source.clone(), mark);
+        }
+        self.sources = sources;
+
         self.favourites = library.favourite_ids();
         self.selected.clear();
         self.anchor = None;
@@ -912,20 +944,10 @@ impl HistoryPanel {
                 row = row.child(div().flex_none().w(side).h(side));
                 continue;
             }
-            // The on-air mark. A station's listen carries the song's title and
-            // artist, so without it the row reads as the file.
-            if col.key == "name" && t.live {
-                row = row.child(
-                    svg()
-                        .path(icons::RADIO)
-                        .size(px(12.))
-                        .flex_none()
-                        .text_color(palette::text_muted()),
-                );
-            }
             let c = match track_columns::cell(col.key, &cell, &self.state, ROW_H, false) {
                 Some(c) => c,
                 None => match col.key {
+                    "source" => self.source_cell(&t.source),
                     "lastplayed" => track_columns::numeric_cell(
                         track_columns::LAST_PLAYED_WIDTH,
                         palette::text_muted(),
@@ -938,9 +960,58 @@ impl HistoryPanel {
                     _ => continue,
                 },
             };
+
+            // The on-air mark. A station's listen carries the song's title and
+            // artist, so without it the row reads as the file. It trails the
+            // title inside the name's slot, so the titles still line up.
+            let c = match col.key == "name" && t.live {
+                true => div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(c.flex_initial())
+                    .child(
+                        svg()
+                            .path(icons::RADIO)
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(palette::text_muted()),
+                    ),
+                false => c,
+            };
             row = row.child(c);
         }
         row
+    }
+
+    /// The label first and the icon after it, so the labels line up and a
+    /// long one truncates before the icon goes.
+    fn source_cell(&self, source: &str) -> Div {
+        let cell = div()
+            .flex_none()
+            .w(palette::scaled_px(track_columns::SOURCE_WIDTH))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .overflow_hidden()
+            .text_color(palette::text_muted());
+
+        let Some(mark) = self.sources.get(source) else {
+            return cell;
+        };
+
+        cell.child(div().min_w_0().truncate().child(mark.label.clone()))
+            .children(mark.icon.clone().map(|icon| {
+                svg()
+                    .path(icon)
+                    .size(px(12.))
+                    .flex_none()
+                    .text_color(palette::text_muted())
+            }))
     }
 
     fn config_menu(

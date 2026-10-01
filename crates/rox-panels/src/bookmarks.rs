@@ -18,7 +18,7 @@ use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use rox_core::fmt::{fmt_ago, fmt_time};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::bookmarks::{Bookmark, BookmarkRow};
-use rox_library::cue::{TrackKey, local};
+use rox_library::cue::{TrackKey, source_id};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -180,9 +180,8 @@ impl BookmarksPanel {
         let rows = library.all_bookmarks();
         let mut groups: Vec<Group> = Vec::new();
         for row in rows {
-            // Bookmarks are dropped on a file, so a mark is always local.
             let key = TrackKey {
-                source: local(),
+                source: source_id(&row.source),
                 path: row.path.clone().into(),
                 sub: row.sub,
             };

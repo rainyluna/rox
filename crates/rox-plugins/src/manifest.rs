@@ -96,7 +96,8 @@ pub struct SourceCap {
     #[serde(default)]
     pub icon: String,
     /// Answers `source.radio`: a station seeded from a track or a node,
-    /// which continuation draws from while its context plays.
+    /// which Play Similar starts and continuation draws from while its
+    /// context plays.
     #[serde(default)]
     pub radio: bool,
     /// Answers `source.link`: the web page of a track or a node, which rox

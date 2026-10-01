@@ -43,6 +43,7 @@ pub mod transport;
 pub mod vu;
 pub mod waveform;
 
+mod playing_bars;
 mod settings;
 
 pub(crate) use rox_design as design;

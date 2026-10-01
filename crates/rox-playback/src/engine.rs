@@ -2037,6 +2037,7 @@ pub fn decode_peaks_bytes(bytes: Arc<[u8]>, hint: &str, bins: usize) -> Result<P
             rate,
             None,
             None,
+            None,
             Instant::now(),
             false,
             None,
@@ -2048,6 +2049,77 @@ pub fn decode_peaks_bytes(bytes: Arc<[u8]>, hint: &str, bins: usize) -> Result<P
     let (src, info) = open(info.sample_rate)?;
 
     peaks_of(src, info, bins)
+}
+
+/// How often a trailing decode hands over what it has.
+const TRAIL_PUBLISH: StdDuration = StdDuration::from_millis(250);
+
+/// [`decode_peaks_bytes`] for a download still coming in: decodes right
+/// behind it as the bytes land, binned over `secs`, and hands `publish` the
+/// lanes and which bins are known every [`TRAIL_PUBLISH`] and at the end.
+/// For drawing only: the stored waveform still comes from the whole bytes.
+pub fn decode_peaks_trailing(
+    buffered: Arc<dyn crate::download::Buffered>,
+    secs: f64,
+    bins: usize,
+    stop: Arc<AtomicBool>,
+    mut publish: impl FnMut(PeakLanes, Vec<bool>),
+) -> Result<(), String> {
+    let open = |rate: u32| {
+        let source = crate::download::Trailing::new(Arc::clone(&buffered), Arc::clone(&stop));
+        let mss = MediaSourceStream::new(Box::new(source), Default::default());
+        let mut hint = Hint::new();
+        if !buffered.hint().is_empty() {
+            hint.with_extension(buffered.hint());
+        }
+
+        Source::build(
+            mss,
+            hint,
+            String::new(),
+            "trailing download".into(),
+            rate,
+            None,
+            None,
+            Some(secs),
+            Instant::now(),
+            false,
+            None,
+        )
+    };
+
+    let (probe, info) = open(48000)?;
+    drop(probe);
+    let (mut src, info) = open(info.sample_rate)?;
+
+    let total = (secs * info.sample_rate as f64).round() as u64;
+    let mut growing = crate::growing::Growing::new(bins, total, info.channels >= 2);
+    let (mut at, mut chunk, mut published) = (0u64, Vec::new(), Instant::now());
+
+    loop {
+        chunk.clear();
+        let more = src.next_chunk(info.sample_rate, &mut chunk);
+        growing.add(at, &chunk);
+        at += (chunk.len() / 2) as u64;
+
+        if stop.load(Ordering::Relaxed) {
+            return Err("stopped".into());
+        }
+
+        if !more {
+            break;
+        }
+
+        if published.elapsed() >= TRAIL_PUBLISH && growing.any() {
+            let (lanes, known) = growing.snapshot();
+            publish(lanes, known);
+            published = Instant::now();
+        }
+    }
+
+    let (lanes, known) = growing.snapshot();
+    publish(lanes, known);
+    Ok(())
 }
 
 fn peaks_of(mut src: Source, info: TrackInfo, bins: usize) -> Result<PeakLanes, String> {
@@ -2151,7 +2223,7 @@ fn fold_bucket(run: &[PeakBin]) -> PeakBin {
 
 /// Lanes normalized together keep their relative loudness; RMS stays inside
 /// the envelope.
-fn normalize_peaks(lanes: &mut [Vec<PeakBin>]) {
+pub(crate) fn normalize_peaks(lanes: &mut [Vec<PeakBin>]) {
     let loudest = lanes
         .iter()
         .flatten()
@@ -2250,6 +2322,9 @@ impl Source {
         let streamed = !matches!(locator, Locator::Local(_));
 
         // A URL's hint comes from the locator or the `Content-Type`, else the probe sniffs.
+        // A length from outside the container: a plugin's open, or its row.
+        let mut stated_secs = None;
+
         let (mss, hint, origin, station, tape, live_ext) = match locator {
             Locator::Local(path) => {
                 let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -2336,6 +2411,11 @@ impl Source {
                     (mss, hint, origin, None, Some(tape), ext)
                 } else {
                     let (length, seekable) = (opened.length, opened.seekable);
+                    stated_secs = opened
+                        .duration_ms
+                        .or(stream.duration_ms.map(u64::from))
+                        .map(|ms| ms as f64 / 1000.0);
+
                     let (reader, buffered) = crate::plugin::reader_for(opened);
                     if let Some(buffered) = &buffered {
                         (on_buffer)(Arc::downgrade(buffered));
@@ -2365,6 +2445,7 @@ impl Source {
             device_rate,
             span,
             locator.path(),
+            stated_secs,
             began,
             streamed,
             tape,
@@ -2399,6 +2480,7 @@ impl Source {
             self.device_rate,
             None,
             None,
+            None,
             Instant::now(),
             false,
             Some(tape),
@@ -2420,6 +2502,8 @@ impl Source {
         device_rate: u32,
         span: Option<Span>,
         path: Option<&Path>,
+        // Stands in for the container's length where it states none.
+        outside_secs: Option<f64>,
         began: Instant,
         remote: bool,
         tape: Option<Arc<Tape>>,
@@ -2471,8 +2555,10 @@ impl Source {
 
         // A fragmented MP4 states its length only in the movie header; without it
         // the track reads as zero seconds. Local files only, since it rereads.
-        let file_secs =
-            stated_secs.or_else(|| path.and_then(rox_library::mp4::fragment_duration_secs));
+        // A stream that says nothing falls back to what it was said to run.
+        let file_secs = stated_secs
+            .or_else(|| path.and_then(rox_library::mp4::fragment_duration_secs))
+            .or(outside_secs.filter(|secs| *secs > 0.0));
         let file_frames =
             stated_frames.or_else(|| file_secs.map(|s| (s * sample_rate as f64).round() as u64));
 
@@ -4967,6 +5053,7 @@ mod tests {
             source: "plugin:test".into(),
             key: key.into(),
             live: false,
+            duration_ms: None,
         })
     }
 
@@ -4984,8 +5071,72 @@ mod tests {
                 hint: "wav".into(),
                 seekable: true,
                 buffer_whole: true,
+                duration_ms: None,
             })
         })
+    }
+
+    /// A second of tone whose header states no length, the way a streaming
+    /// WAV marks it, served with what the plugin says it runs.
+    fn unstated_opener(fx: &Fixtures, stated_ms: Option<u64>) -> Opener {
+        let mut bytes = std::fs::read(fx.wav("tone.wav", 1.0)).expect("the fixture");
+        bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        Arc::new(move |_| {
+            Ok(Opened {
+                length: Some(bytes.len() as u64),
+                reader: Box::new(Bytes(bytes.clone())),
+                hint: "wav".into(),
+                seekable: true,
+                buffer_whole: false,
+                duration_ms: stated_ms,
+            })
+        })
+    }
+
+    #[test]
+    fn a_stream_with_no_stated_length_takes_the_plugins_then_the_rows() {
+        let fx = Fixtures::new("plugin-stated-length");
+        let row = |ms| {
+            Locator::Plugin(rox_library::locator::PluginStream {
+                source: "plugin:test".into(),
+                key: "tone.wav".into(),
+                live: false,
+                duration_ms: ms,
+            })
+        };
+
+        let mut e = engine_over(vec![row(Some(3_000))]);
+        e.opener = Some(unstated_opener(&fx, Some(1_250)));
+        let (_, _, info) = e.open_file_at(0).expect("the stream opens");
+        assert_eq!(info.duration_secs, Some(1.25), "the plugin's word first");
+
+        let mut e = engine_over(vec![row(Some(3_000))]);
+        e.opener = Some(unstated_opener(&fx, None));
+        let (_, _, info) = e.open_file_at(0).expect("the stream opens");
+        assert_eq!(info.duration_secs, Some(3.0), "then the row's");
+
+        let mut e = engine_over(vec![row(None)]);
+        e.opener = Some(unstated_opener(&fx, None));
+        let (_, _, info) = e.open_file_at(0).expect("the stream opens");
+        assert_eq!(info.duration_secs, None, "and nothing made up");
+    }
+
+    #[test]
+    fn a_stated_length_never_overrides_the_containers() {
+        let fx = Fixtures::new("plugin-container-length");
+        let mut e = engine_over(vec![Locator::Plugin(rox_library::locator::PluginStream {
+            source: "plugin:test".into(),
+            key: "tone.wav".into(),
+            live: false,
+            duration_ms: Some(9_000),
+        })]);
+        fx.wav("tone.wav", 1.0);
+        e.opener = Some(fixture_opener(&fx, Default::default()));
+
+        let (_, _, info) = e.open_file_at(0).expect("the stream opens");
+        assert_eq!(info.duration_secs, Some(1.0));
     }
 
     #[test]
@@ -5006,6 +5157,70 @@ mod tests {
         assert_eq!(served_info.duration_secs, file_info.duration_secs);
         assert_eq!(drain_source(&mut served), drain_source(&mut file));
         assert_eq!(e.shared.stream_state(0), Some(StreamState::Live));
+    }
+
+    /// Hands its bytes over a little at a time, like a stream on a slow link.
+    struct Trickle(Vec<u8>);
+
+    impl crate::plugin::ReadAt for Trickle {
+        fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+            std::thread::sleep(StdDuration::from_millis(40));
+            let start = (offset as usize).min(self.0.len());
+            let end = (start + len.min(64 * 1024)).min(self.0.len());
+
+            Ok(self.0[start..end].to_vec())
+        }
+    }
+
+    #[test]
+    fn a_trailing_decode_draws_what_has_come_in_and_ends_whole() {
+        let fx = Fixtures::new("peaks-trailing");
+        let bytes = std::fs::read(fx.wav("tone.wav", 4.0)).unwrap();
+        let (_download, buffered) = crate::download::Download::start(
+            Box::new(Trickle(bytes.clone())),
+            bytes.len() as u64,
+            "wav",
+        )
+        .unwrap();
+
+        let mut seen: Vec<Vec<bool>> = Vec::new();
+        decode_peaks_trailing(buffered, 4.0, 64, Default::default(), |lanes, known| {
+            assert_eq!(lanes.len(), 3, "stereo keeps its channel lanes");
+            seen.push(known);
+        })
+        .expect("the decode runs to the end");
+
+        let partial = seen
+            .iter()
+            .any(|known| known.iter().any(|k| *k) && !known.iter().all(|k| *k));
+        assert!(partial, "some bins drew before the download was in");
+        assert!(
+            seen.last().unwrap().iter().all(|k| *k),
+            "and every bin by the end"
+        );
+    }
+
+    #[test]
+    fn a_trailing_decode_stops_when_asked() {
+        let fx = Fixtures::new("peaks-trailing-stop");
+        let bytes = std::fs::read(fx.wav("tone.wav", 4.0)).unwrap();
+        let (_download, buffered) = crate::download::Download::start(
+            Box::new(Trickle(bytes.clone())),
+            bytes.len() as u64,
+            "wav",
+        )
+        .unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let asked = Arc::clone(&stop);
+        let result = decode_peaks_trailing(buffered, 4.0, 64, stop, move |_, _| {
+            asked.store(true, Ordering::Relaxed);
+        });
+
+        assert!(
+            result.is_err(),
+            "it ended at the first publish, not the last byte"
+        );
     }
 
     #[test]
@@ -5071,6 +5286,7 @@ mod tests {
                 hint: "wav".into(),
                 seekable: true,
                 buffer_whole: true,
+                duration_ms: None,
             })
         }));
 

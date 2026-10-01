@@ -1751,8 +1751,9 @@ pub fn locators_for(
     conn: &Connection,
     ids: &[i64],
 ) -> rusqlite::Result<Vec<crate::locator::Locator>> {
-    let mut stmt = conn
-        .prepare_cached("SELECT source, path, remote_url, remote_live FROM tracks WHERE id = ?1")?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT source, path, remote_url, remote_live, duration_ms FROM tracks WHERE id = ?1",
+    )?;
 
     let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
@@ -1762,10 +1763,11 @@ pub fn locators_for(
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
             ))
         });
 
-        if let Ok((source, path, url, live)) = row {
+        if let Ok((source, path, url, live, duration_ms)) = row {
             out.push(if source == crate::cue::LOCAL {
                 crate::locator::Locator::Local(PathBuf::from(path))
             } else if source.starts_with(crate::cue::PLUGIN_PREFIX) {
@@ -1773,6 +1775,7 @@ pub fn locators_for(
                     source,
                     key: path,
                     live: live != 0,
+                    duration_ms: u32::try_from(duration_ms).ok().filter(|ms| *ms > 0),
                 })
             } else {
                 crate::locator::Locator::Remote(crate::locator::Remote {
@@ -4415,6 +4418,7 @@ mod tests {
                 source: "plugin:demo".into(),
                 key: "album/a.flac".into(),
                 live: true,
+                duration_ms: None,
             })
         );
     }

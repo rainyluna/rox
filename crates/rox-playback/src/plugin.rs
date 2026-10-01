@@ -50,6 +50,9 @@ pub struct Opened {
     /// False when the plugin asked for read-ahead only. The engine downloads
     /// the rest whole when they qualify ([`crate::download`]).
     pub buffer_whole: bool,
+    /// The plugin's word on the length, for a container that doesn't state
+    /// one.
+    pub duration_ms: Option<u64>,
 }
 
 /// The reader the decoder reads through: a download for a stream that
@@ -620,6 +623,7 @@ mod tests {
                 source: "plugin:test".into(),
                 key: "k".into(),
                 live: false,
+                duration_ms: None,
             }
         }
 
@@ -658,6 +662,7 @@ mod tests {
                     length: Some(reopen_len),
                     seekable: true,
                     buffer_whole: false,
+                    duration_ms: None,
                 })
             });
 
@@ -833,6 +838,7 @@ mod tests {
                 length: None,
                 seekable: false,
                 buffer_whole: false,
+                duration_ms: None,
             }
         }
 

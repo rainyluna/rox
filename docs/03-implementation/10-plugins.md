@@ -239,6 +239,15 @@ rather than refusing the track (`Track`, `wire.rs:229-247`). `key` is opaque to 
 non-empty, and has to stay the same across sessions and plugin versions, because it
 becomes the row's path. A plugin that changes its key scheme orphans every row it made.
 
+With `go-to` listed, a track may also carry `go_to`: the nodes its album and artists
+open, each checked like a browse node (`GoTo`, `wire.rs`). It's boxed, since most tracks
+leave it out and the entry enum would otherwise carry its size on every row. `page` in
+`rox-services/src/plugins.rs` moves it off the track into `Page::go_to`, keyed by track
+key, so it never reaches a `PluginTrack` or a kept row. The source browser merges each
+page's map into its listing and builds Go to from it (`go_to_submenu`,
+`rox-panels/src/source_browser.rs`). Keyed rather than lined up with the entries, it
+survives a sort and a dropped row without upkeep.
+
 ### `source.search`
 
 ```json
@@ -281,7 +290,11 @@ says a read at any offset works. `live` is a stream with no end and no duration.
 `buffer` is optional: `"ahead"` asks rox to read one chunk ahead instead of downloading
 the whole track, for a service that meters or throttles fast downloads. A plugin can
 lower the buffering this way, never raise it (`Open` and `Buffer`,
-`rox-plugins/src/wire.rs:294-328`).
+`rox-plugins/src/wire.rs`). `duration_ms` is optional too, sent only when `hello`
+listed `open-duration`: the stream's length for a container that doesn't state one.
+`Source::build` in `rox-playback/src/engine.rs` takes the container's length first, a
+local fragmented MP4's `mehd` next, then the stated one, which is the open's
+`duration_ms` or else the row's (`PluginStream::duration_ms`).
 
 ### `source.read`
 
@@ -428,9 +441,12 @@ What the engine reads through (`reader_for`, `rox-playback/src/plugin.rs:56-74`)
   downloaded whole while it plays, front to back on its own thread
   (`rox-playback/src/download.rs`, `CAP` at `:21`). A read the download hasn't reached
   moves the download there, and what it skipped fills in after. The seekbar shows what's
-  downloaded, and the waveform is decoded from the same bytes once they're all in. A
-  pre-opened stream doesn't download until the engine opens it.
-- Anything else reads one 256 KiB chunk ahead through the host's stream.
+  downloaded. The waveform fills in as the bytes land, from a decode that trails the
+  download without steering it (`decode_peaks_trailing` and `Trailing`), and the one
+  kept is decoded from the same bytes once they're all in. A pre-opened stream doesn't
+  download until the engine opens it.
+- Anything else reads one 256 KiB chunk ahead through the host's stream. With a length,
+  its waveform fills in from the audio tap at the playhead as it plays, and isn't kept.
 
 The decoder reads through `PluginSource`, which keeps a 1 MiB window of recent bytes so
 the probe's small backward seeks never go back to the plugin

@@ -240,6 +240,7 @@ pub const PLAYS_WIDTH: f32 = 56.;
 pub const YEAR_WIDTH: f32 = 56.;
 pub const DURATION_WIDTH: f32 = 64.;
 pub const LAST_PLAYED_WIDTH: f32 = 84.;
+pub const SOURCE_WIDTH: f32 = 140.;
 
 /// Right-aligned at a fixed width so the digits and the text columns before
 /// it line up. Overflow clips.

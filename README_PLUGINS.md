@@ -248,7 +248,8 @@ there are none. The answer's `api` has to be one the host supports, or rox hangs
 `features` names the optional parts of API 1 this host reads. A host from before a
 feature refuses a result that uses it, so a plugin uses one only when it's listed, and
 treats a missing `features` as an empty list. This host lists `notice`, `notice-link`,
-`node-kind`, `node-art`, `sections`, `views`, `fields`, `tiles` and `home`.
+`node-kind`, `node-art`, `sections`, `views`, `fields`, `tiles`, `home`,
+`open-duration` and `go-to`.
 
 ### source.browse and source.search
 
@@ -328,6 +329,18 @@ can turn this off in the panel's settings, and the node lists like any other.
 
 ```
 {"node": {"id": "home", "title": "Home", "home": true}}
+```
+
+A track can name the nodes its album and artists open, in `go_to`, when `hello` listed
+`go-to`. The source browser offers them under Go to in the track's menu. A node already
+on the panel's trail is stepped back to, an album or artist page gives way to the next
+one, and anywhere else the node opens on from the place shown. Each is a node in the same shape as a browse entry, and its `id` has to be one
+`source.browse` answers for. `album` and `artists` are both optional, and several
+artists are listed by name. The node the panel is already showing isn't offered. Sync
+ignores `go_to`.
+
+```
+{"track": {"key": "t1", "title": "Example Song", "go_to": {"album": {"id": "album:500", "title": "Example Album", "collection": true, "kind": "album"}, "artists": [{"id": "artist:7", "title": "Example Artist", "kind": "artist"}]}}}
 ```
 
 Either answer can carry a `notice`, a line rox shows above the entries, or on its own
@@ -435,9 +448,15 @@ with the plugin stopped or the network down.
 | `seekable` | A read at any offset works.                                                             |
 | `live`     | A stream with no end and no duration.                                                   |
 | `buffer`   | Optional. `"ahead"` asks rox to read one chunk ahead instead of downloading the whole track. |
+| `duration_ms` | Optional, when `hello` listed `open-duration`. The stream's length in milliseconds. |
 
 `buffer: "ahead"` is for a service that meters or throttles fast downloads. A plugin can
 lower rox's buffering this way but never raise it.
+
+`duration_ms` is for a container that doesn't state its own length, like fragmented MP4
+without a segment index. rox needs a length to seek and to draw the waveform. The
+container's own length wins over it, and without either rox falls back to the track's
+`duration_ms` from browse or sync.
 
 ### source.read
 
@@ -480,7 +499,7 @@ only for tracks with no stored cover.
 
 ### source.radio
 
-Sent only to a plugin whose manifest says `"radio": true`. rox offers Start Radio on its
+Sent only to a plugin whose manifest says `"radio": true`. rox offers Play Similar on its
 tracks and nodes, and asks for a station seeded from the one picked, a track's `key` or
 a node's `id`:
 
@@ -489,9 +508,13 @@ a node's `id`:
 ← {"jsonrpc":"2.0","id":12,"result":{"tracks":[ ...20 tracks... ],"cursor":"20"}}
 ```
 
-What the radio started from plays first: the track, or the tracks a node lists (an
-album before its artist's radio), read through `source.browse` in the plugin's default
-view. The station's first batch follows, less anything already in the lead. The rest
+A node's own tracks play first (an album before its artist's radio), read through
+`source.browse` in the plugin's default view. A track only seeds: it never plays as part
+of its own station, so it's left out of every batch. The station's first batch follows,
+less anything already in the lead, and rox
+turns Similar shuffle on. A plugin with a radio is enough to offer Similar shuffle
+without the library's acoustic analysis, and the random button's Similar draw while one
+of the plugin's tracks plays starts the same way from that track. The rest
 come as the queue runs down, the way rox's own
 continuation fills it, each asking with the last answer's `cursor`. A null `cursor`
 means the station ran out, and rox seeds a new one from the last of the plugin's tracks

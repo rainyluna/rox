@@ -1,7 +1,8 @@
 //! Playback bookmarks: a saved position inside a track, with an optional
-//! name and color. Keyed by track id with the path fragment snapshotted
-//! beside it, so a file that returns under a fresh id gets its marks back
-//! through [`reattach`]. Positions are on a cue track's own clock.
+//! name and color. Keyed by track id with the key fragment snapshotted
+//! beside it, so a file or plugin track that returns under a fresh id gets
+//! its marks back through [`reattach`]. Positions are on a cue track's own
+//! clock.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -38,6 +39,7 @@ pub struct Bookmark {
 pub struct BookmarkRow {
     pub bookmark: Bookmark,
     pub track_id: i64,
+    pub source: String,
     pub path: String,
     pub sub: u16,
     pub title: String,
@@ -49,6 +51,13 @@ pub struct BookmarkRow {
     pub duration_ms: u32,
     pub rating: u8,
 }
+
+/// A track row's key fragment over a `t` alias, the form
+/// [`TrackKey::to_fragment`](crate::cue::TrackKey::to_fragment) writes. The
+/// source prefix keeps a plugin key that reads like a path on disk from
+/// relinking to the local file.
+const FRAGMENT: &str = "CASE WHEN t.source = 'local' THEN '' ELSE t.source || '|' END
+     || CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END";
 
 fn color_of(raw: String) -> Option<String> {
     let raw = raw.trim().to_string();
@@ -120,9 +129,9 @@ pub fn all(conn: &Connection) -> rusqlite::Result<Vec<BookmarkRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT b.id, b.track_id, b.position_ms, b.name, b.color, b.created,
                 t.path, t.sub, t.title, t.artist, t.album, t.duration_ms,
-                t.genre, t.year, t.track_no, t.rating
+                t.genre, t.year, t.track_no, t.rating,
+                t.source
          FROM bookmarks b JOIN tracks t ON t.id = b.track_id
-         WHERE t.source = 'local'
          ORDER BY t.album_artist, t.album, t.disc_no, t.track_no, t.title, t.id,
                   b.position_ms, b.id",
     )?;
@@ -141,6 +150,7 @@ pub fn all(conn: &Connection) -> rusqlite::Result<Vec<BookmarkRow>> {
             year: row.get::<_, i64>(13)?.clamp(0, u16::MAX as i64) as u16,
             track_no: row.get::<_, i64>(14)?.clamp(0, u16::MAX as i64) as u16,
             rating: row.get::<_, i64>(15)?.clamp(0, 100) as u8,
+            source: row.get(16)?,
         })
     })?;
     rows.collect()
@@ -198,17 +208,18 @@ pub fn remove_for_tracks(conn: &Connection, track_ids: &[i64]) -> rusqlite::Resu
 }
 
 /// Relink marks whose track was pruned and returned under a fresh id, by
-/// their path fragment. None when nothing was dangling.
+/// their key fragment, each within the source it snapshotted. None when
+/// nothing was dangling.
 pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     conn.execute(
-        "UPDATE bookmarks SET path =
-             CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END
-         FROM tracks t
-         WHERE t.id = bookmarks.track_id AND t.source = 'local'
-           AND bookmarks.path <>
-             CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END",
+        &format!(
+            "UPDATE bookmarks SET path = {FRAGMENT}
+             FROM tracks t
+             WHERE t.id = bookmarks.track_id AND bookmarks.path <> {FRAGMENT}"
+        ),
         [],
     )?;
+
     let dangling: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM bookmarks
             WHERE NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = bookmarks.track_id))",
@@ -218,11 +229,13 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     if !dangling {
         return Ok(None);
     }
+
     let relinked = conn.execute(
-        "UPDATE bookmarks SET track_id = t.id FROM tracks t
-         WHERE bookmarks.path <> '' AND t.source = 'local'
-           AND CASE WHEN t.sub = 0 THEN t.path ELSE t.path || '#' || t.sub END = bookmarks.path
-           AND NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = bookmarks.track_id)",
+        &format!(
+            "UPDATE bookmarks SET track_id = t.id FROM tracks t
+             WHERE bookmarks.path <> '' AND {FRAGMENT} = bookmarks.path
+               AND NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = bookmarks.track_id)"
+        ),
         [],
     )?;
     Ok(Some(relinked))
@@ -239,11 +252,15 @@ mod tests {
     }
 
     fn track(conn: &Connection, id: i64, path: &str, sub: u16) {
+        sourced(conn, id, "local", path, sub);
+    }
+
+    fn sourced(conn: &Connection, id: i64, source: &str, path: &str, sub: u16) {
         conn.execute(
             "INSERT INTO tracks (id, source, path, sub, title, artist, album_artist, album, genre,
                                  year, disc_no, track_no, duration_ms, size, mtime)
-             VALUES (?1, 'local', ?2, ?3, 'T', 'A', 'A', 'L', '', 2000, 1, 1, 200000, 1, 1)",
-            params![id, path, sub],
+             VALUES (?1, ?2, ?3, ?4, 'T', 'A', 'A', 'L', '', 2000, 1, 1, 200000, 1, 1)",
+            params![id, source, path, sub],
         )
         .unwrap();
     }
@@ -329,5 +346,44 @@ mod tests {
         assert_eq!(for_track(&conn, 11).unwrap().len(), 1);
         assert_eq!(for_track(&conn, 12).unwrap().len(), 1);
         assert!(for_track(&conn, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_plugin_track_s_marks_list_with_their_source() {
+        let conn = db();
+        track(&conn, 1, "/a.flac", 0);
+        sourced(&conn, 2, "plugin:demo", "k1", 0);
+        add(&conn, 1, "/a.flac", 5_000, "", None).unwrap();
+        add(&conn, 2, "plugin:demo|k1", 5_000, "", None).unwrap();
+
+        let mut rows = all(&conn).unwrap();
+        rows.sort_by_key(|row| row.track_id);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].source.as_str(), rows[0].path.as_str()),
+            ("local", "/a.flac")
+        );
+        assert_eq!(
+            (rows[1].source.as_str(), rows[1].path.as_str()),
+            ("plugin:demo", "k1")
+        );
+    }
+
+    #[test]
+    fn a_returned_plugin_track_gets_its_marks_back_within_its_source() {
+        let conn = db();
+        sourced(&conn, 1, "plugin:demo", "/a.flac", 0);
+        add(&conn, 1, "plugin:demo|/a.flac", 5_000, "", None).unwrap();
+        assert_eq!(reattach(&conn).unwrap(), None);
+
+        // A local file at the same path must not claim the plugin's mark.
+        conn.execute("DELETE FROM tracks", []).unwrap();
+        track(&conn, 11, "/a.flac", 0);
+        assert_eq!(reattach(&conn).unwrap(), Some(0));
+        assert!(for_track(&conn, 11).unwrap().is_empty());
+
+        sourced(&conn, 12, "plugin:demo", "/a.flac", 0);
+        assert_eq!(reattach(&conn).unwrap(), Some(1));
+        assert_eq!(for_track(&conn, 12).unwrap().len(), 1);
     }
 }

@@ -164,6 +164,13 @@ with a `pow(0.7)` perceptual curve so quiet passages stay visible. The RMS goes 
 the same scale and curve so it never leaves the envelope. The waveform panel asks for
 `PEAK_BINS` = 2048 bins and resamples that down to the drawn bar count at paint time.
 
+A remote track with a length but no whole bytes yet draws a `Growing` waveform
+(`rox-playback/src/growing.rs`): the same bins, placed by frame position over the
+stated length, each marked known once audio lands in it. Unknown bins draw as the
+pulsing stand-in. A download feeds it from a decode trailing the bytes, and a stream
+past the download cap from the PCM tap at the playhead. It's never cached; only the
+whole-bytes decode is.
+
 The cache is one small binary file per track under `waveforms/` in the app's data dir
 (`crates/rox-library/src/peaks.rs`). The entry name is `{fnv1a(path):016x}.peaks`, an
 FNV-1a hash of the path; the path stored inside disambiguates a hash collision. The
