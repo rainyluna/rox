@@ -313,10 +313,13 @@ What the panel offers depends on the plugin:
 
   - Right-click an album, playlist or artist to Play it, Play Next or
     Add to Queue. Inside one, the same buttons sit over its tracks.
-  - Start Radio plays what you picked, then keeps the queue going with
-    the service's picks. An album or playlist you play goes on the same
-    way when it ends, and a radio carries on after a restart. It stops
-    when continuation is Off in the playback settings.
+  - Play Similar on an album, playlist or artist plays its tracks, then
+    keeps the queue going with the service's picks. On a track it plays
+    only the picks, leaving the track itself out. It turns Similar
+    shuffle on, and an album or playlist you play goes on the same way
+    when it ends. A radio carries on after a restart, and stops when
+    continuation is Off in the playback settings.
+  - Go to in a track's right-click menu opens its album or artist.
   - Chips over a list switch between the plugin's views, like search
     narrowed to albums. A column heading, like a popularity, sorts by
     it.
@@ -327,7 +330,10 @@ What the panel offers depends on the plugin:
 
 While one of the plugin's tracks plays, the panel's top level shows it
 and what's next. Click the plugin's name or logo at the top of the panel
-to get back there.
+to get back there. Beside Now Playing, a link names where you played the
+track from, and clicking it opens that list with the track picked out.
+When the playing track is in the list you're looking at, Jump to Playing
+in the panel's menu scrolls to it.
 
 The Plugin Guide button on the Plugins page opens the guide to writing a
 plugin, with the protocol and an example to copy. It's also at
