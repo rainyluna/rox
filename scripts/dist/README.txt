@@ -309,7 +309,8 @@ without adding it; the checkmark on a hovered track, or Add to Library
 in its menu, keeps it. A check stays lit while its collection or track
 is in the library. Library, beside the panel's search box, lists what
 the plugin has put there: its kept collections and the tracks added one
-at a time.
+at a time. Remove on the Plugins page drops the plugin's tracks, synced
+collections and settings, and leaves its folder where it is.
 
 A plugin track's menu in the library, a playlist, the queue or history
 takes it back out the way it came in. A track added on its own gets
@@ -319,8 +320,7 @@ single track back.
 
 Under each switched-on plugin, the Plugins page counts its tracks in the
 library and those added one at a time. Show in Library narrows the
-library search to them. Remove drops the plugin's tracks, synced
-collections and settings, and leaves its folder where it is.
+library search to them.
 
 What the panel offers depends on the plugin:
 
