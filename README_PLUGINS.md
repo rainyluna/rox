@@ -27,7 +27,10 @@ This guide covers plugin API version 1, the only one the host supports.
 The plugin then shows up under Add Panel > Plugins, which opens the External Sources
 panel on its source. The checkmark that shows when you hover a collection, Keep in the
 Library, syncs it into the library. Playing or queueing a track plays it without adding
-it; Add to Library on a track keeps it.
+it; the checkmark on a hovered track, or Add to Library in its menu, keeps it. A check
+stays lit while its collection or track is in the library. Library, beside the panel's
+search box, lists what the plugin has put there, its kept collections and the tracks
+added one at a time, without asking the plugin.
 
 Remove on the Plugins page drops the plugin's tracks, synced collections, settings and
 approval. Its folder stays where it is.
@@ -120,7 +123,7 @@ match the folder's name is refused.
 | `api`                 | The plugin API version it targets: `1`.                                                                          |
 | `entry`               | Exactly one of `script` or `native`.                                                                             |
 | `meta`                | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
-| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. `icon` is optional, see [The icon](#the-icon). `radio: true` says the plugin answers [`source.radio`](#sourceradio). `links: true` says it answers [`source.link`](#sourcelink). |
+| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. `icon` is optional, see [The icon](#the-icon). `radio: true` says the plugin answers [`source.radio`](#sourceradio). `links: true` says it answers [`source.link`](#sourcelink). `actions` lists what it can do with its items, see [Actions](#actions). |
 | `capabilities.panels` | Extra panels listed under the plugin in Add Panel. Optional. See [Panels](#panels).                              |
 | `programs`            | Programs the plugin runs, by name. The page checks the plugin's own `bin/` folder, then Program Folders, then PATH, and reports each name as found or missing. rox doesn't enforce the list. |
 | `config_schema`       | JSON Schema for the plugin's settings.                                                                           |
@@ -209,7 +212,7 @@ define, or answers an id rox never sent is logged and dropped, and the call it w
 meant for waits out its timeout.
 
 An error's `code` has to be an integer, but rox reads only its `message`. That message is
-shown to the user when the call was theirs (a browse, a sync) and logged otherwise. The
+shown to the user when the call was theirs (a browse, a sync, a link) and logged otherwise. The
 tones example follows JSON-RPC's codes: -32601 for an unknown method, -32602 for bad
 params, -32000 for anything else.
 
@@ -231,6 +234,9 @@ rolls to `rox.log.1` at 2 MiB. The plugin never sends requests to rox.
 | `source.cover`   | `key`                             | `{mime, data}` with the image base64, or null    |
 | `source.radio`   | `seed`, `cursor`, `count`         | a batch of tracks and where the next starts      |
 | `source.link`    | `item`                            | `{url}` for its web page, or null                |
+| `source.action`  | `action`, `items`, `params`       | an outcome, or `{job}` for work rox polls        |
+| `source.job`     | `job`                             | the job's progress, and its outcome once it ends |
+| `source.cancel`  | `job`                             | null                                             |
 | `shutdown`       |                                   | null, then the plugin exits                      |
 
 ### hello
@@ -323,8 +329,8 @@ discover, like a feed or a front page, lists it there as nodes.
 A root node can mark itself the service's home with `"home": true`, when `hello` listed
 `home`. rox then leaves it out of the roots and lists its page under them, paging on as
 the user scrolls, so the home needs no click to open. The roots show first and don't wait
-on it. The home page's fields join the roots' columns, but its notice and views don't
-carry over. Only the first node marked home counts, and only among the roots. The user
+on it. The home page's fields, notice and views don't carry over, so a column the home
+declares shows only when its node is opened on its own. Only the first node marked home counts, and only among the roots. The user
 can turn this off in the panel's settings, and the node lists like any other.
 
 ```
@@ -544,6 +550,91 @@ item with no page. rox asks on every click rather than keeping the answer, so a 
 can change without anything going stale. The page opens in the user's browser or goes
 to the clipboard, and rox itself never fetches it.
 
+### Actions
+
+A source can offer things to do with its tracks and nodes, like downloading one. Each
+action in `capabilities.source.actions` has an `id`, a `label`, and `on`, the places rox
+offers it:
+
+```json
+"actions": [
+  {
+    "id": "export",
+    "label": "Export WAV",
+    "on": ["track", "node"],
+    "params": {
+      "type": "object",
+      "properties": {
+        "seconds": { "type": "integer", "title": "Length", "minimum": 1, "maximum": 60, "default": 10 }
+      }
+    }
+  }
+]
+```
+
+| `on`     | Where rox offers it                                                                   |
+| -------- | ------------------------------------------------------------------------------------- |
+| `track`  | The menu of the plugin's tracks, everywhere they show, on one or a selection of only its tracks. |
+| `node`   | The menu of its nodes in the External Sources panel, on one or a selection.            |
+| `source` | The External Sources panel's own menu, with no item.                                    |
+
+A name rox doesn't know is skipped. A plugin can declare up to 16 actions, and an `id`
+that repeats, an empty `label` or an empty `on` refuses the plugin. The label shows as
+written, untranslated.
+
+`params` is optional. When an action has it, picking the action opens a dialog with a row
+per property, drawn from the same subset of JSON Schema as `config_schema`: strings,
+`"format": "password"`, numbers, integers, booleans and enums. A property's `default`
+fills its row, and the names in `required` have to be filled before Run works. Without
+`params`, picking the action runs it at once.
+
+A selection is one call. `items` holds the tracks' keys or the nodes' ids, and is empty
+for an action offered on `source`:
+
+```
+→ {"jsonrpc":"2.0","id":14,"method":"source.action","params":{"action":"export","items":["tones"],"params":{"seconds":10}}}
+← {"jsonrpc":"2.0","id":14,"result":{"job":"j1"}}
+```
+
+An action that finishes within the call answers its outcome instead of a job: a
+`message`, and optionally a `link` and a `reveal`. rox shows the message in a toast, or
+"<label> finished" when there's none. A `link` has to be an `http` or `https` address and
+becomes an Open Link button. A `reveal` has to be an absolute path and becomes a Show in
+Folder button, which shows it in the file manager and never opens it. A toast with a
+button stays until the user presses one or dismisses it. `null` is an outcome with
+nothing in it. An error shows in a toast that stays until dismissed.
+
+A job is work that outlasts a call. rox lists it in the Tasks window and asks
+`source.job` about once a second until it ends:
+
+```
+→ {"jsonrpc":"2.0","id":15,"method":"source.job","params":{"job":"j1"}}
+← {"jsonrpc":"2.0","id":15,"result":{"done":3,"total":6,"text":"C4, 262 Hz"}}
+→ {"jsonrpc":"2.0","id":19,"method":"source.job","params":{"job":"j1"}}
+← {"jsonrpc":"2.0","id":19,"result":{"done":6,"total":6,"text":"","finished":true,"message":"Exported 6 tones","reveal":"/home/me/.local/share/rox/plugin-data/tones/exports"}}
+```
+
+| Field      | Meaning                                                                       |
+| ---------- | ----------------------------------------------------------------------------- |
+| `done`     | How far it got, in whatever unit suits it, like files or bytes.                  |
+| `total`    | What `done` counts up to, or 0 when the plugin can't tell.                       |
+| `text`     | A line about what it's doing now.                                                |
+| `finished` | The job ended well. The outcome fields (`message`, `link`, `reveal`) come with it. |
+| `error`    | The job failed, and why. rox shows it in a toast that stays until dismissed.      |
+
+A job has no time limit, but every poll has the listing timeout, and a poll that fails
+ends the job as failed. A plugin that restarts loses its jobs that way, so it should
+keep a job's state for as long as the plugin runs and forget it once it has answered the
+end.
+
+Stop in the Tasks window sends `source.cancel` with the job's id, then keeps polling. The
+plugin stops the work and answers the next poll with an `error`. rox stops asking ten
+seconds after the cancel either way.
+
+Work runs in the plugin, with the plugin's own access. A file it saves goes under the
+`data_dir` from `hello`, or a folder the user names in its settings, and never into its
+own folder.
+
 ### shutdown
 
 ```
@@ -599,6 +690,14 @@ it without adding it to the library. It still has a place in the queue, history 
 the playlist, and it stays out of the library's views and search. One that isn't
 played or picked again for 30 days, and isn't in the saved queue, is deleted when rox
 starts. Its playlist entries and play history reattach if it comes back.
+
+A track's menu in the library, a playlist, the queue or history takes it back out the
+way it came in. A track added on its own gets Remove from Library. A track a kept
+collection holds gets Stop Keeping for that collection, which lets go of the whole
+collection like its switch in the External Sources panel. There's no way to take one
+track out of a kept collection, since the next sync would put it back. Under each
+switched-on plugin, the Plugins page counts its tracks in the library and those added
+on their own, and Show in Library narrows the shared search to the plugin's source.
 
 A plugin's tracks show only while it's switched on and its folder is present. A
 switched-off plugin's tracks are hidden, and so are those of a plugin whose folder is
@@ -709,6 +808,7 @@ running. Switch it off on the Plugins page before updating its folder.
 | `hello`                                              | 5 s                            |
 | `source.browse`, `source.search`, later sync pages   | 15 s                           |
 | `source.radio`, `source.link`                        | 15 s                           |
+| `source.action`, `source.job`, `source.cancel`       | 15 s                           |
 | A sync's first page                                  | 60 s                           |
 | `source.open`                                        | 20 s                           |
 | `source.read`, `source.cover`                        | 10 s                           |
@@ -716,6 +816,7 @@ running. Switch it off on the Plugins page before updating its folder.
 | A line on stdout                                     | 1 MiB                          |
 | A string in a result                                 | 4 KiB                          |
 | Entries or tracks per page                           | 500                            |
+| Actions a plugin declares                            | 16                             |
 | Views a page offers                                  | 12                             |
 | Fields a page declares                               | 4                              |
 | Rows read to sort by a field                         | 1,000                          |

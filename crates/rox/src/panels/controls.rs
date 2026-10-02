@@ -444,6 +444,8 @@ pub struct ControlsPanel {
     /// Unfolded blocks on the settings page, never saved.
     open: HashSet<u64>,
     _player_changed: Subscription,
+    _scrobbler_changed: Subscription,
+    _discord_changed: Subscription,
 }
 
 impl ControlsPanel {
@@ -455,6 +457,8 @@ impl ControlsPanel {
         config.items = normalize_items(&config.items, &config.buttons);
 
         let _player_changed = cx.observe(&state.player, |_, _, cx| cx.notify());
+        let _scrobbler_changed = cx.observe(&state.scrobbler, |_, _, cx| cx.notify());
+        let _discord_changed = cx.observe(&state.discord, |_, _, cx| cx.notify());
 
         ControlsPanel {
             state,
@@ -464,15 +468,21 @@ impl ControlsPanel {
             tips: HashMap::new(),
             open: HashSet::new(),
             _player_changed,
+            _scrobbler_changed,
+            _discord_changed,
         }
     }
 
     fn live_cases(&self, placed: &[Placed<'_>], cx: &App) -> Vec<Option<&'static str>> {
-        let player = self.state.player.read(cx);
+        let live = buttons::Live {
+            player: self.state.player.read(cx),
+            scrobbler: self.state.scrobbler.read(cx),
+            discord: self.state.discord.read(cx),
+        };
         placed
             .iter()
             .map(|slot| match slot {
-                Placed::Button(def) => buttons::read_state(&def.state, player),
+                Placed::Button(def) => buttons::read_state(&def.state, &live),
                 Placed::Furniture(_) => None,
             })
             .collect()

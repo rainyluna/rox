@@ -35,10 +35,11 @@ use crate::query::shared_query::{QueryFilter, QuerySource, SharedQueryEvent};
 use crate::selection::SelectionEvent;
 use crate::thumbs::Thumb;
 use crate::track_ui::track_cells;
-use crate::track_ui::track_columns::{self, Column, ColumnHost, GroupTrack, HeadingHost};
+use crate::track_ui::track_columns::{
+    self, Column, ColumnHost, GroupTrack, HeadingHost, SourceMark,
+};
 use rox_services::catalog::LocalCopy;
 use rox_services::history::HistoryEvent;
-use rox_services::plugins;
 
 const ROW_H: f32 = 30.;
 
@@ -181,13 +182,6 @@ fn columns() -> Vec<Column> {
             default_on: true,
         },
     ]
-}
-
-/// How the source column names a source.
-struct SourceMark {
-    label: SharedString,
-    /// A plugin's own icon, where it ships one.
-    icon: Option<SharedString>,
 }
 
 /// An album heading (Recent view only), or a track by index into `tracks`.
@@ -443,11 +437,7 @@ impl HistoryPanel {
                 continue;
             }
 
-            let mark = SourceMark {
-                label: SharedString::from(rox_library::cue::source_label(&t.source)),
-                icon: plugins::icon(&t.source),
-            };
-            sources.insert(t.source.clone(), mark);
+            sources.insert(t.source.clone(), SourceMark::resolve(&t.source));
         }
         self.sources = sources;
 
@@ -567,7 +557,7 @@ impl HistoryPanel {
         self.refresh(cx);
     }
 
-    /// Often nowhere: a listen is only recorded past the scrobble threshold,
+    /// Often nowhere: a listen is only recorded once the listen rule is met,
     /// and a view holds at most [`ROWS_CAP`] rows.
     fn playing_row(&self) -> Option<(usize, usize)> {
         let playing = self.playing?;
@@ -987,31 +977,10 @@ impl HistoryPanel {
         row
     }
 
-    /// The label first and the icon after it, so the labels line up and a
-    /// long one truncates before the icon goes.
     fn source_cell(&self, source: &str) -> Div {
-        let cell = div()
+        track_columns::source_cell(self.sources.get(source))
             .flex_none()
             .w(palette::scaled_px(track_columns::SOURCE_WIDTH))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.))
-            .overflow_hidden()
-            .text_color(palette::text_muted());
-
-        let Some(mark) = self.sources.get(source) else {
-            return cell;
-        };
-
-        cell.child(div().min_w_0().truncate().child(mark.label.clone()))
-            .children(mark.icon.clone().map(|icon| {
-                svg()
-                    .path(icon)
-                    .size(px(12.))
-                    .flex_none()
-                    .text_color(palette::text_muted())
-            }))
     }
 
     fn config_menu(

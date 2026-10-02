@@ -13,7 +13,30 @@
     "license": "AGPL-3.0-only"
   },
   "capabilities": {
-    "source": { "label": "Tones", "scrobble": false }
+    "source": {
+      "label": "Tones",
+      "scrobble": false,
+      "actions": [
+        {
+          "id": "export",
+          "label": "Export WAV",
+          "on": ["track", "node"],
+          "params": {
+            "type": "object",
+            "properties": {
+              "seconds": {
+                "type": "integer",
+                "title": "Length",
+                "description": "Seconds of each tone to write.",
+                "minimum": 1,
+                "maximum": 60,
+                "default": 10
+              }
+            }
+          }
+        }
+      ]
+    }
   },
   "programs": [],
   "config_schema": {

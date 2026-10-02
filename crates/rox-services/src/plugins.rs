@@ -194,9 +194,9 @@ pub use rox_plugins::wire::NodeKind;
 
 /// A plugin with a host, and what the host was built from: a new hash or new
 /// config means a new host.
-struct Running {
-    host: Host,
-    label: String,
+pub(crate) struct Running {
+    pub(crate) host: Host,
+    pub(crate) label: String,
     hash: String,
     config: Value,
 }
@@ -273,11 +273,11 @@ struct Wiring {
 
 impl Global for Wiring {}
 
-fn running(source: &str) -> Option<Arc<Running>> {
+pub(crate) fn running(source: &str) -> Option<Arc<Running>> {
     HOSTS.read().ok()?.get(source).cloned()
 }
 
-fn host_for(source: &str) -> Result<Host, String> {
+pub(crate) fn host_for(source: &str) -> Result<Host, String> {
     running(source)
         .map(|running| running.host.clone())
         .ok_or_else(|| NO_HOST.to_string())
@@ -868,6 +868,9 @@ pub enum Change {
     Scrobble(bool),
     /// The entry, which is how the plugin runs.
     Entry,
+    /// An action by its label: new, or declared differently.
+    ActionAdded(String),
+    ActionChanged(String),
 }
 
 /// Compares the manifests as written, so a capability this build doesn't
@@ -901,6 +904,57 @@ pub fn changes(approved: &Value, now: &Value) -> Vec<Change> {
             .filter(|key| !is.contains(key))
             .map(|key| Change::CapabilityRemoved(key.clone())),
     );
+
+    // Inside a source that was already approved, a feature switched on asks
+    // for something new too, like links the user can open. A new source is
+    // already the capability line above.
+    let features = |doc: &Value| -> Vec<String> {
+        doc["capabilities"]["source"]
+            .as_object()
+            .map(|source| {
+                source
+                    .iter()
+                    .filter(|(key, value)| *key != "scrobble" && value.as_bool() == Some(true))
+                    .map(|(key, _)| key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if approved["capabilities"]["source"].is_object() {
+        let had = features(approved);
+        found.extend(
+            features(now)
+                .into_iter()
+                .filter(|feature| !had.contains(feature))
+                .map(Change::CapabilityAdded),
+        );
+    }
+
+    let actions = |doc: &Value| -> Vec<(String, Value)> {
+        doc["capabilities"]["source"]["actions"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|action| {
+                        (
+                            action["id"].as_str().unwrap_or("").to_string(),
+                            action.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let had = actions(approved);
+    for (id, action) in actions(now) {
+        let label = action["label"].as_str().unwrap_or(&id).to_string();
+
+        match had.iter().find(|(old, _)| *old == id) {
+            None => found.push(Change::ActionAdded(label)),
+            Some((_, old)) if *old != action => found.push(Change::ActionChanged(label)),
+            Some(_) => {}
+        }
+    }
 
     let before = programs(approved);
     found.extend(
@@ -939,7 +993,7 @@ static OPENED_COLD: AtomicU64 = AtomicU64::new(0);
 
 /// For the blocking paths that can run before the first [`apply`]. Answers
 /// at once when [`start`] never ran, since then nothing opens the gate.
-fn await_first_apply(source: &str) {
+pub(crate) fn await_first_apply(source: &str) {
     if FIRST_APPLY.is_open() || !STARTED.load(Ordering::Relaxed) {
         return;
     }
@@ -1765,17 +1819,17 @@ fn fetch_collection(
 }
 
 /// Sync one collection into the library: the whole membership in one write,
-/// only after the last page. Answers the rows written, zero when unchanged.
+/// only after the last page. Answers the rows written, None when unchanged.
 fn sync_collection(
     host: &Host,
     db_path: &Path,
     source: &str,
     synced: &SyncedCollection,
-) -> Result<usize, String> {
+) -> Result<Option<usize>, String> {
     let began = Instant::now();
     let Some((tracks, token)) = fetch_collection(host, &synced.id, &synced.token)? else {
         log::info!("{source}: {} unchanged", synced.id);
-        return Ok(0);
+        return Ok(None);
     };
 
     let mut conn = store::open(db_path).map_err(|e| e.to_string())?;
@@ -1805,7 +1859,7 @@ fn sync_collection(
     });
     bump();
 
-    Ok(tracks.len())
+    Ok(Some(tracks.len()))
 }
 
 fn synced_of(source: &str) -> Vec<SyncedCollection> {
@@ -1829,17 +1883,30 @@ fn write<T: Send + 'static>(
     cx: &mut App,
     work: impl FnOnce(PathBuf) -> Result<T, String> + Send + 'static,
 ) -> Task<Result<T, String>> {
+    write_if(library, cx, move |db_path| (work(db_path), true))
+}
+
+/// [`write`] for work that can find nothing to change, which answers whether
+/// it wrote. A reload swaps the projection under every panel, so one that
+/// changed nothing shows as a flicker.
+fn write_if<T: Send + 'static>(
+    library: Entity<Library>,
+    cx: &mut App,
+    work: impl FnOnce(PathBuf) -> (Result<T, String>, bool) + Send + 'static,
+) -> Task<Result<T, String>> {
     let db_path = library.read(cx).db_path();
 
     cx.spawn(async move |cx| {
-        let result = cx
+        let (result, wrote) = cx
             .background_executor()
             .spawn(async move { work(db_path) })
             .await;
 
-        library
-            .update(cx, |library, cx| library.reload_projection(cx))
-            .ok();
+        if wrote {
+            library
+                .update(cx, |library, cx| library.reload_projection(cx))
+                .ok();
+        }
 
         result
     })
@@ -1854,10 +1921,18 @@ pub fn set_synced(
     on: bool,
     cx: &mut App,
 ) -> Task<Result<usize, String>> {
-    let (host, id) = match (host_for(source), record_id(source)) {
-        (Ok(host), Some(id)) => (host, id.to_string()),
-        (Err(e), _) => return Task::ready(Err(e)),
-        (_, None) => return Task::ready(Err(NO_HOST.to_string())),
+    let Some(id) = record_id(source).map(str::to_string) else {
+        return Task::ready(Err(NO_HOST.to_string()));
+    };
+
+    // Only a sync needs the plugin. Stopping is a settings change and a
+    // delete, so it works with the plugin stopped or crashed.
+    let host = match on {
+        true => match host_for(source) {
+            Ok(host) => Some(host),
+            Err(e) => return Task::ready(Err(e)),
+        },
+        false => None,
     };
 
     let collection = SyncedCollection {
@@ -1879,10 +1954,12 @@ pub fn set_synced(
     bump();
 
     let source = source.to_string();
-    write(library, cx, move |db_path| match on {
-        true => sync_collection(&host, &db_path, &source, &collection),
+    write(library, cx, move |db_path| match host {
+        Some(host) => {
+            sync_collection(&host, &db_path, &source, &collection).map(|rows| rows.unwrap_or(0))
+        }
 
-        false => {
+        None => {
             let mut conn = store::open(&db_path).map_err(|e| e.to_string())?;
             members::drop_collection(&mut conn, &source, &collection.id)
                 .map(|_| 0)
@@ -1906,20 +1983,25 @@ pub fn sync_now(
     let source = source.to_string();
     let collections = synced_of(&source);
 
-    write(library, cx, move |db_path| {
+    // Every launch runs this once per plugin, mostly against unchanged
+    // collections, so only a sync that wrote reloads.
+    write_if(library, cx, move |db_path| {
         // Starting the plugin is part of the first sync, and the one
         // failure worth stopping on.
-        host.ensure()?;
+        if let Err(e) = host.ensure() {
+            return (Err(e), false);
+        }
 
-        let mut written = 0;
+        let (mut written, mut wrote) = (0, false);
         for collection in &collections {
             match sync_collection(&host, &db_path, &source, collection) {
-                Ok(rows) => written += rows,
+                Ok(Some(rows)) => (written, wrote) = (written + rows, true),
+                Ok(None) => {}
                 Err(e) => log::warn!("{source}: syncing {} failed: {e}", collection.id),
             }
         }
 
-        Ok(written)
+        (Ok(written), wrote)
     })
 }
 
@@ -2215,6 +2297,34 @@ mod tests {
         assert_eq!(
             changes(&before, &dropped),
             vec![Change::CapabilityRemoved("source".into())]
+        );
+    }
+
+    #[test]
+    fn features_and_actions_inside_a_source_show_too() {
+        let export = json!({ "id": "export", "label": "Export", "on": ["track"] });
+        let before = manifest(
+            json!({ "source": { "label": "T", "radio": true, "actions": [export] } }),
+            json!([]),
+            "t.py",
+        );
+
+        let changed = json!({ "id": "export", "label": "Export", "on": ["track", "node"] });
+        let download = json!({ "id": "download", "label": "Download", "on": ["track"] });
+        let after = manifest(
+            json!({ "source": { "label": "T", "radio": true, "links": true,
+                                "actions": [changed, download] } }),
+            json!([]),
+            "t.py",
+        );
+
+        assert_eq!(
+            changes(&before, &after),
+            vec![
+                Change::CapabilityAdded("links".into()),
+                Change::ActionChanged("Export".into()),
+                Change::ActionAdded("Download".into()),
+            ]
         );
     }
 

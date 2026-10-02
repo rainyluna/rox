@@ -410,7 +410,7 @@ pub enum Tone {
 }
 
 impl Tone {
-    fn color(self) -> Rgba {
+    pub fn color(self) -> Rgba {
         match self {
             Tone::Info => palette::text_muted(),
             Tone::Good => palette::tone_good(),
@@ -419,7 +419,7 @@ impl Tone {
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
             Tone::Info => icons::INFO,
             Tone::Good => icons::CHECK,

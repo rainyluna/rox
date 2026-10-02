@@ -88,7 +88,8 @@ Boundary: nothing here touches the audio path. The playback engine already emits
 (current track, position, transitions); play history consumes that state on the control
 side, applies the listen rule, and appends to the store off the UI thread. The listen
 rule matches the scrobble standard, half the track or four minutes of it, whichever
-comes first. Storage is the library database per
+comes first, minus its thirty-second floor: a short track still counts locally, though
+no scrobble destination takes it. Storage is the library database per
 [ADR 11](decisions/11-adr-play-history.md). Aggregates are derived from events. Stats
 are read when a view opens rather than per keystroke, so they stay in SQL rather than
 the projection.

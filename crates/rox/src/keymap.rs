@@ -34,10 +34,11 @@ use crate::workspace::{
     OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome, PlayRandom, PlaySimilar,
     PrevBookmark, PreviousTrack, Quit, ReportIssue, RescanLibrary, ResetFontSize, RomanizeLibrary,
     SaveLayout, SaveWorkspace, SleepOff, StepBackward, StepForward, StopPlayback, TagGenres,
-    ToggleArtTheming, ToggleContinuation, ToggleCrossfade, ToggleCrossfadeAlbums,
-    ToggleDecorations, ToggleDesignMode, ToggleEq, ToggleExclusiveOutput, ToggleFavourite,
-    ToggleMenubar, ToggleMini, ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleReadings,
-    ToggleResizeLock, ToggleSeams, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown,
+    ToggleArtTheming, ToggleBroadcast, ToggleCapture, ToggleContinuation, ToggleCrossfade,
+    ToggleCrossfadeAlbums, ToggleDecorations, ToggleDesignMode, ToggleDiscord, ToggleEq,
+    ToggleExclusiveOutput, ToggleFavourite, ToggleMenubar, ToggleMilkdropLock, ToggleMini,
+    ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleReadings, ToggleResizeLock,
+    ToggleScrobbling, ToggleSeams, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown,
     VolumeUp,
 };
 
@@ -644,6 +645,42 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             FlattenEq,
             rox_i18n::t_static("keymap-flatten-eq.description")
         ),
+        command!(
+            "toggle_scrobbling",
+            rox_i18n::t_static("keymap-toggle-scrobbling"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleScrobbling,
+            rox_i18n::t_static("keymap-toggle-scrobbling.description")
+        ),
+        command!(
+            "toggle_discord",
+            rox_i18n::t_static("keymap-toggle-discord"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleDiscord,
+            rox_i18n::t_static("keymap-toggle-discord.description")
+        ),
+        command!(
+            "toggle_broadcast",
+            rox_i18n::t_static("keymap-toggle-broadcast"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleBroadcast,
+            rox_i18n::t_static("keymap-toggle-broadcast.description")
+        ),
+        command!(
+            "toggle_capture",
+            rox_i18n::t_static("keymap-toggle-capture"),
+            Group::Playback,
+            WORKSPACE,
+            &[],
+            ToggleCapture,
+            rox_i18n::t_static("keymap-toggle-capture.description")
+        ),
         // Library operations ship unbound except health and power search: an
         // afternoon-long pass shouldn't be reachable by accident.
         command!(
@@ -1120,6 +1157,15 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             &[],
             ToggleReadings,
             rox_i18n::t_static("keymap-toggle-readings.description")
+        ),
+        command!(
+            "toggle_milkdrop_lock",
+            rox_i18n::t_static("keymap-toggle-milkdrop-lock"),
+            Group::View,
+            WORKSPACE,
+            &[],
+            ToggleMilkdropLock,
+            rox_i18n::t_static("keymap-toggle-milkdrop-lock.description")
         ),
         // A window with neither the mini nor the primary preset named stays put.
         command!(

@@ -73,7 +73,7 @@ pub fn set_capturing(on: bool) {
     ARMED.store(on, Ordering::Relaxed);
 }
 
-fn capturing() -> bool {
+pub fn capturing() -> bool {
     ARMED.load(Ordering::Relaxed)
 }
 

@@ -20,9 +20,9 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    Image, ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, SharedString,
-    Stateful, Subscription, WeakEntity, Window, div, img, prelude::*, px, svg,
+    AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Image,
+    ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, SharedString, Stateful,
+    Subscription, WeakEntity, Window, div, img, prelude::*, px, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
@@ -2204,8 +2204,8 @@ impl MetadataPanel {
                             field = label.to_string()
                         ))
                         .icon(Icon::default().path(icons::COPY))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                        .on_click(move |_, window, cx| {
+                            rox_panel_api::toast::copy(value.clone(), window, cx);
                         }),
                     )
                     .separator(),

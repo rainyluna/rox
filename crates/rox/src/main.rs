@@ -229,6 +229,7 @@ fn install_openers() {
         add_panel_submenu: workspace::add_panel_submenu,
         host_settings_item: composite::host_settings_item,
         confirm_close_locked,
+        task_started: tasks_window::repaint_while_running,
     });
 }
 

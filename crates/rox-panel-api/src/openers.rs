@@ -64,6 +64,9 @@ pub struct Openers {
     /// Confirm and close a pinned panel. No-ops in a popout window, which has no
     /// workspace to float the dialog over.
     pub confirm_close_locked: fn(Arc<dyn PanelView>, WeakEntity<TabPanel>, &mut Window, &mut App),
+    /// A job began that the Tasks window lists, like a plugin action's, so
+    /// the windows keep repainting its progress.
+    pub task_started: fn(&mut App),
 }
 
 static OPENERS: OnceLock<Openers> = OnceLock::new();
@@ -262,5 +265,11 @@ pub fn confirm_close_locked(
 ) {
     if let Some(openers) = openers("the pinned-panel close confirm") {
         (openers.confirm_close_locked)(panel, tabs, window, cx);
+    }
+}
+
+pub fn task_started(cx: &mut App) {
+    if let Some(openers) = openers("the tasks repaint") {
+        (openers.task_started)(cx);
     }
 }

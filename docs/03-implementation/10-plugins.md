@@ -493,6 +493,19 @@ which no node id can be (`members.rs:22`).
   own since a node id can be any non-empty string. A saved row counts as held.
   Remove from Library is `unsave`, which prunes the row if nothing else holds it. The
   browser offers Remove only for rows `Library::is_saved` says were added on their own.
+- The shared track menu (`track_actions_with`, `rox-panel-api/src/panel.rs`) takes plugin
+  rows out too, through `rox-panel-api/src/plugin_library.rs`. `members::holds` reads
+  which of the selected rows are saved and which kept collections hold any of them, one
+  lookup per row id. Saved rows get Remove from Library, the browser's `unsave`. Each
+  kept collection gets Stop Keeping, named by its `SyncedCollection` title. It calls
+  `set_synced` with sync off, the same write as the browser's keep switch. A single row
+  of a kept collection can't be removed, since the next sync would put it back. Both
+  writes reload the projection, and a failure shows in a toast on the menu's window.
+- The Plugins page counts each switched-on plugin's rows with `members::in_library`:
+  rows a kept collection holds or the user saved, picked-only rows left out. It reads
+  the counts again when the projection moves. Show in Library replaces the shared
+  filter with a Source pick on `plugin:<id>`, clears the shared search text and raises
+  the workspace window (`show_in_library`, `rox/src/settings/window/plugins_page.rs`).
 - At launch, `expire_picks` deletes picked-only rows neither picked nor played in 30
   days (`PICK_KEEP_SECS`), keeping the saved queue's rows and the last track, which
   restore by row id (`rox-services/src/plugins.rs`).

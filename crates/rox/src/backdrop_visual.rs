@@ -375,6 +375,30 @@ pub(crate) fn current_preset() -> Option<PathBuf> {
     visual().as_ref().and_then(|visual| visual.current.clone())
 }
 
+/// Locking remembers the preset that's up so a restart lands on it;
+/// unlocking forgets it, or the backdrop would read as stuck.
+pub(crate) fn set_locked(on: bool, cx: &mut App) {
+    let mut config = settings::backdrop_visual();
+    config.locked = on;
+    config.preset = if on { current_preset() } else { None };
+
+    switch(config, cx);
+}
+
+/// Into the cache and the file at once, then a wake.
+pub(crate) fn switch(config: BackdropVisualConfig, cx: &mut App) {
+    settings::note_backdrop_visual(config.clone());
+    Settings::update(move |s| persist(s, config));
+    wake(cx);
+}
+
+/// The look's fields go into the bundle and the machine's into
+/// settings.json.
+pub(crate) fn persist(s: &mut Settings, config: BackdropVisualConfig) {
+    s.look.bundle.appearance.milkdrop = config.look();
+    s.backdrop_visual = config;
+}
+
 fn library(visual: &mut Visual) -> &PresetLibrary {
     if visual.library.is_none() {
         visual.library = Some(scan_library());

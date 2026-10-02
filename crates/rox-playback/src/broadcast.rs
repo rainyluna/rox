@@ -44,6 +44,10 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Off is one relaxed load per chunk.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// What the last [`configure`] asked for. Apart from [`ACTIVE`], which stays
+/// off when the config has no host.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
 /// RwLock: the decode thread read-locks per chunk; only [`configure`] writes.
 static FEED: RwLock<Option<SyncSender<Chunk>>> = RwLock::new(None);
 
@@ -85,6 +89,7 @@ pub fn set_song(song: String) {
 /// Start broadcasting, or stop with `None`. A reconfigure tears the old sink
 /// down first, which releases the mount.
 pub fn configure(config: Option<Config>) {
+    ENABLED.store(config.is_some(), Ordering::Relaxed);
     ACTIVE.store(false, Ordering::Relaxed);
     if let Some(stop) = STOP.lock().unwrap().take() {
         stop.store(true, Ordering::Relaxed);
@@ -103,6 +108,10 @@ pub fn configure(config: Option<Config>) {
     ACTIVE.store(true, Ordering::Relaxed);
     SONG_DIRTY.store(true, Ordering::Release);
     std::thread::spawn(move || sink(config, rx, stop));
+}
+
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
 }
 
 /// Connect, encode, push; on failure drop the connection and backlog and retry

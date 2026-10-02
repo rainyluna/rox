@@ -228,17 +228,9 @@ impl SettingsWindow {
         self.backdrop_visual_switched(config, cx);
     }
 
-    /// Locking remembers the preset that's up so a restart lands on it;
-    /// unlocking forgets it, or the backdrop would read as stuck.
     fn set_backdrop_visual_locked(&mut self, on: bool, cx: &mut Context<Self>) {
-        let mut config = settings::backdrop_visual();
-        config.locked = on;
-        config.preset = if on {
-            crate::backdrop_visual::current_preset()
-        } else {
-            None
-        };
-        self.backdrop_visual_switched(config, cx);
+        crate::backdrop_visual::set_locked(on, cx);
+        cx.notify();
     }
 
     fn set_backdrop_visual_color(
@@ -314,17 +306,8 @@ impl SettingsWindow {
         config: settings::BackdropVisualConfig,
         cx: &mut Context<Self>,
     ) {
-        settings::note_backdrop_visual(config.clone());
-        Settings::update(move |s| Self::persist_backdrop_visual(s, config));
-        crate::backdrop_visual::wake(cx);
+        crate::backdrop_visual::switch(config, cx);
         cx.notify();
-    }
-
-    /// The look's fields go into the bundle and the machine's into
-    /// settings.json.
-    fn persist_backdrop_visual(s: &mut Settings, config: settings::BackdropVisualConfig) {
-        s.look.bundle.appearance.milkdrop = config.look();
-        s.backdrop_visual = config;
     }
 
     fn set_backdrop_visual_strength(&mut self, value: f32, cx: &mut Context<Self>) {
@@ -358,7 +341,7 @@ impl SettingsWindow {
                 .update(cx, |this, _| this.backdrop_visual_persist_gen)
                 .unwrap_or(generation);
             if latest == generation {
-                Settings::update(move |s| Self::persist_backdrop_visual(s, config));
+                Settings::update(move |s| crate::backdrop_visual::persist(s, config));
             }
         })
         .detach();

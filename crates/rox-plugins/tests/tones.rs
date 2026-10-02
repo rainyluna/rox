@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rox_plugins::{Host, HostConfig, Options, Stream, hash, loader, manifest};
+use rox_plugins::{Host, HostConfig, Options, Stream, hash, loader, manifest, wire};
 use serde_json::{Value, json};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::probe::Hint;
@@ -182,6 +182,50 @@ fn a_track_reads_whole_as_a_wav_of_its_stated_length() {
 
     let (rate, frames) = decode(bytes);
     assert_eq!(frames, rate as u64 * duration_ms / 1000);
+}
+
+#[test]
+fn export_runs_as_a_job_and_reveals_its_folder() {
+    let Some(host) = host("export") else {
+        return;
+    };
+
+    let manifest = manifest::load(&examples().join("tones")).unwrap();
+    let declared = &manifest.capabilities.source.unwrap().actions[0];
+    assert!(declared.offered_on("track") && declared.offered_on("node"));
+
+    // A collection's id stands for every tone in it.
+    let started = call(
+        &host,
+        "source.action",
+        json!({"action": "export", "items": ["tones"], "params": {"seconds": 1}}),
+    );
+    let started: wire::ActionAnswer = wire::decode(started).expect("a job answer");
+    let job = started.job.expect("export is a job");
+
+    let state = loop {
+        let state: wire::JobState =
+            wire::decode(call(&host, "source.job", json!({"job": job}))).unwrap();
+        if state.finished || state.error.is_some() {
+            break state;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    host.stop("test over");
+
+    assert_eq!(state.error, None);
+    assert_eq!((state.done, state.total), (6, 6));
+
+    let folder = PathBuf::from(state.reveal.expect("the folder to show"));
+    assert!(folder.is_absolute());
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 6);
+    assert!(
+        !folder.starts_with(examples()),
+        "the plugin writes outside its own folder"
+    );
+
+    std::fs::remove_dir_all(folder.parent().unwrap()).ok();
 }
 
 /// Probes and decodes the bytes, answering the sample rate and the frames

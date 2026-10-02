@@ -305,9 +305,22 @@ Browse and search a plugin's source by picking it under Add Panel >
 Plugins, which opens the External Sources panel on it. Hover a
 collection and click its checkmark to keep it in your library, which
 syncs it and follows its changes. Playing or queueing a track plays it
-without adding it; Add to Library on a track keeps it. Remove on the
-Plugins page drops the plugin's tracks, synced collections and settings,
-and leaves its folder where it is.
+without adding it; the checkmark on a hovered track, or Add to Library
+in its menu, keeps it. A check stays lit while its collection or track
+is in the library. Library, beside the panel's search box, lists what
+the plugin has put there: its kept collections and the tracks added one
+at a time.
+
+A plugin track's menu in the library, a playlist, the queue or history
+takes it back out the way it came in. A track added on its own gets
+Remove from Library. One that a kept collection holds gets Stop Keeping,
+which lets go of the whole collection, since the next sync would put a
+single track back.
+
+Under each switched-on plugin, the Plugins page counts its tracks in the
+library and those added one at a time. Show in Library narrows the
+library search to them. Remove drops the plugin's tracks, synced
+collections and settings, and leaves its folder where it is.
 
 What the panel offers depends on the plugin:
 
@@ -327,6 +340,12 @@ What the panel offers depends on the plugin:
     or a sideways swipe.
   - Open in Browser and Copy Link take you to an item's page on the
     service, wherever its tracks show in rox.
+  - Actions the plugin adds, like a download, sit in the right-click
+    menu of its tracks wherever they show, of its collections in the
+    panel, or of the panel itself. One with settings opens a dialog
+    first. A notice says when it's done, with Open Link or Show in
+    Folder when the plugin hands back a page or a file. Longer work
+    shows in the Tasks window, where Stop cancels it.
 
 While one of the plugin's tracks plays, the panel's top level shows it
 and what's next. Click the plugin's name or logo at the top of the panel

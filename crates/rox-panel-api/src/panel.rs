@@ -10,12 +10,12 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Element,
-    Entity, FocusHandle, Focusable as _, GlobalElementId, HighlightStyle, InspectorElementId,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, SharedString, Size,
-    Stateful, StyledText, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowHandle, WindowOptions, anchored, deferred, div, fill, linear_color_stop, linear_gradient,
-    point, prelude::*, px, relative, size,
+    AbsoluteLength, AnyElement, AnyWindowHandle, App, Bounds, ClipboardItem, Context, DismissEvent,
+    Div, Element, Entity, FocusHandle, Focusable as _, GlobalElementId, HighlightStyle,
+    InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba,
+    SharedString, Size, Stateful, StyledText, Subscription, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions, anchored, deferred, div, fill, linear_color_stop,
+    linear_gradient, point, prelude::*, px, relative, size,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Root};
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actions::{SeekBackward, SeekForward, TogglePlayback};
 use crate::query::shared_query::SharedQuery;
+use crate::toast::{self, Toast};
 use rox_core::settings;
 use rox_design::assets::icons;
 use rox_design::palette::PanelTheme;
@@ -504,37 +505,54 @@ pub fn link_items(menu: PopupMenu, source: &str, item: String) -> PopupMenu {
     menu.item(
         PopupMenuItem::new(rox_i18n::t!("panel-open-in-browser"))
             .icon(Icon::default().path(icons::EXTERNAL_LINK))
-            .on_click(move |_, _, cx| {
-                follow_link(open_source.clone(), open_item.clone(), true, cx);
+            .on_click(move |_, window, cx| {
+                let origin = window.window_handle();
+                follow_link(open_source.clone(), open_item.clone(), true, origin, cx);
             }),
     )
     .item(
         PopupMenuItem::new(rox_i18n::t!("panel-copy-link"))
             .icon(Icon::default().path(icons::LINK))
-            .on_click(move |_, _, cx| {
-                follow_link(copy_source.clone(), copy_item.clone(), false, cx);
+            .on_click(move |_, window, cx| {
+                let origin = window.window_handle();
+                follow_link(copy_source.clone(), copy_item.clone(), false, origin, cx);
             }),
     )
 }
 
 /// The URL comes from a plugin, so it only ever reaches the user's browser
 /// or clipboard, and only an http or https one gets that far (the wire
-/// checks it).
-fn follow_link(source: String, item: String, open: bool, cx: &mut App) {
+/// checks it). The answer lands after the menu has closed, so it reports
+/// in a toast on the window the menu was in.
+fn follow_link(source: String, item: String, open: bool, origin: AnyWindowHandle, cx: &mut App) {
     let task = rox_services::plugins::link(&source, item.clone(), cx);
 
-    cx.spawn(async move |cx| match task.await {
-        Ok(Some(url)) => {
-            cx.update(|cx| match open {
-                true => cx.open_url(&url),
-                false => cx.write_to_clipboard(ClipboardItem::new_string(url)),
-            })
-            .ok();
-        }
+    cx.spawn(async move |cx| {
+        let answer = task.await;
 
-        // There's nowhere app-wide to say it, so the log carries it.
-        Ok(None) => log::info!("{source}: {item} has no link"),
-        Err(e) => log::warn!("{source}: link for {item}: {e}"),
+        cx.update(|cx| match answer {
+            Ok(Some(url)) if open => cx.open_url(&url),
+
+            Ok(Some(url)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(url));
+                toast::copied().post(origin, cx);
+            }
+
+            Ok(None) => {
+                log::info!("{source}: {item} has no link");
+                Toast::new(Tone::Info, rox_i18n::t!("panel-link-missing")).post(origin, cx);
+            }
+
+            // The click was the user's, so the plugin's own message is
+            // theirs to read, the rule browse and sync errors follow.
+            Err(e) => {
+                log::warn!("{source}: link for {item}: {e}");
+                Toast::new(Tone::Bad, e)
+                    .title(rox_i18n::t!("panel-link-failed"))
+                    .post(origin, cx);
+            }
+        })
+        .ok();
     })
     .detach();
 }
@@ -618,14 +636,14 @@ pub fn copy_submenu(
             submenu = submenu.item(
                 PopupMenuItem::new(label)
                     .icon(Icon::default().path(icon))
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         let lines: Vec<String> = resolve(cx)
                             .iter()
                             .map(pick)
                             .filter(|line| !line.is_empty())
                             .collect();
                         if !lines.is_empty() {
-                            cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+                            toast::copy(lines.join("\n"), window, cx);
                         }
                     }),
             );
@@ -918,6 +936,8 @@ pub fn track_actions_with(
         Some((source, item)) => link_items(menu, &source, item),
         None => menu,
     };
+    let menu = crate::plugin_actions::items(menu, &state, &ids, cx);
+    let menu = crate::plugin_library::items(menu, &state, &ids, cx);
 
     let menu = copy_ids_submenu(menu, state.clone(), ids, window, cx);
     reveal_item(menu, state, reveal)

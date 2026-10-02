@@ -226,7 +226,8 @@ jobs:
       # entry, icons, metainfo and the xkbcommon libraries the AppImage
       # excludelist leaves out. Everything else comes from the host, and
       # the bookworm build is what makes the glibc floor hold. The script
-      # pins appimagetool and the static runtime by hash.
+      # pins appimagetool and the static runtime by hash, embeds the update
+      # information and writes the .zsync that AppImageUpdate diffs against.
       - name: Package (Linux AppImage)
         if: runner.os == 'Linux'
         run: scripts/appimage/build.sh "$VERSION" .
@@ -321,6 +322,7 @@ jobs:
             rox-v*.dmg
             rox-v*-setup.exe
             rox-v*.AppImage
+            rox-v*.AppImage.zsync
             rox_*.deb
           if-no-files-found: error
 

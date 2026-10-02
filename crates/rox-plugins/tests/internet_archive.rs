@@ -63,8 +63,39 @@ fn the_folder_loads_with_its_icon_radio_and_links() {
     assert!(source.radio && source.links);
     assert_eq!(source.icon, "icon.svg");
 
+    let download = &source.actions[0];
+    assert_eq!(download.id, "download");
+    assert!(download.offered_on("track") && download.offered_on("node"));
+
     let again = hash::folder_hash(&archive.dir).unwrap();
     assert_eq!(archive.hash, again, "the hash is stable");
+}
+
+#[test]
+fn download_refuses_what_it_cant_download_without_the_network() {
+    let Some(host) = host("download") else {
+        return;
+    };
+
+    let err = host
+        .call(
+            "source.action",
+            json!({"action": "download", "items": ["label:some-netlabel"], "params": {}}),
+            host.timeouts().listing,
+        )
+        .unwrap_err();
+    assert!(err.contains("only a song or a release"), "{err}");
+
+    let err = host
+        .call(
+            "source.job",
+            json!({"job": "d999"}),
+            host.timeouts().listing,
+        )
+        .unwrap_err();
+    assert!(err.contains("no job"), "{err}");
+
+    host.stop("test over");
 }
 
 #[test]

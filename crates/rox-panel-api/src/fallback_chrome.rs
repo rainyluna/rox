@@ -147,13 +147,19 @@ impl Render for Framed {
             .map(|player| player.entity_id())
             .or_else(palette::focused_player);
 
-        framed(
+        let body = framed(
             asked,
             self.inner.clone().into_any_element(),
             window,
             player,
             |_, window, _| window.remove_window(),
-        )
+        );
+
+        div()
+            .relative()
+            .size_full()
+            .child(body)
+            .children(crate::toast::layer(window, cx))
     }
 }
 

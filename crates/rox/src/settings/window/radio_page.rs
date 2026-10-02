@@ -314,18 +314,19 @@ impl SettingsWindow {
             None,
             |rows| {
                 let buffer = self.playback.read(cx).live_buffer_secs();
+                let enabled = rox_playback::icy::capturing();
 
                 rows.keyed(
                     "settings-playback-capture-enable",
                     &[
                         "capture", "record", "save", "rip", "radio", "station", "stream",
                     ],
-                    panel::toggle(self.capture_enabled, Self::set_capture_enabled, cx),
+                    panel::toggle(enabled, Self::set_capture_enabled, cx),
                 )
                 // Capture can't save a song longer than the buffer. Warn, not
                 // Bad: nothing failed.
                 .when(
-                    self.capture_enabled && buffer < settings::DEFAULT_LIVE_BUFFER_SECS,
+                    enabled && buffer < settings::DEFAULT_LIVE_BUFFER_SECS,
                     |rows| {
                         rows.custom(&["capture", "buffer", "short", "length"], || {
                             panel::banner(
@@ -343,7 +344,7 @@ impl SettingsWindow {
                         })
                     },
                 )
-                .when(self.capture_enabled, |rows| {
+                .when(enabled, |rows| {
                     let folder = self.capture_folder.clone();
 
                     // The renamer's vocabulary; the tip adds the three names a
@@ -455,7 +456,6 @@ impl SettingsWindow {
     /// The transport's tee reads the file, so write it and tell the service to
     /// look again.
     fn set_capture_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.capture_enabled = on;
         Settings::update(move |s| s.capture.enabled = on);
         rox_services::capture::apply();
         cx.notify();

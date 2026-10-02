@@ -15,6 +15,9 @@ in any plugin:
 - The plugin exits when stdin closes. That's the one signal that reaches it
   on every OS when rox goes away without saying goodbye.
 
+It also offers one action, Export WAV, which writes tones to files as a job
+rox polls for progress and can stop.
+
 Only the standard library is used, so there's nothing to install.
 """
 
@@ -24,6 +27,7 @@ import functools
 import hashlib
 import json
 import math
+import os
 import struct
 import sys
 import threading
@@ -107,7 +111,7 @@ class Failure(Exception):
         self.code = code
 
 
-state = {"volume": 30}
+state = {"volume": 30, "data_dir": None}
 out_lock = threading.Lock()
 streams = {}
 streams_lock = threading.Lock()
@@ -185,6 +189,7 @@ def token_of(tracks):
 
 def hello(params):
     config = params.get("config") or {}
+    state["data_dir"] = params.get("data_dir")
     volume = config.get("volume")
     if isinstance(volume, int) and 1 <= volume <= 100:
         state["volume"] = volume
@@ -273,6 +278,96 @@ def cover(params):
     return None
 
 
+# Jobs by id. A job runs on its own thread; rox asks how far it got with
+# source.job about once a second, and source.cancel asks it to stop.
+jobs = {}
+jobs_lock = threading.Lock()
+job_ids = iter(range(1, 1 << 62))
+
+
+def export_dir():
+    # Never the plugin's own folder: a write there changes its hash and
+    # switches it off. hello hands over a folder that's ours to write.
+    if not state["data_dir"]:
+        raise Failure(-32000, "rox didn't say where this plugin may write")
+
+    folder = os.path.join(state["data_dir"], "exports")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.abspath(folder)
+
+
+def action(params):
+    if params.get("action") != "export":
+        raise Failure(-32602, f"no action {params.get('action')!r}")
+
+    # Items are tracks' keys or collections' ids, so a collection exports
+    # every tone in it.
+    keys = []
+    for item in params.get("items") or []:
+        if item in CATALOG:
+            keys.extend(t["key"] for t, _, _ in CATALOG[item]["tracks"])
+        elif item in BY_KEY:
+            keys.append(item)
+    if not keys:
+        raise Failure(-32602, "nothing to export")
+
+    seconds = (params.get("params") or {}).get("seconds", TONE_SECS)
+    if not isinstance(seconds, int) or not 1 <= seconds <= 60:
+        raise Failure(-32602, "the length has to be 1 to 60 seconds")
+
+    folder = export_dir()
+    job = {"done": 0, "total": len(keys), "text": "", "stop": False, "end": None}
+    with jobs_lock:
+        job_id = f"j{next(job_ids)}"
+        jobs[job_id] = job
+
+    threading.Thread(target=export, args=(job, keys, seconds, folder), daemon=True).start()
+    return {"job": job_id}
+
+
+def export(job, keys, seconds, folder):
+    for key in keys:
+        if job["stop"]:
+            job["end"] = {"error": "stopped"}
+            return
+
+        t, freqs, _ = BY_KEY[key]
+        job["text"] = t["title"]
+        data = wav(tuple(freqs), seconds, state["volume"])
+
+        name = key.replace(":", " ") + ".wav"
+        with open(os.path.join(folder, name), "wb") as f:
+            f.write(data)
+
+        job["done"] += 1
+
+    noun = "tone" if len(keys) == 1 else "tones"
+    job["end"] = {"finished": True, "message": f"Exported {len(keys)} {noun}", "reveal": folder}
+
+
+def job_state(params):
+    with jobs_lock:
+        job = jobs.get(params["job"])
+    if job is None:
+        raise Failure(-32000, f"no job {params['job']!r}")
+
+    answer = {"done": job["done"], "total": job["total"], "text": job["text"]}
+    if job["end"]:
+        answer.update(job["end"])
+        with jobs_lock:
+            jobs.pop(params["job"], None)
+
+    return answer
+
+
+def cancel(params):
+    with jobs_lock:
+        job = jobs.get(params["job"])
+    if job is not None:
+        job["stop"] = True
+    return None
+
+
 METHODS = {
     "hello": hello,
     "source.browse": browse,
@@ -282,6 +377,9 @@ METHODS = {
     "source.read": read,
     "source.close": close,
     "source.cover": cover,
+    "source.action": action,
+    "source.job": job_state,
+    "source.cancel": cancel,
 }
 
 

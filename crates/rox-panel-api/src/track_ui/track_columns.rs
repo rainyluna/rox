@@ -256,6 +256,50 @@ pub fn numeric_cell(width: f32, color: gpui::Rgba, value: String) -> Div {
         .child(SharedString::from(value))
 }
 
+/// How the source column names a source.
+#[derive(Clone)]
+pub struct SourceMark {
+    pub label: SharedString,
+    /// A plugin's own icon, where it ships one.
+    pub icon: Option<SharedString>,
+}
+
+impl SourceMark {
+    /// Takes the plugin registry's lock, so callers resolve once per source
+    /// and keep the mark rather than calling this per cell.
+    pub fn resolve(source: &str) -> Self {
+        Self {
+            label: SharedString::from(rox_library::cue::source_label(source)),
+            icon: rox_services::plugins::icon(source),
+        }
+    }
+}
+
+/// The label first and the icon after it, so the labels line up and a
+/// long one truncates before the icon goes. The caller sets the width.
+pub fn source_cell(mark: Option<&SourceMark>) -> Div {
+    let cell = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .overflow_hidden()
+        .text_color(palette::text_muted());
+
+    let Some(mark) = mark else {
+        return cell;
+    };
+
+    cell.child(div().min_w_0().truncate().child(mark.label.clone()))
+        .children(mark.icon.clone().map(|icon| {
+            svg()
+                .path(icon)
+                .size(px(12.))
+                .flex_none()
+                .text_color(palette::text_muted())
+        }))
+}
+
 pub fn fmt_plays(plays: u32) -> String {
     match plays {
         0 => String::new(),

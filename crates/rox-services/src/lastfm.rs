@@ -29,7 +29,8 @@ use crate::radio::{Radio, TitleChanged, live_tags};
 
 pub use rox_net::lastfm::{ApiError, AuthPhase, call, has_builtin_keys, keys};
 
-/// Last.fm rejects scrobbles this short; history uses the same floor.
+/// Last.fm rejects scrobbles this short. A file's listen has no floor, since
+/// a short track is still a play, but a stream's turnover keeps it for idents.
 const MIN_TRACK_SECS: f64 = 30.0;
 
 /// A track counts once half of it has sounded. Not the user's threshold.
@@ -808,7 +809,7 @@ impl Scrobbler {
             let delta = now.position_secs - watch.last_pos;
             if counts_as_listening(playing, delta) {
                 watch.played += delta;
-            } else if delta < -5.0 && watch.listened && now.position_secs < 5.0 {
+            } else if watch.listened && back_to_the_top(delta, now.position_secs, watch.duration) {
                 // Back to the top after a counted listen is a fresh play.
                 self.begin_watch(
                     now.key.clone(),
@@ -888,7 +889,7 @@ impl Scrobbler {
     fn qualifies_listen(watch: &Watch) -> bool {
         watch
             .duration
-            .filter(|d| *d > MIN_TRACK_SECS)
+            .filter(|d| *d > 0.0)
             .is_some_and(|d| watch.played >= (d * LISTEN_FRACTION).min(LISTEN_CAP_SECS))
     }
 
@@ -1069,6 +1070,16 @@ fn counts_as_listening(playing: bool, delta: f64) -> bool {
     playing && delta > 0.0 && delta <= 1.0
 }
 
+/// A jump back into the opening five seconds. The window shrinks to half a
+/// short track, or a repeat-one loop under five seconds would never refile.
+fn back_to_the_top(delta: f64, position: f64, duration: Option<f64>) -> bool {
+    let top = duration
+        .filter(|d| *d > 0.0)
+        .map_or(5.0, |d| (d * 0.5).min(5.0));
+
+    delta < -top && position < top
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,6 +1134,31 @@ mod tests {
         }
         assert_eq!(filed.len(), FILED_SONGS);
         assert!(!already_filed(&filed, &station, &song("Roygbiv")));
+    }
+
+    #[test]
+    fn a_short_track_counts_as_a_listen_at_half() {
+        assert!(Scrobbler::qualifies_listen(&watch(20.0, 10.0, 10.0)));
+        assert!(!Scrobbler::qualifies_listen(&watch(20.0, 9.0, 9.0)));
+        assert!(
+            !Scrobbler::qualifies_listen(&watch(0.0, 5.0, 5.0)),
+            "a zero length is unknown, not instant"
+        );
+    }
+
+    #[test]
+    fn a_loop_of_a_short_track_is_back_at_the_top() {
+        assert!(
+            back_to_the_top(-2.9, 0.05, Some(3.0)),
+            "a 3s repeat-one loop"
+        );
+        assert!(!back_to_the_top(-1.0, 1.0, Some(3.0)), "a nudge back");
+        assert!(back_to_the_top(-180.0, 0.2, Some(200.0)));
+        assert!(
+            !back_to_the_top(-4.0, 0.2, Some(200.0)),
+            "a long track keeps the five second window"
+        );
+        assert!(back_to_the_top(-30.0, 1.0, None));
     }
 
     #[test]

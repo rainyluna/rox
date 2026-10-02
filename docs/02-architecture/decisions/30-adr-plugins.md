@@ -470,3 +470,50 @@ has no neighbours to draw, so its refill widens into the weighted draw, the same
 thin pool does. The random
 button's Similar draw starts Play Similar from a playing plugin track. Continuing a
 queue started from a plugin's panel with its radio doesn't change.
+
+**Amended 2026-10-01: actions.** Andrew's product call, after wanting a downloader plugin
+to save the video behind a track. A source may declare `actions`: things the plugin does
+with one of its tracks, one of its nodes, or no item at all, each with an id, a label and
+where it's offered. rox lists a track or node action in every menu that lists the
+plugin's tracks and nodes, the same places Open in Browser shows, and on a selection of
+several as well as on one. An action on no item goes in the External Sources panel's own
+menu. The menu item is
+rox's, with the plugin's label, which isn't translated, like everything else a plugin
+sends.
+
+An action may declare `params`, a JSON Schema in the subset the Plugins page draws for a
+plugin's config. rox shows those rows in a dialog when the action is picked and calls the
+plugin once the user confirms. A download that asks for a quality, or an action on no
+item that asks for a URL, is a form the plugin describes and rox draws.
+
+Picking an action calls `source.action` with its id, the items (tracks' keys or nodes' ids,
+empty for an action on no item) and the params. A selection is one call and, when the
+plugin answers with a job, one job, so the plugin decides how to batch it. The answer is either a message, which rox shows in a toast, or a
+job id for work that outlasts a call. rox polls a job with `source.job` about once a
+second for its progress and a line of status, and lists it in the Tasks window with a
+Stop that sends `source.cancel`. Both calls take the listing timeout. A job itself has no
+wall-clock limit, since a download takes as long as it takes. It ends when the plugin
+reports it finished or failed, or when the plugin stops, and rox reports the outcome in a
+toast. A failed job's toast stays until it's dismissed.
+
+Polling keeps every call one that rox makes. Progress the plugin pushed would be the
+first frame a plugin sends unasked, and the paragraph on verbs above puts any callback
+behind a typed allowlist. Progress doesn't justify one: a poll a second is a small
+request next to the 256 KiB reads the same pipe already serves.
+
+What a result can do stays rox's to decide. A message is text. A result may also name an
+http or https link, which opens in the browser on a click, and a local path, which rox
+shows in the file manager on a click and never opens or runs. They become the toast's
+buttons, so a finished download offers Show in Folder.
+
+Actions are the first capability that has a plugin do something instead of list
+something, and they stay inside the line this record draws. The work runs in the
+plugin's process, which already has the user's permissions and its own network, so an
+action gives the plugin no reach it didn't have. The user gets a button for it. rox draws
+the menu item, the form, the progress and the result, and nothing the plugin supplies
+runs in the UI.
+
+The declaration goes under `capabilities.source`, which ignores keys it doesn't know, so
+`api` stays 1, and rox sends `source.action` only to a plugin that declares actions. The
+enable card lists them by label. Adding or changing an action changes the manifest, so it
+goes back to the card, and Developer mode doesn't approve it on its own.

@@ -1314,6 +1314,11 @@ actions!(
         AbortScan,
         ToggleSeams,
         ToggleReadings,
+        ToggleScrobbling,
+        ToggleDiscord,
+        ToggleBroadcast,
+        ToggleCapture,
+        ToggleMilkdropLock,
         ToggleMini,
         SaveLayout,
         SaveWorkspace,
@@ -1832,6 +1837,48 @@ pub fn init(cx: &mut App) {
         let on = !settings::show_readings();
         settings::set_show_readings(on, cx);
         Settings::update(move |s| s.show_readings = on);
+    });
+
+    // Settings page switches with no menu row. Each runs what its row runs,
+    // then repaints every window, since the strip and the open settings page
+    // both draw the flag.
+    cx.on_action(|_: &ToggleScrobbling, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.scrobbler.update(cx, |scrobbler, cx| {
+                let on = !scrobbler.scrobbling();
+                scrobbler.set_scrobbling(on, cx);
+            });
+            refresh_all_windows(cx);
+        });
+    });
+
+    cx.on_action(|_: &ToggleDiscord, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            let on = !ws.state.discord.read(cx).enabled();
+            Settings::update(move |s| s.accounts.discord.enabled = on);
+            ws.state
+                .discord
+                .update(cx, |discord, cx| discord.reload_config(cx));
+            refresh_all_windows(cx);
+        });
+    });
+
+    cx.on_action(|_: &ToggleBroadcast, cx| {
+        let on = !rox_playback::broadcast::enabled();
+        Settings::update(move |s| s.broadcast.enabled = on);
+        crate::integrations::broadcast::apply();
+        refresh_all_windows(cx);
+    });
+
+    cx.on_action(|_: &ToggleCapture, cx| {
+        let on = !rox_playback::icy::capturing();
+        Settings::update(move |s| s.capture.enabled = on);
+        rox_services::capture::apply();
+        refresh_all_windows(cx);
+    });
+
+    cx.on_action(|_: &ToggleMilkdropLock, cx| {
+        crate::backdrop_visual::set_locked(!settings::backdrop_visual().locked, cx);
     });
 
     // Swap between the mini layout and the primary. The panels holding this
@@ -6897,6 +6944,8 @@ impl Render for Workspace {
                 // hitbox: an occluded workspace-root drop target would miss the
                 // drop entirely (panels block the hit test).
                 .children(self.drop_zones_overlay(window, cx).map(overlay_phase))
+                // The layer paints in the overlay phase on its own.
+                .children(rox_panel_api::toast::layer(window, cx))
                 .into_any_element();
             // A workspace window that asked the compositor for its frame and
             // didn't get one draws its own, the way the child windows do.

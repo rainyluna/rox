@@ -34,6 +34,7 @@ use rox_design::{palette, tokens};
 use rox_panel_api::panel;
 use rox_panel_kit::ui as settings_ui;
 use rox_services::catalog::{Library, LibraryEvent, ScanStatus};
+use rox_services::plugin_actions;
 
 /// Twice a second: this redraws every window, and a pass runs for hours.
 const TICK: Duration = Duration::from_millis(500);
@@ -63,6 +64,7 @@ pub fn repaint_while_running(cx: &mut App) {
                     || plays_import::progress(cx).is_some()
                     || convert::progress(cx).is_some()
                     || bake::progress(cx).is_some()
+                    || !plugin_actions::jobs().is_empty()
             });
             if !matches!(live, Ok(true)) {
                 cx.update(|cx| cx.set_global(Ticking(false))).ok();
@@ -142,6 +144,18 @@ pub fn control<P: 'static>(cx: &mut Context<P>) -> Stateful<Div> {
         live.push((
             Job::Bake.icon(),
             rox_i18n::t!("tasks-embedding", progress = share(job.done(), job.total())).to_string(),
+        ));
+    }
+    for job in plugin_actions::jobs() {
+        let progress = share(job.done() as usize, job.total() as usize);
+        live.push((
+            Job::Plugin(job.serial).icon(),
+            rox_i18n::t!(
+                "tasks-plugin-job",
+                action = job.label.clone(),
+                progress = progress
+            )
+            .to_string(),
         ));
     }
     let running = match live.len() {
@@ -267,6 +281,8 @@ enum Job {
     PlaysImport,
     Convert,
     Bake,
+    /// A plugin action's job, by its serial.
+    Plugin(u64),
 }
 
 /// Cheapest first, and the passes read what the scan writes. Romanization
@@ -293,6 +309,9 @@ impl Job {
             Job::PlaysImport => rox_i18n::t!("tasks-job-plays-import"),
             Job::Convert => rox_i18n::t!("tasks-job-convert"),
             Job::Bake => "Embed Stored Metadata".into(),
+            Job::Plugin(serial) => plugin_actions::job(serial)
+                .map(|job| format!("{}: {}", job.plugin, job.label).into())
+                .unwrap_or_default(),
         }
     }
 
@@ -308,6 +327,7 @@ impl Job {
             Job::PlaysImport => icons::PLAY,
             Job::Convert => icons::AUDIO_LINES,
             Job::Bake => icons::UPLOAD,
+            Job::Plugin(_) => icons::PLUG,
         }
     }
 
@@ -323,6 +343,7 @@ impl Job {
             Job::LovedImport | Job::PlaysImport => None,
             Job::Convert => None,
             Job::Bake => None,
+            Job::Plugin(_) => None,
         }
     }
 
@@ -342,6 +363,12 @@ impl Job {
             Job::PlaysImport => plays_import::stop(cx),
             Job::Convert => convert::stop(cx),
             Job::Bake => bake::stop(cx),
+
+            Job::Plugin(serial) => {
+                if let Some(job) = plugin_actions::job(serial) {
+                    job.stop();
+                }
+            }
         }
     }
 }
@@ -354,6 +381,9 @@ struct Snapshot {
     current_is_path: bool,
     eta: Option<f64>,
     stopping: bool,
+    /// Counts in the job's own units, like a plugin's bytes, so it reads as a
+    /// share rather than "N of M".
+    opaque: bool,
 }
 
 impl Snapshot {
@@ -366,6 +396,7 @@ impl Snapshot {
             current_is_path: true,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -379,6 +410,7 @@ impl Snapshot {
             current_is_path: false,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -391,6 +423,7 @@ impl Snapshot {
             current_is_path: false,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -404,6 +437,21 @@ impl Snapshot {
             current_is_path: true,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
+        }
+    }
+
+    /// A plugin counts in its own units, often bytes, so it has no failed tally.
+    fn plugin(job: &plugin_actions::Job) -> Snapshot {
+        Snapshot {
+            done: job.done() as usize,
+            total: job.total() as usize,
+            failed: 0,
+            current: job.text(),
+            current_is_path: false,
+            eta: None,
+            stopping: job.stopping(),
+            opaque: true,
         }
     }
 
@@ -416,6 +464,7 @@ impl Snapshot {
             current_is_path: true,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -428,6 +477,7 @@ impl Snapshot {
             current_is_path: true,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -440,6 +490,7 @@ impl Snapshot {
             current_is_path: false,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -452,6 +503,7 @@ impl Snapshot {
             current_is_path: false,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -464,6 +516,7 @@ impl Snapshot {
             current_is_path: true,
             eta: job.eta_secs(),
             stopping: job.stopping(),
+            opaque: false,
         }
     }
 
@@ -477,6 +530,7 @@ impl Snapshot {
             current_is_path: true,
             eta: scan.eta,
             stopping: scan.stopping,
+            opaque: false,
         }
     }
 }
@@ -509,6 +563,11 @@ pub(crate) fn aggregate(cx: &mut App) -> Option<(usize, usize)> {
     running.extend(import::progress(cx).as_deref().map(Snapshot::import));
     running.extend(convert::progress(cx).as_deref().map(Snapshot::convert));
     running.extend(bake::progress(cx).as_deref().map(Snapshot::bake));
+    running.extend(
+        plugin_actions::jobs()
+            .iter()
+            .map(|job| Snapshot::plugin(job)),
+    );
     if running.is_empty() {
         return None;
     }
@@ -847,6 +906,7 @@ impl TasksWindow {
                 .map(Snapshot::plays_import),
             Job::Convert => convert::progress(cx).as_deref().map(Snapshot::convert),
             Job::Bake => bake::progress(cx).as_deref().map(Snapshot::bake),
+            Job::Plugin(serial) => plugin_actions::job(serial).map(|job| Snapshot::plugin(&job)),
         }
     }
 
@@ -862,6 +922,11 @@ impl TasksWindow {
             .chain(plays_import.then_some(Job::PlaysImport))
             .chain(convert.then_some(Job::Convert))
             .chain(bake.then_some(Job::Bake))
+            .chain(
+                plugin_actions::jobs()
+                    .iter()
+                    .map(|job| Job::Plugin(job.serial)),
+            )
             .collect()
     }
 
@@ -1124,6 +1189,9 @@ impl TasksWindow {
                     lines.push(reason);
                 }
             }
+
+            // Its row goes when it ends; the toast reports how it went.
+            Job::Plugin(_) => {}
         }
         lines
     }
@@ -1174,7 +1242,7 @@ impl TasksWindow {
             // A missing Japanese dictionary only costs the kanji values, so it never
             // blocks the button.
             Job::Romanize => (self.facts.romanize_missing == 0).then_some(Blocked(None)),
-            Job::LovedImport | Job::PlaysImport | Job::Convert | Job::Bake => None,
+            Job::LovedImport | Job::PlaysImport | Job::Convert | Job::Bake | Job::Plugin(_) => None,
         }
     }
 
@@ -1212,15 +1280,16 @@ impl TasksWindow {
         } else {
             counted as f32 / snapshot.total as f32
         };
-        let mut line = if snapshot.total == 0 {
-            rox_i18n::t!("tasks-working-out-missing").to_string()
-        } else {
-            rox_i18n::t!(
+        let mut line = match (snapshot.opaque, snapshot.total) {
+            (true, 0) => String::new(),
+            (true, _) => share(counted, snapshot.total),
+            (false, 0) => rox_i18n::t!("tasks-working-out-missing").to_string(),
+            (false, _) => rox_i18n::t!(
                 "tasks-count-of-total",
                 done = counted as u64,
                 total = snapshot.total as u64
             )
-            .to_string()
+            .to_string(),
         };
         if let Some(eta) = snapshot.eta {
             line.push_str(&rox_i18n::t!(
@@ -1234,7 +1303,8 @@ impl TasksWindow {
                 rox_i18n::t!("tasks-failed-suffix", count = snapshot.failed as u64)
             ));
         }
-        let mut lines = vec![bar(fraction), muted(line)];
+        let mut lines = vec![bar(fraction)];
+        lines.extend((!line.is_empty()).then(|| muted(line)));
         let current = if snapshot.current_is_path {
             std::path::Path::new(&snapshot.current)
                 .file_name()
@@ -1335,7 +1405,7 @@ impl TasksWindow {
                 cx,
             ),
             Job::Romanize => pass_prompt::raise(self, pass_prompt::Pass::Romanize, library, cx),
-            Job::LovedImport | Job::PlaysImport | Job::Convert | Job::Bake => {}
+            Job::LovedImport | Job::PlaysImport | Job::Convert | Job::Bake | Job::Plugin(_) => {}
         }
     }
 

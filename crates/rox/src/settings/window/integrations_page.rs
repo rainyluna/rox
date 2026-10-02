@@ -53,7 +53,6 @@ fn connect_phase_line(phase: &AuthPhase, service: &SharedString) -> SharedString
 
 impl SettingsWindow {
     fn set_discord_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.discord_enabled = on;
         Settings::update(move |s| s.accounts.discord.enabled = on);
         self.discord.update(cx, |d, cx| d.reload_config(cx));
         cx.notify();
@@ -139,6 +138,7 @@ impl SettingsWindow {
             let s = self.scrobbler.read(cx);
             (s.scrobbling(), s.threshold())
         };
+        let discord_enabled = self.discord.read(cx).enabled();
         PageBody::new()
             .section(Section::new(
                 q,
@@ -190,9 +190,9 @@ impl SettingsWindow {
                     rows.keyed(
                         "settings-integrations-discord-enable",
                         &["status", "now playing"],
-                        panel::toggle(self.discord_enabled, Self::set_discord_enabled, cx),
+                        panel::toggle(discord_enabled, Self::set_discord_enabled, cx),
                     )
-                    .when(self.discord_enabled, |rows| {
+                    .when(discord_enabled, |rows| {
                         let first = self.discord_first_line.clone();
                         let second = self.discord_second_line.clone();
                         let hover = self.discord_hover_line.clone();
@@ -790,6 +790,7 @@ impl SettingsWindow {
     /// refused web server. Everything under the switch only appears once it's
     /// on.
     fn icecast_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let enabled = rox_playback::broadcast::enabled();
         Section::new(
             q,
             icons::RADIO,
@@ -799,9 +800,9 @@ impl SettingsWindow {
                 rows.keyed(
                     "settings-audio-broadcast-enable",
                     &["icecast", "stream", "radio", "cast", "mount", "broadcast"],
-                    panel::toggle(self.broadcast_enabled, Self::set_broadcast_enabled, cx),
+                    panel::toggle(enabled, Self::set_broadcast_enabled, cx),
                 )
-                .when(self.broadcast_enabled, |rows| {
+                .when(enabled, |rows| {
                     rows.keyed(
                         "settings-audio-broadcast-server",
                         &["icecast", "server", "host", "port"],
@@ -852,13 +853,12 @@ impl SettingsWindow {
 
         self.broadcast_dirty = false;
 
-        if self.broadcast_enabled {
+        if rox_playback::broadcast::enabled() {
             crate::integrations::broadcast::apply();
         }
     }
 
     fn set_broadcast_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.broadcast_enabled = on;
         Settings::update(move |s| s.broadcast.enabled = on);
         crate::integrations::broadcast::apply();
         cx.notify();
@@ -887,7 +887,7 @@ impl SettingsWindow {
                 |this: &mut Self, kbps, cx| {
                     this.broadcast_bitrate = kbps;
                     Settings::update(move |s| s.broadcast.bitrate = kbps);
-                    if this.broadcast_enabled {
+                    if rox_playback::broadcast::enabled() {
                         crate::integrations::broadcast::apply();
                     }
                     cx.notify();

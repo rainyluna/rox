@@ -13,6 +13,7 @@ rox-dock = { path = "../rox-dock" }
 rox-core = { path = "../rox-core" }
 rox-library = { path = "../rox-library" }
 rox-panel-kit = { path = "../rox-panel-kit" }
+rox-playback = { path = "../rox-playback" }
 rox-services = { path = "../rox-services" }
 rox-viz = { path = "../rox-viz" }
 serde = { version = "1", features = ["derive"] }

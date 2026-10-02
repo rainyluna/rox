@@ -66,6 +66,9 @@ What a plugin can do is a short list, and it grows only by a product decision:
 - Offer a radio. Started from one of its tracks, albums or artists, the service picks
   what plays next, and rox keeps playing it through its own engine as the queue runs
   down.
+- Offer actions, like downloading a track. rox lists them in the menus for the plugin's
+  tracks and albums, asks for any choices the action needs, and shows its progress and
+  outcome. The work runs in the plugin.
 
 A plugin can use programs the user has installed, such as a command-line downloader. It
 lists the ones it needs, and rox says which are missing.

@@ -686,6 +686,121 @@ impl Cover {
     }
 }
 
+/// What an action left for the user when it ended. rox shows `message` in
+/// a toast, and the link and the path become its buttons and nothing more:
+/// the link opens in the browser and the path shows in the file manager,
+/// each only on a click. rox never fetches the link or opens the file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Outcome {
+    pub message: String,
+    pub link: Option<String>,
+    pub reveal: Option<String>,
+}
+
+impl Outcome {
+    fn check(&self) -> Result<(), String> {
+        string("message", &self.message)?;
+
+        if let Some(link) = &self.link {
+            string("link", link)?;
+            web_url("an outcome's link", link)?;
+        }
+
+        if let Some(path) = &self.reveal {
+            string("reveal", path)?;
+
+            let clean = !path.chars().any(|c| c.is_control());
+            if !clean || !std::path::Path::new(path).is_absolute() {
+                return Err("reveal isn't an absolute path".into());
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// `source.action`'s answer: finished at once, or a job rox polls.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ActionAnswer {
+    #[serde(default)]
+    pub job: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub reveal: Option<String>,
+}
+
+impl ActionAnswer {
+    pub fn outcome(&self) -> Outcome {
+        Outcome {
+            message: self.message.clone(),
+            link: self.link.clone(),
+            reveal: self.reveal.clone(),
+        }
+    }
+}
+
+impl Checked for ActionAnswer {
+    fn check(&self) -> Result<(), String> {
+        if let Some(job) = &self.job {
+            string("job", job)?;
+            if job.is_empty() {
+                return Err("job is empty".into());
+            }
+        }
+
+        self.outcome().check()
+    }
+}
+
+/// `source.job`'s answer, polled about once a second. An `error` ends the
+/// job as failed; `finished` ends it with the outcome fields.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct JobState {
+    #[serde(default)]
+    pub done: u64,
+    /// Zero when the plugin can't tell how much there is.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub reveal: Option<String>,
+}
+
+impl JobState {
+    pub fn outcome(&self) -> Outcome {
+        Outcome {
+            message: self.message.clone(),
+            link: self.link.clone(),
+            reveal: self.reveal.clone(),
+        }
+    }
+}
+
+impl Checked for JobState {
+    fn check(&self) -> Result<(), String> {
+        string("text", &self.text)?;
+        if let Some(error) = &self.error {
+            string("error", error)?;
+        }
+
+        self.outcome().check()
+    }
+}
+
 /// `null` answers: close, shutdown.
 pub fn is_null(value: &Value) -> Result<(), String> {
     match value.is_null() {
@@ -1056,5 +1171,45 @@ mod tests {
         ] {
             assert!(decode::<Link>(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_action_answers_a_job_or_an_outcome() {
+        let job: ActionAnswer = decode(json!({"job": "j1"})).unwrap();
+        assert_eq!(job.job.as_deref(), Some("j1"));
+
+        let done: ActionAnswer =
+            decode(json!({"message": "Saved", "reveal": "/home/me/Videos/a.mp4"})).unwrap();
+        assert_eq!(
+            done.outcome().reveal.as_deref(),
+            Some("/home/me/Videos/a.mp4")
+        );
+
+        assert!(decode::<ActionAnswer>(json!({"job": ""})).is_err());
+        assert!(decode::<ActionAnswer>(json!({"then": "x"})).is_err());
+    }
+
+    #[test]
+    fn an_outcome_names_only_a_web_link_and_an_absolute_path() {
+        let refused = [
+            json!({"link": "file:///etc/passwd"}),
+            json!({"link": "javascript:alert(1)"}),
+            json!({"reveal": "relative/path"}),
+            json!({"reveal": "/tmp/a\nb"}),
+        ];
+
+        for answer in refused {
+            assert!(decode::<ActionAnswer>(answer.clone()).is_err(), "{answer}");
+            assert!(decode::<JobState>(answer.clone()).is_err(), "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_job_state_reads_progress_and_its_end() {
+        let running: JobState = decode(json!({"done": 3, "total": 10, "text": "a.wav"})).unwrap();
+        assert!(!running.finished && running.error.is_none());
+
+        let failed: JobState = decode(json!({"error": "disk full"})).unwrap();
+        assert_eq!(failed.error.as_deref(), Some("disk full"));
     }
 }

@@ -1,7 +1,8 @@
 //! The Plugins settings page (ADR 30): every folder in the plugins folder and
 //! every plugin record, each with its switch, and Developer mode beside a
-//! switched-on one. Under a switched-on plugin sit its config, its synced
-//! collections and, when it asks for it, scrobbling. The Plugins switch at the head of the page lets any of
+//! switched-on one. Under a switched-on plugin sit its config, how many of
+//! its tracks are in the library, its synced collections and, when it asks
+//! for it, scrobbling. The Plugins switch at the head of the page lets any of
 //! them run, and the list shows only while it's on.
 //!
 //! The switch is the approving act. Turning on a folder this machine hasn't
@@ -11,8 +12,11 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui_component::tooltip::Tooltip;
+use rox_library::members::InLibrary;
+use rox_library::projection::{FilterField, FilterSet};
 use rox_plugins::host::STOPPED_AFTER_CRASHES;
 use rox_plugins::{Loaded, Status};
+use rox_services::plugin_library;
 use rox_services::plugins::{self as host, Change};
 use serde_json::Value;
 
@@ -36,6 +40,9 @@ pub(super) struct PluginsPage {
     folders: Vec<Loaded>,
     /// Member counts per synced collection, by plugin id.
     collections: HashMap<String, Vec<(String, usize)>>,
+    in_library: HashMap<String, InLibrary>,
+    /// The library projection the counts were read against.
+    library_gen: Option<u64>,
     /// Text and number fields of switched-on plugins, by plugin id and key.
     inputs: HashMap<(String, String), ConfigInput>,
     syncing: HashSet<String>,
@@ -297,6 +304,14 @@ impl EnableCard {
             if source.scrobble {
                 lines.push(rox_i18n::t!("settings-plugins-card-scrobbles"));
             }
+
+            if !source.actions.is_empty() {
+                let labels: Vec<&str> = source.actions.iter().map(|a| a.label.as_str()).collect();
+                lines.push(rox_i18n::t!(
+                    "settings-plugins-card-actions",
+                    actions = labels.join(", ")
+                ));
+            }
         }
 
         for (program, found) in &folder.programs {
@@ -353,6 +368,14 @@ fn change_line(change: &Change) -> SharedString {
         Change::Scrobble(true) => rox_i18n::t!("settings-plugins-change-scrobble-on"),
         Change::Scrobble(false) => rox_i18n::t!("settings-plugins-change-scrobble-off"),
         Change::Entry => rox_i18n::t!("settings-plugins-change-entry"),
+        Change::ActionAdded(label) => rox_i18n::t!(
+            "settings-plugins-change-action-added",
+            label = label.as_str()
+        ),
+        Change::ActionChanged(label) => rox_i18n::t!(
+            "settings-plugins-change-action-changed",
+            label = label.as_str()
+        ),
     }
 }
 
@@ -392,6 +415,11 @@ impl SettingsWindow {
             self.refresh_plugins(cx);
         }
 
+        // A Remove from Library elsewhere moves the counts without moving the host.
+        if self.plugin_page.library_gen != Some(self.library.read(cx).projection_gen()) {
+            self.read_plugin_counts(cx);
+        }
+
         self.ensure_config_inputs(window, cx);
     }
 
@@ -402,11 +430,23 @@ impl SettingsWindow {
         let records = Settings::load().accounts.plugins;
         self.plugins = subsonic::read_plugins(&records, &self.library, cx);
         self.plugin_page.folders = host::loaded();
-        self.plugin_page.collections = records
+        self.read_plugin_counts(cx);
+    }
+
+    fn read_plugin_counts(&mut self, cx: &mut Context<Self>) {
+        let library = self.library.read(cx);
+        self.plugin_page.library_gen = Some(library.projection_gen());
+
+        let ids: Vec<String> = self.plugins.iter().map(|(r, _)| r.id.clone()).collect();
+        self.plugin_page.collections = ids
             .iter()
-            .map(|record| {
-                let counts = read_collections(&self.library, &record.id, cx);
-                (record.id.clone(), counts)
+            .map(|id| (id.clone(), read_collections(&self.library, id, cx)))
+            .collect();
+        self.plugin_page.in_library = ids
+            .into_iter()
+            .map(|id| {
+                let counts = plugin_library::in_library(library, &format!("plugin:{id}"));
+                (id, counts)
             })
             .collect();
     }
@@ -861,8 +901,8 @@ impl SettingsWindow {
             })
     }
 
-    /// Under a switched-on plugin: scrobbling if it asks, its config, and its
-    /// synced collections.
+    /// Under a switched-on plugin: scrobbling if it asks, its config, what it
+    /// has in the library, and its synced collections.
     fn plugin_details(&self, folder: &Loaded, cx: &mut Context<Self>) -> Div {
         let id = folder.id.clone();
         let record = self.record(&id);
@@ -916,7 +956,69 @@ impl SettingsWindow {
             )));
         }
 
-        body.child(self.synced_block(&id, record, cx))
+        body.child(self.library_block(&id))
+            .child(self.synced_block(&id, record, cx))
+    }
+
+    /// How many of the plugin's tracks are in the library, with a way to see
+    /// them there.
+    fn library_block(&self, id: &str) -> Div {
+        let counts = self
+            .plugin_page
+            .in_library
+            .get(id)
+            .copied()
+            .unwrap_or_default();
+
+        let source = format!("plugin:{id}");
+        let state = self.state.clone();
+        let workspace_window = self.workspace_window;
+        let show = small_button(
+            rox_i18n::t!("settings-plugins-show-in-library"),
+            icons::SEARCH,
+            counts.tracks == 0,
+            move |_, _, cx| show_in_library(&state, &source, workspace_window, cx),
+        )
+        .keyed(SharedString::from(format!("plugin-{id}-show-in-library")));
+
+        let line = |label: SharedString, count: usize| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(tokens::SPACE_MD)
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(palette::text_muted())
+                        .child(rox_i18n::t!(
+                            "settings-common-tracks-count",
+                            count = count as u64
+                        )),
+                )
+        };
+
+        let header = div()
+            .text_xs()
+            .text_color(palette::text_muted())
+            .child(rox_i18n::t!("settings-plugins-library"));
+
+        settings_ui::nested(
+            div()
+                .flex()
+                .flex_col()
+                .gap(tokens::SPACE_XS)
+                .child(settings_ui::block_header(header, show))
+                .child(line(
+                    rox_i18n::t!("settings-plugins-library-all"),
+                    counts.tracks,
+                ))
+                .child(line(
+                    rox_i18n::t!("settings-plugins-library-saved"),
+                    counts.saved,
+                )),
+        )
     }
 
     fn config_control(
@@ -1060,6 +1162,22 @@ impl SettingsWindow {
                 }),
         )
     }
+}
+
+/// Narrow the shared search to the plugin's source alone and raise the
+/// workspace, where every panel following that search shows what it has.
+fn show_in_library(state: &AppState, source: &str, workspace: AnyWindowHandle, cx: &mut App) {
+    let mut filter = FilterSet::default();
+    filter.toggle(FilterField::Source, source);
+
+    state.query.update(cx, |query, cx| {
+        query.set(String::new(), cx);
+        query.set_filter(filter, cx);
+    });
+
+    workspace
+        .update(cx, |_, window, _| window.activate_window())
+        .ok();
 }
 
 /// None leaves the stored value alone: a number field mid-edit ("1.") that

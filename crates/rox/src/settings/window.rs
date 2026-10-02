@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Axis, Bounds, ClipboardItem, Context, Div, ElementId, Entity,
-    EntityId, FocusHandle, Global, Hsla, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    AnyElement, AnyWindowHandle, App, Axis, Bounds, Context, Div, ElementId, Entity, EntityId,
+    FocusHandle, Global, Hsla, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
     ScrollHandle, SharedString, Stateful, Subscription, Task, WeakEntity, Window, WindowHandle,
     div, prelude::*, px, size, svg,
 };
@@ -336,7 +336,6 @@ struct SettingsWindow {
     listenbrainz: Entity<ListenBrainz>,
     librefm: Entity<LibreFm>,
     discord: Entity<DiscordPresence>,
-    discord_enabled: bool,
     discord_show_lastfm_button: bool,
     discord_show_youtube_button: bool,
     discord_status_line: DiscordStatusLine,
@@ -358,13 +357,11 @@ struct SettingsWindow {
     broadcast_user: Entity<InputState>,
     broadcast_password: Entity<InputState>,
     broadcast_name: Entity<InputState>,
-    broadcast_enabled: bool,
     broadcast_bitrate: u32,
     /// An Icecast field changed since the sink last re-applied, so the commit
     /// can run wherever the edit ends and an untouched blur never drops a live
     /// connection.
     broadcast_dirty: bool,
-    capture_enabled: bool,
     capture_folder: PathBuf,
     capture_pattern: Entity<InputState>,
     capture_album: Entity<InputState>,
@@ -1053,7 +1050,6 @@ impl SettingsWindow {
             listenbrainz: state.listenbrainz.clone(),
             librefm: state.librefm.clone(),
             discord: state.discord.clone(),
-            discord_enabled: settings.accounts.discord.enabled,
             discord_show_lastfm_button: settings.accounts.discord.show_lastfm_button,
             discord_show_youtube_button: settings.accounts.discord.show_youtube_button,
             discord_status_line: settings.accounts.discord.status_line,
@@ -1069,10 +1065,8 @@ impl SettingsWindow {
             broadcast_user,
             broadcast_password,
             broadcast_name,
-            broadcast_enabled: settings.broadcast.enabled,
             broadcast_bitrate: settings.broadcast.bitrate,
             broadcast_dirty: false,
-            capture_enabled: settings.capture.enabled,
             capture_folder: settings.capture.folder.clone(),
             capture_pattern,
             capture_album,

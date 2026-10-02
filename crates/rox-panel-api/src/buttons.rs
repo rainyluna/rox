@@ -6,7 +6,8 @@
 //! Free of [`gpui`] so the table tests without a context. Colours are
 //! [`palette::ROLES`] names, so a re-themed palette carries through to buttons
 //! built under the old one. The `player.` ids read the player and the `app.`
-//! ids read a global, and both are persisted in saved layouts forever.
+//! ids read a global or another app service, and both are persisted in saved
+//! layouts forever.
 //!
 //! The stock look is seed data that makes a new button a working clone of the
 //! native control. Nothing in `rox-panels` renders through here. Left out:
@@ -18,7 +19,17 @@ use rox_core::continuation;
 use rox_core::settings::{self, GainModeSetting, ShuffleMode};
 use rox_design::assets::icons;
 use rox_design::palette;
+use rox_playback::{broadcast, icy};
+use rox_services::discord_presence::DiscordPresence;
+use rox_services::lastfm::Scrobbler;
 use rox_services::player::{self, AbState, LoopMode, Player};
+
+/// The live state a reader may look at, borrowed for one draw.
+pub struct Live<'a> {
+    pub player: &'a Player,
+    pub scrobbler: &'a Scrobbler,
+    pub discord: &'a DiscordPresence,
+}
 
 pub struct StateSpec {
     /// Stable forever: it is what a saved layout holds. "player.repeat".
@@ -29,7 +40,7 @@ pub struct StateSpec {
     /// Prefilled when the user picks the state. Empty when there's no one
     /// obvious command.
     pub action: &'static str,
-    pub read: fn(&Player) -> &'static str,
+    pub read: fn(&Live) -> &'static str,
 }
 
 pub struct StateCase {
@@ -562,14 +573,117 @@ pub const STATES: &[StateSpec] = &[
             },
         ],
     },
+    StateSpec {
+        id: "app.scrobbling",
+        label_key: "button-state-scrobbling",
+        action: "toggle_scrobbling",
+        read: read_scrobbling,
+        // The one switch every destination shares, whether or not an account is
+        // connected, same as the settings page.
+        cases: &[
+            StateCase {
+                id: "on",
+                label_key: "button-state-scrobbling-on",
+                icon: icons::CLOUD_UPLOAD,
+                color: "accent",
+            },
+            StateCase {
+                id: "off",
+                label_key: "button-state-scrobbling-off",
+                icon: icons::CLOUD_OFF,
+                color: "text_faint",
+            },
+        ],
+    },
+    StateSpec {
+        id: "app.discord",
+        label_key: "button-state-discord",
+        action: "toggle_discord",
+        read: read_discord,
+        cases: &[
+            StateCase {
+                id: "on",
+                label_key: "button-state-discord-on",
+                icon: icons::GAMEPAD,
+                color: "accent",
+            },
+            StateCase {
+                id: "off",
+                label_key: "button-state-discord-off",
+                icon: icons::GAMEPAD,
+                color: "text_faint",
+            },
+        ],
+    },
+    StateSpec {
+        id: "app.broadcast",
+        label_key: "button-state-broadcast",
+        action: "toggle_broadcast",
+        read: read_broadcast,
+        // What was asked for, not whether the server took the stream.
+        cases: &[
+            StateCase {
+                id: "on",
+                label_key: "button-state-broadcast-on",
+                icon: icons::RADIO_TOWER,
+                color: "accent",
+            },
+            StateCase {
+                id: "off",
+                label_key: "button-state-broadcast-off",
+                icon: icons::RADIO_TOWER,
+                color: "text_faint",
+            },
+        ],
+    },
+    StateSpec {
+        id: "app.capture",
+        label_key: "button-state-capture",
+        action: "toggle_capture",
+        read: read_capture,
+        cases: &[
+            StateCase {
+                id: "on",
+                label_key: "button-state-capture-on",
+                icon: icons::CIRCLE_DOT,
+                color: "accent",
+            },
+            StateCase {
+                id: "off",
+                label_key: "button-state-capture-off",
+                icon: icons::CIRCLE_DOT,
+                color: "text_faint",
+            },
+        ],
+    },
+    StateSpec {
+        id: "app.milkdrop_lock",
+        label_key: "button-state-milkdrop-lock",
+        action: "toggle_milkdrop_lock",
+        read: read_milkdrop_lock,
+        cases: &[
+            StateCase {
+                id: "locked",
+                label_key: "button-state-milkdrop-lock-locked",
+                icon: icons::PIN,
+                color: "accent",
+            },
+            StateCase {
+                id: "unlocked",
+                label_key: "button-state-milkdrop-lock-unlocked",
+                icon: icons::PIN_OFF,
+                color: "text_faint",
+            },
+        ],
+    },
 ];
 
 /// None for an unknown id, so a layout written by a newer build draws its
 /// fallback instead of misfiring.
-pub fn read_state(id: &str, player: &Player) -> Option<&'static str> {
+pub fn read_state(id: &str, live: &Live) -> Option<&'static str> {
     let spec = spec(id)?;
 
-    Some((spec.read)(player))
+    Some((spec.read)(live))
 }
 
 /// Split out so the unknown-id case tests without a live player.
@@ -577,95 +691,107 @@ fn spec(id: &str) -> Option<&'static StateSpec> {
     STATES.iter().find(|spec| spec.id == id)
 }
 
-fn read_playback(player: &Player) -> &'static str {
-    if player.is_playing() {
+fn read_playback(live: &Live) -> &'static str {
+    if live.player.is_playing() {
         "playing"
     } else {
         "paused"
     }
 }
 
-fn read_repeat(player: &Player) -> &'static str {
-    match player.loop_mode() {
+fn read_repeat(live: &Live) -> &'static str {
+    match live.player.loop_mode() {
         LoopMode::Off => "off",
         LoopMode::All => "all",
         LoopMode::One => "one",
     }
 }
 
-fn read_shuffle(player: &Player) -> &'static str {
-    match player.shuffle_mode() {
+fn read_shuffle(live: &Live) -> &'static str {
+    match live.player.shuffle_mode() {
         ShuffleMode::Random => "random",
         ShuffleMode::Similar => "similar",
     }
 }
 
-fn read_shuffle_on(player: &Player) -> &'static str {
-    if player.shuffle() { "on" } else { "off" }
+fn read_shuffle_on(live: &Live) -> &'static str {
+    if live.player.shuffle() { "on" } else { "off" }
 }
 
-fn read_mute(player: &Player) -> &'static str {
-    if player.muted() { "muted" } else { "unmuted" }
-}
-
-fn read_stop_after(player: &Player) -> &'static str {
-    if player.stop_after() { "armed" } else { "off" }
-}
-
-fn read_ab_repeat(player: &Player) -> &'static str {
-    match player.ab_state() {
-        AbState::Off => "off",
-        AbState::ASet(_) => "a-set",
-        AbState::Looping(..) => "looping",
-    }
-}
-
-fn read_continuation(player: &Player) -> &'static str {
-    match player.continuation_mode() {
-        continuation::Mode::Off => "off",
-        continuation::Mode::Continue => "continue",
-        continuation::Mode::Weighted => "weighted",
-    }
-}
-
-fn read_stop(player: &Player) -> &'static str {
-    if player.is_active() { "active" } else { "idle" }
-}
-
-fn read_crossfade(player: &Player) -> &'static str {
-    if player.crossfade_secs() > 0.0 {
-        "on"
+fn read_mute(live: &Live) -> &'static str {
+    if live.player.muted() {
+        "muted"
     } else {
-        "off"
+        "unmuted"
     }
 }
 
-fn read_crossfade_albums(player: &Player) -> &'static str {
-    if player.crossfade_albums() {
-        "on"
-    } else {
-        "off"
-    }
-}
-
-fn read_sleep(player: &Player) -> &'static str {
-    if player.sleep_remaining().is_some() {
+fn read_stop_after(live: &Live) -> &'static str {
+    if live.player.stop_after() {
         "armed"
     } else {
         "off"
     }
 }
 
-fn read_replaygain(player: &Player) -> &'static str {
-    match player.replay_gain().mode {
+fn read_ab_repeat(live: &Live) -> &'static str {
+    match live.player.ab_state() {
+        AbState::Off => "off",
+        AbState::ASet(_) => "a-set",
+        AbState::Looping(..) => "looping",
+    }
+}
+
+fn read_continuation(live: &Live) -> &'static str {
+    match live.player.continuation_mode() {
+        continuation::Mode::Off => "off",
+        continuation::Mode::Continue => "continue",
+        continuation::Mode::Weighted => "weighted",
+    }
+}
+
+fn read_stop(live: &Live) -> &'static str {
+    if live.player.is_active() {
+        "active"
+    } else {
+        "idle"
+    }
+}
+
+fn read_crossfade(live: &Live) -> &'static str {
+    if live.player.crossfade_secs() > 0.0 {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn read_crossfade_albums(live: &Live) -> &'static str {
+    if live.player.crossfade_albums() {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn read_sleep(live: &Live) -> &'static str {
+    if live.player.sleep_remaining().is_some() {
+        "armed"
+    } else {
+        "off"
+    }
+}
+
+fn read_replaygain(live: &Live) -> &'static str {
+    match live.player.replay_gain().mode {
         GainModeSetting::Off => "off",
         GainModeSetting::Track => "track",
         GainModeSetting::Album => "album",
     }
 }
 
-fn read_exclusive_output(player: &Player) -> &'static str {
-    if player.exclusive_output() {
+fn read_exclusive_output(live: &Live) -> &'static str {
+    if live.player.exclusive_output() {
         "on"
     } else {
         "off"
@@ -673,22 +799,22 @@ fn read_exclusive_output(player: &Player) -> &'static str {
 }
 
 /// The EQ reads a free getter over atomics, like the `app.` readers below.
-fn read_eq(_player: &Player) -> &'static str {
+fn read_eq(_live: &Live) -> &'static str {
     if player::eq_enabled() { "on" } else { "off" }
 }
 
-fn read_theme(_player: &Player) -> &'static str {
+fn read_theme(_live: &Live) -> &'static str {
     match palette::mode() {
         palette::Mode::Dark => "dark",
         palette::Mode::Light => "light",
     }
 }
 
-fn read_design_mode(_player: &Player) -> &'static str {
+fn read_design_mode(_live: &Live) -> &'static str {
     if settings::design_mode() { "on" } else { "off" }
 }
 
-fn read_resize_lock(_player: &Player) -> &'static str {
+fn read_resize_lock(_live: &Live) -> &'static str {
     if settings::resize_lock() {
         "locked"
     } else {
@@ -696,7 +822,7 @@ fn read_resize_lock(_player: &Player) -> &'static str {
     }
 }
 
-fn read_menubar(_player: &Player) -> &'static str {
+fn read_menubar(_live: &Live) -> &'static str {
     if settings::hide_menubar() {
         "hidden"
     } else {
@@ -704,7 +830,7 @@ fn read_menubar(_player: &Player) -> &'static str {
     }
 }
 
-fn read_decorations(_player: &Player) -> &'static str {
+fn read_decorations(_live: &Live) -> &'static str {
     if settings::os_decorations() {
         "on"
     } else {
@@ -712,11 +838,11 @@ fn read_decorations(_player: &Player) -> &'static str {
     }
 }
 
-fn read_art_theming(_player: &Player) -> &'static str {
+fn read_art_theming(_live: &Live) -> &'static str {
     if palette::art_theming() { "on" } else { "off" }
 }
 
-fn read_quit_to_tray(_player: &Player) -> &'static str {
+fn read_quit_to_tray(_live: &Live) -> &'static str {
     if settings::quit_to_tray() {
         "on"
     } else {
@@ -724,15 +850,43 @@ fn read_quit_to_tray(_player: &Player) -> &'static str {
     }
 }
 
-fn read_seams(_player: &Player) -> &'static str {
+fn read_seams(_live: &Live) -> &'static str {
     if settings::seams() { "on" } else { "off" }
 }
 
-fn read_readings(_player: &Player) -> &'static str {
+fn read_readings(_live: &Live) -> &'static str {
     if settings::show_readings() {
         "on"
     } else {
         "off"
+    }
+}
+
+fn read_scrobbling(live: &Live) -> &'static str {
+    if live.scrobbler.scrobbling() {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn read_discord(live: &Live) -> &'static str {
+    if live.discord.enabled() { "on" } else { "off" }
+}
+
+fn read_broadcast(_live: &Live) -> &'static str {
+    if broadcast::enabled() { "on" } else { "off" }
+}
+
+fn read_capture(_live: &Live) -> &'static str {
+    if icy::capturing() { "on" } else { "off" }
+}
+
+fn read_milkdrop_lock(_live: &Live) -> &'static str {
+    if settings::backdrop_visual().locked {
+        "locked"
+    } else {
+        "unlocked"
     }
 }
 

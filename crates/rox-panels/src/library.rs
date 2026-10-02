@@ -46,6 +46,7 @@ use crate::settings::GainModeSetting;
 use crate::settings::ui as settings_ui;
 use crate::thumbs::Thumb;
 use crate::track_ui::track_cells;
+use crate::track_ui::track_columns::SourceMark;
 use crate::track_ui::track_drag::{PlayDrag, PlayDragPreview};
 
 /// Matches the panel frame sliders' rounding scale.
@@ -190,6 +191,9 @@ fn install_view(
     let delegate = table.delegate_mut();
     delegate.view = view;
     delegate.groups = groups;
+    if delegate.view_projection != projection_gen {
+        delegate.source_marks.clear();
+    }
     delegate.view_projection = projection_gen;
     delegate.selected.clear();
     delegate.sel_gen += 1;
@@ -262,6 +266,9 @@ struct TrackTable {
     similar_anchor: Option<(i64, String)>,
     /// Cached so the thumbnail lookup doesn't query the catalog every frame.
     cover_paths: HashMap<i64, Option<PathBuf>>,
+    /// Keyed on the stored source string. Cleared when a new projection's view
+    /// lands, since enabling or disabling a plugin rebuilds the projection.
+    source_marks: HashMap<String, SourceMark>,
     /// Cached because a row's `on_drag` value is built every frame.
     drag_keys: HashMap<i64, Option<TrackKey>>,
     /// Bumped on every selection change. Keys the `drag_set` cache.
@@ -1477,9 +1484,14 @@ impl TableDelegate for TrackTable {
             "codec" => cell
                 .text_color(palette::text_muted())
                 .child(SharedString::from(v.codec.to_string())),
-            "source" => cell
-                .text_color(palette::text_muted())
-                .child(SharedString::from(rox_library::cue::source_label(v.source))),
+            "source" => {
+                if !self.source_marks.contains_key(v.source) {
+                    let mark = SourceMark::resolve(v.source);
+                    self.source_marks.insert(v.source.to_string(), mark);
+                }
+
+                crate::track_ui::track_columns::source_cell(self.source_marks.get(v.source))
+            }
             "bitrate" => cell
                 .text_color(palette::text_muted())
                 .child(fmt_num(v.bitrate_kbps)),
@@ -1803,6 +1815,7 @@ impl LibraryPanel {
             similar: Arc::new(HashMap::new()),
             similar_anchor: None,
             cover_paths: HashMap::new(),
+            source_marks: HashMap::new(),
             drag_keys: HashMap::new(),
             sel_gen: 0,
             view_gen: 0,

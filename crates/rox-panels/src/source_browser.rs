@@ -11,12 +11,13 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Axis, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
-    Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, ScrollStrategy, SharedString,
-    Subscription, Task, WeakEntity, Window, canvas, div, img, prelude::*, px, size, svg,
+    Animation, AnimationExt as _, AnyElement, App, Axis, Context, Div, ElementId, EventEmitter,
+    FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit,
+    Pixels, ScrollStrategy, SharedString, Subscription, Task, WeakEntity, Window, canvas, div,
+    ease_out_quint, img, prelude::*, px, size, svg,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
@@ -27,6 +28,7 @@ use rox_core::settings::{Settings, SyncedCollection};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::cue::{PLUGIN_PREFIX, TrackKey, source_id};
 use rox_library::members::{self, PluginTrack};
+use rox_panel_api::plugin_actions;
 use rox_services::plugins::{
     self, Entry, Field, FieldKind, FieldValue, GoTo, NodeKind, Notice, NoticeLink, Page, RadioSeed,
     Target, Unavailable, Values, View,
@@ -59,6 +61,22 @@ const ART: Pixels = px(32.);
 
 /// Rows share it so the keep button shows on the hovered row only.
 const NODE_ROW: &str = "source-node-row";
+
+/// The same for a track row's library check.
+const TRACK_ROW: &str = "source-track-row";
+
+/// How far a place loading over the old one dims it.
+const VEIL: f32 = 0.55;
+
+/// Where a track stands with the library.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Out,
+    /// Added on its own, so its check takes it back out.
+    Saved,
+    /// Held by a kept collection, whose own switch takes it out.
+    Kept,
+}
 
 /// The same for tiles.
 const NODE_TILE: &str = "source-node-tile";
@@ -244,9 +262,19 @@ struct Place {
     query: Option<String>,
     /// None for the plugin's default view.
     view: Option<String>,
+    /// The plugin's part of the library, read from rox alone. The trail
+    /// below it is kept collections.
+    library: bool,
 }
 
 impl Place {
+    fn library() -> Place {
+        Place {
+            library: true,
+            ..Place::default()
+        }
+    }
+
     /// The node being listed. None at the roots and for a search.
     fn node(&self) -> Option<&Crumb> {
         match self.query {
@@ -255,8 +283,10 @@ impl Place {
         }
     }
 
+    /// The plugin's own roots. The library's top isn't one: it has no home
+    /// to follow and nothing the plugin answers.
     fn is_root(&self) -> bool {
-        self.trail.is_empty() && self.query.is_none()
+        self.trail.is_empty() && self.query.is_none() && !self.library
     }
 
     /// Where Go to's node goes. A node already on the trail is stepped back
@@ -458,19 +488,12 @@ impl Listing {
             }
 
             None => {
-                // The home's columns join the roots', which rarely have any.
-                if pending.home {
-                    if let Home::Next(id) = &self.home {
-                        self.home = Home::Paging(id.clone());
-                    }
-
-                    for field in page.fields {
-                        if self.fields.len() < plugins::MAX_FIELDS
-                            && !self.fields.iter().any(|f| f.id == field.id)
-                        {
-                            self.fields.push(field);
-                        }
-                    }
+                // The home's columns stay out of the roots': they'd land after
+                // the roots and narrow every row already drawn.
+                if pending.home
+                    && let Home::Next(id) = &self.home
+                {
+                    self.home = Home::Paging(id.clone());
                 }
 
                 self.entries.extend(page.entries);
@@ -530,6 +553,14 @@ impl Listing {
         self.pending.is_some()
     }
 
+    /// A new place is on its way, as opposed to the next page of this one.
+    fn navigating(&self) -> Option<u64> {
+        self.pending
+            .as_ref()
+            .filter(|pending| pending.place.is_some())
+            .map(|pending| pending.generation)
+    }
+
     /// The place asked for last, whether or not it has landed.
     fn target(&self) -> &Place {
         self.pending
@@ -564,6 +595,8 @@ pub struct SourceBrowserPanel {
     played_from: Option<PlayedFrom>,
     /// The next page to land scrolls to the playing row.
     reveal_playing: bool,
+    /// The first row of what landed last and when, so new rows fade in.
+    fresh: Option<(usize, Instant)>,
     /// What plays after the audible track, read when the queue or the track
     /// moves.
     up_next: Vec<(u64, TrackKey)>,
@@ -703,6 +736,7 @@ impl SourceBrowserPanel {
             bars: PlayingBars::shared(),
             played_from: None,
             reveal_playing: false,
+            fresh: None,
             up_next: Vec::new(),
             queue_rev: None,
             queue_picked: None,
@@ -806,8 +840,20 @@ impl SourceBrowserPanel {
 
     /// Lists a place from its first page. A synced collection lands at once
     /// from the library; everything else waits on the plugin.
-    fn go(&mut self, place: Place, cx: &mut Context<Self>) {
+    fn go(&mut self, mut place: Place, cx: &mut Context<Self>) {
+        // A node the library doesn't keep, like one Go to names, opens from
+        // the plugin as it would anywhere else.
+        if place.library && place.node().is_some_and(|node| !self.is_synced(&node.id)) {
+            place.library = false;
+        }
+
         let generation = self.listing.begin(Some(place.clone()));
+
+        if place.library && place.trail.is_empty() && place.query.is_none() {
+            let page = self.library_home(cx);
+            self.landed(generation, Ok(page), false, cx);
+            return;
+        }
 
         if let Some(node) = place.node()
             && self.is_synced(&node.id)
@@ -890,6 +936,7 @@ impl SourceBrowserPanel {
         root: bool,
         cx: &mut Context<Self>,
     ) {
+        let before = self.listing.entries.len();
         let failed = result.is_err();
         let landed = match result {
             Err(e) if root => {
@@ -906,6 +953,14 @@ impl SourceBrowserPanel {
 
         if landed == Landed::Stale {
             return;
+        }
+
+        // A home following its roots eases in rather than popping. A re-read
+        // of the place already shown doesn't fade, or every refresh flashes.
+        match landed {
+            Landed::Replaced { moved: true } => self.fresh = Some((0, Instant::now())),
+            Landed::Appended => self.fresh = Some((before, Instant::now())),
+            _ => {}
         }
 
         if failed {
@@ -1059,7 +1114,13 @@ impl SourceBrowserPanel {
             .map(|c| Entry::Node {
                 id: c.id.clone(),
                 title: c.title.clone(),
-                subtitle: String::new(),
+                subtitle: self
+                    .members
+                    .get(&c.id)
+                    .map(|count| {
+                        rox_i18n::t!("source-browser-members", count = *count as u64).to_string()
+                    })
+                    .unwrap_or_default(),
                 collection: true,
                 kind: None,
                 art: String::new(),
@@ -1073,17 +1134,70 @@ impl SourceBrowserPanel {
         }
     }
 
+    /// The plugin's part of the library: the kept collections, then the
+    /// tracks added one at a time. Nothing here asks the plugin, so it lists
+    /// the same with the plugin stopped.
+    fn library_home(&self, cx: &App) -> Page {
+        let saved = rox_library::store::open(&self.state.library.read(cx).db_path())
+            .ok()
+            .and_then(|conn| members::saved(&conn, self.source()).ok())
+            .unwrap_or_default();
+
+        let mut entries = Vec::new();
+
+        if !self.synced.is_empty() {
+            entries.push(Entry::Section {
+                title: rox_i18n::t!("source-browser-library-kept").to_string(),
+                tiles: false,
+            });
+            entries.extend(self.synced_page().entries);
+        }
+
+        let tracks = self.track_entries(&saved, cx);
+        if !tracks.is_empty() {
+            entries.push(Entry::Section {
+                title: rox_i18n::t!("source-browser-library-added").to_string(),
+                tiles: false,
+            });
+            entries.extend(tracks);
+        }
+
+        let notice = entries.is_empty().then(|| Notice {
+            text: rox_i18n::t!(
+                "source-browser-library-empty",
+                source = self.label.to_string()
+            )
+            .to_string(),
+            setup: false,
+            link: None,
+        });
+
+        Page {
+            entries,
+            notice,
+            ..Page::default()
+        }
+    }
+
     /// A synced collection's tracks as the library holds them, in the
     /// plugin's order.
     fn library_page(&self, node: &str, cx: &App) -> Page {
-        let library = self.state.library.read(cx);
-        let keys = rox_library::store::open(&library.db_path())
+        let keys = rox_library::store::open(&self.state.library.read(cx).db_path())
             .ok()
             .and_then(|conn| members::list(&conn, self.source(), node).ok())
             .unwrap_or_default();
 
-        let entries = keys
-            .iter()
+        Page {
+            entries: self.track_entries(&keys, cx),
+            ..Page::default()
+        }
+    }
+
+    /// Rows for library tracks, from the tags the library holds.
+    fn track_entries(&self, keys: &[TrackKey], cx: &App) -> Vec<Entry> {
+        let library = self.state.library.read(cx);
+
+        keys.iter()
             .filter_map(|key| {
                 let (_, meta) = library.resolve_key(key)?;
                 Some(Entry::Track(PluginTrack {
@@ -1101,12 +1215,7 @@ impl SourceBrowserPanel {
                     ..PluginTrack::default()
                 }))
             })
-            .collect();
-
-        Page {
-            entries,
-            ..Page::default()
-        }
+            .collect()
     }
 
     fn resolve_ids(&mut self, cx: &App) {
@@ -1146,9 +1255,11 @@ impl SourceBrowserPanel {
             return;
         }
 
+        // Anything the library lists is read again: a removal or a sync
+        // elsewhere shows here at once.
         let place = self.listing.place.clone();
         let shows_synced = place.node().is_some_and(|node| self.is_synced(&node.id));
-        if shows_synced && !self.listing.loading() {
+        if (shows_synced || place.library) && !self.listing.loading() {
             self.go(place, cx);
         }
 
@@ -1545,11 +1656,13 @@ impl SourceBrowserPanel {
             false => None,
         };
 
+        let library = self.listing.place.library;
         self.go(
             Place {
                 trail,
                 query,
                 view: None,
+                library,
             },
             cx,
         );
@@ -1769,8 +1882,12 @@ impl SourceBrowserPanel {
             .map(|(headline, reason)| panel::banner(Tone::Bad, headline, vec![reason.into()]));
         let notice = self.listing.notice.as_ref().map(notice_banner);
 
-        root.child(self.header(cx))
-            .children(self.breadcrumb(cx))
+        let view = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.breadcrumb(cx))
             .children(self.views_bar(cx))
             .children(self.fields_bar(cx))
             .children(
@@ -1805,7 +1922,51 @@ impl SourceBrowserPanel {
                     };
                     this.update(cx, |this, cx| this.row_menu(menu, window, cx))
                 }
-            }))
+            }));
+
+        root.child(self.header(cx)).child(self.loading_veil(view))
+    }
+
+    /// While a new place loads, the old one dims under a spinner rather than
+    /// a spinner squeezing the header. The dim eases in, so an answer that
+    /// lands fast barely shows it. The next page of the same place only gets
+    /// a spinner over the list's foot.
+    fn loading_veil(&self, view: Div) -> Div {
+        let spinner = || Spinner::new().color(palette::accent().into());
+
+        let shell = div().flex_1().min_h_0().relative().flex().flex_col();
+
+        let Some(generation) = self.listing.navigating() else {
+            let paging = self.listing.loading().then(|| {
+                div()
+                    .absolute()
+                    .bottom(tokens::SPACE_MD)
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(spinner().small())
+            });
+
+            return shell.child(view).children(paging);
+        };
+
+        let dimmed = view.with_animation(
+            ElementId::NamedInteger("source-veil".into(), generation),
+            Animation::new(Duration::from_secs_f32(tokens::EASE_SECS))
+                .with_easing(ease_out_quint()),
+            |view, delta| view.opacity(1. - VEIL * delta),
+        );
+
+        shell.child(dimmed).child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(spinner()),
+        )
     }
 
     fn header(&mut self, cx: &mut Context<Self>) -> Div {
@@ -1826,9 +1987,32 @@ impl SourceBrowserPanel {
                     .min_w_0()
                     .child(self.search.update(cx, |search, cx| search.element(cx))),
             )
-            .when(self.listing.loading(), |header| {
-                header.child(Spinner::new().xsmall().color(palette::accent().into()))
-            })
+            .child(self.library_toggle(cx))
+    }
+
+    /// The way into what rox holds of this source, opposite the mark that
+    /// leads to the plugin's home. Pressed again, it goes back home.
+    fn library_toggle(&self, cx: &mut Context<Self>) -> SmallButton {
+        let inside = self.listing.place.library;
+
+        crate::settings::ui::small_button(
+            rox_i18n::t!("source-browser-library"),
+            icons::LIST_MUSIC,
+            false,
+            cx.listener(move |this, _, _, cx| {
+                let to = match inside {
+                    true => Place::default(),
+                    false => Place::library(),
+                };
+                this.go(to, cx);
+            }),
+        )
+        .keyed("source-library")
+        .when(inside, |button| {
+            button
+                .bg(palette::alpha(palette::accent(), 0x26))
+                .text_color(palette::text_bright())
+        })
     }
 
     /// The plugin's icon where it ships one, named in a tooltip, or its label.
@@ -2316,14 +2500,16 @@ impl SourceBrowserPanel {
     }
 
     /// None at the roots, where there's nothing to climb back to.
-    fn breadcrumb(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn breadcrumb(&self, cx: &mut Context<Self>) -> Div {
+        // Always there, so it doesn't push the list down once the roots are
+        // left. At the roots it says where the list is.
         let place = &self.listing.place;
-        if place.is_root() {
-            return None;
-        }
 
-        let mut crumbs: Vec<(Option<usize>, SharedString)> =
-            vec![(Some(0), rox_i18n::t!("source-browser-home"))];
+        let top = match place.library {
+            true => rox_i18n::t!("source-browser-library"),
+            false => rox_i18n::t!("source-browser-home"),
+        };
+        let mut crumbs: Vec<(Option<usize>, SharedString)> = vec![(Some(0), top)];
 
         crumbs.extend(place.trail.iter().enumerate().map(|(ix, crumb)| {
             let title = match &crumb.query {
@@ -2355,7 +2541,7 @@ impl SourceBrowserPanel {
             .border_b_1()
             .border_color(palette::border());
 
-        let row = crumbs
+        crumbs
             .into_iter()
             .enumerate()
             .fold(row, |row, (ix, (depth, title))| {
@@ -2390,9 +2576,7 @@ impl SourceBrowserPanel {
                     ),
                 };
                 row.child(crumb)
-            });
-
-        Some(row)
+            })
     }
 
     fn list(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2496,31 +2680,58 @@ impl SourceBrowserPanel {
         visuals[range.start.min(visuals.len())..range.end.min(visuals.len())]
             .iter()
             .filter_map(|visual| {
-                let ix = match visual {
-                    Visual::Row(ix) => *ix,
-                    Visual::Shelf(entries) => return Some(self.shelf(entries.clone(), cx)),
-                    Visual::Line(entries) => return Some(self.line(entries.clone(), cx)),
+                let (first, element) = match visual {
+                    Visual::Row(ix) => (*ix, self.row(visuals, *ix, cx)?),
+                    Visual::Shelf(entries) => (entries.start, self.shelf(entries.clone(), cx)),
+                    Visual::Line(entries) => (entries.start, self.line(entries.clone(), cx)),
                 };
-                let entry = self.listing.entries.get(ix)?.clone();
-                Some(match entry {
-                    Entry::Node {
-                        id,
-                        title,
-                        subtitle,
-                        collection,
-                        kind,
-                        art,
-                        ..
-                    } => self.node_row(ix, id, title, subtitle, collection, kind, art, cx),
 
-                    Entry::Track(track) => self.track_row(ix, &track, cx),
-
-                    Entry::Section { title, .. } => {
-                        self.section_row(ix, title, shelf_under(visuals, ix), cx)
-                    }
+                Some(match self.fade(first) {
+                    Some(opacity) => div()
+                        .w_full()
+                        .opacity(opacity)
+                        .child(element)
+                        .into_any_element(),
+                    None => element,
                 })
             })
             .collect()
+    }
+
+    /// How far into its fade a row that just landed is. None once it's done
+    /// or for a row that was already there.
+    fn fade(&self, ix: usize) -> Option<f32> {
+        let (from, at) = self.fresh?;
+        let t = at.elapsed().as_secs_f32() / tokens::EASE_SECS;
+
+        // Even in and out: an ease-out lands almost at once and reads as a pop.
+        (ix >= from && t < 1.).then(|| gpui::ease_in_out(t))
+    }
+
+    fn fading(&self) -> bool {
+        self.fresh
+            .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < tokens::EASE_SECS)
+    }
+
+    fn row(&mut self, visuals: &[Visual], ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let entry = self.listing.entries.get(ix)?.clone();
+        Some(match entry {
+            Entry::Node {
+                id,
+                title,
+                subtitle,
+                collection,
+                kind,
+                art,
+                ..
+            } => self.node_row(ix, id, title, subtitle, collection, kind, art, cx),
+
+            Entry::Track(track) => self.track_row(ix, &track, cx),
+
+            Entry::Section { title, .. } => {
+                self.section_row(ix, title, shelf_under(visuals, ix), cx)
+            }
+        })
     }
 
     fn row_shell(&self, ix: usize, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
@@ -2956,6 +3167,82 @@ impl SourceBrowserPanel {
             .into_any_element()
     }
 
+    fn held(&self, key: &str, cx: &App) -> Held {
+        let Some(id) = self.ids.get(key).copied() else {
+            return Held::Out;
+        };
+
+        let library = self.state.library.read(cx);
+        match (library.is_saved(id), library.in_library(id)) {
+            (true, _) => Held::Saved,
+            (false, true) => Held::Kept,
+            (false, false) => Held::Out,
+        }
+    }
+
+    /// A track's twin of the keep button: shows on the hovered row and stays
+    /// lit while the track is in the library. A kept collection's track is
+    /// lit but doesn't toggle, since taking it out is the collection's call.
+    fn track_check(&self, ix: usize, track: &PluginTrack, cx: &mut Context<Self>) -> AnyElement {
+        let held = self.held(&track.key, cx);
+
+        let tip = match held {
+            Held::Out => rox_i18n::t!("source-browser-track-save"),
+            Held::Saved => rox_i18n::t!("source-browser-track-saved"),
+            Held::Kept => rox_i18n::t!("source-browser-track-kept"),
+        };
+
+        let face = svg()
+            .path(icons::CHECK)
+            .size(px(14.))
+            .text_color(match held {
+                Held::Out => palette::text_muted(),
+                Held::Saved | Held::Kept => palette::accent(),
+            });
+
+        let button = div()
+            .id(("source-track-check", ix))
+            .flex_none()
+            .size(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(tokens::RADIUS)
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            // The press stops here, or it would select the row too.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(face);
+
+        let panel = cx.entity().downgrade();
+        let (picked, key) = (track.clone(), track.key.clone());
+
+        match held {
+            Held::Out => button
+                .cursor_pointer()
+                .opacity(0.)
+                .group_hover(TRACK_ROW, |button| button.opacity(1.))
+                .hover(|button| button.bg(palette::bg_control_hover()))
+                .on_click(move |_, _, cx| {
+                    let tracks = vec![picked.clone()];
+                    panel.update(cx, |this, cx| this.save(tracks, cx)).ok();
+                }),
+
+            Held::Saved => button
+                .cursor_pointer()
+                .bg(palette::alpha(palette::accent(), 0x26))
+                .hover(|button| button.bg(palette::bg_control_hover()))
+                .on_click(move |_, _, cx| {
+                    let paths = vec![key.clone()];
+                    panel.update(cx, |this, cx| this.unsave(paths, cx)).ok();
+                }),
+
+            Held::Kept => button.bg(palette::alpha(palette::accent(), 0x26)),
+        }
+        .into_any_element()
+    }
+
     /// A heading the plugin put over the rows after it. Nothing to pick.
     /// Over a shelf wider than the list, it carries the arrows that page it:
     /// the only sideways control a plain mouse wheel has.
@@ -3032,7 +3319,10 @@ impl SourceBrowserPanel {
                 .child(fmt_num(track.track_no))
         });
 
+        let check = self.track_check(ix, track, cx);
+
         self.row_shell(ix, cx)
+            .group(TRACK_ROW)
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
                     this.activate(ix, cx);
@@ -3049,6 +3339,7 @@ impl SourceBrowserPanel {
                 playing,
                 busy,
             ))
+            .child(check)
             .child(
                 div()
                     .flex_none()
@@ -3200,6 +3491,16 @@ impl SourceBrowserPanel {
                 }
                 _ => menu,
             };
+
+            let nodes: Vec<String> = rows
+                .iter()
+                .filter_map(|row| match self.listing.entries.get(*row) {
+                    Some(Entry::Node { id, .. }) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            let menu = plugin_actions::offer(menu, self.source(), "node", nodes);
+
             return self.dropdown_menu(menu.separator(), window, cx);
         }
 
@@ -3229,6 +3530,7 @@ impl SourceBrowserPanel {
                 .ok();
         };
 
+        let shared = ids.is_some();
         let menu = match ids {
             Some(ids) => panel::track_actions_with(
                 menu,
@@ -3253,17 +3555,21 @@ impl SourceBrowserPanel {
                     window,
                     cx,
                 );
-                match tracks.as_slice() {
+                let menu = match tracks.as_slice() {
                     [track] => panel::link_items(menu, self.source(), track.key.clone()),
                     _ => menu,
-                }
+                };
+
+                let keys = tracks.iter().map(|track| track.key.clone()).collect();
+                plugin_actions::offer(menu, self.source(), "track", keys)
             }
         };
         let menu = match tracks.as_slice() {
             [track] => self.go_to_submenu(menu, &track.key, window, cx),
             _ => menu,
         };
-        let menu = self.library_item(menu, tracks, cx);
+        // The shared menu brings its own Remove from Library and Stop Keeping.
+        let menu = self.library_item(menu, tracks, shared, cx);
 
         self.dropdown_menu(menu.separator(), window, cx)
     }
@@ -3421,6 +3727,7 @@ impl SourceBrowserPanel {
         &self,
         menu: PopupMenu,
         tracks: Vec<PluginTrack>,
+        shared: bool,
         cx: &mut Context<Self>,
     ) -> PopupMenu {
         let library = self.state.library.read(cx);
@@ -3445,7 +3752,7 @@ impl SourceBrowserPanel {
                     }),
             );
         }
-        if !all_saved {
+        if !all_saved || shared {
             return menu;
         }
 
@@ -3718,6 +4025,12 @@ impl Panel for SourceBrowserPanel {
             None => menu,
         };
 
+        // An action on no item is the panel's, so it's in the panel's own menu.
+        let menu = match plugin_actions::offers(self.source(), "source") {
+            true => plugin_actions::offer(menu, self.source(), "source", Vec::new()).separator(),
+            false => menu,
+        };
+
         let menu =
             panel_settings::rename_item(menu, &cx.entity(), self.tab_panel.clone(), window, cx);
         let menu = panel_settings::settings_item(menu, &cx.entity(), cx);
@@ -3746,6 +4059,11 @@ impl Panel for SourceBrowserPanel {
 impl gpui::Render for SourceBrowserPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.coast(window);
+
+        // Nothing else asks for frames while rows fade in.
+        if self.fading() {
+            window.request_animation_frame();
+        }
 
         let chrome = self.config.chrome.clone();
         panel::themed(&chrome, || self.body(cx))
@@ -4252,6 +4570,23 @@ mod tests {
     }
 
     #[test]
+    fn the_librarys_top_is_no_plugin_root_and_keeps_its_flag_down_the_trail() {
+        let top = Place::library();
+        assert!(!top.is_root(), "the home doesn't follow the library's top");
+        assert_eq!(top.node(), None);
+
+        let kept = top.opening(Crumb {
+            id: "liked".into(),
+            title: "Liked".into(),
+            query: None,
+            collection: true,
+            kind: None,
+        });
+        assert!(kept.library);
+        assert_eq!(kept.node().map(|crumb| crumb.id.as_str()), Some("liked"));
+    }
+
+    #[test]
     fn search_results_list_no_node_even_as_a_crumb() {
         let results = Place {
             trail: vec![Crumb {
@@ -4263,6 +4598,7 @@ mod tests {
             }],
             query: Some("tones".into()),
             view: None,
+            library: false,
         };
         assert_eq!(results.node(), None, "search results list no node");
         assert!(!results.is_root());

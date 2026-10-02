@@ -768,8 +768,8 @@ fn portal_banner(root: &Path) -> Div {
                     rox_i18n::t!("settings-common-copy"),
                     icons::COPY,
                     false,
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                    move |_, window, cx| {
+                        rox_panel_api::toast::copy(copy.clone(), window, cx);
                     },
                 )),
         )

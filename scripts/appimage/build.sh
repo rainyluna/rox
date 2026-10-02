@@ -115,8 +115,31 @@ fetch "$APPIMAGETOOL_URL" "$APPIMAGETOOL_SHA" "$TOOLS/appimagetool-x86_64.AppIma
 fetch "$RUNTIME_URL" "$RUNTIME_SHA" "$TOOLS/runtime-x86_64"
 chmod +x "$TOOLS/appimagetool-x86_64.AppImage"
 
-# --appimage-extract-and-run because the build container has no FUSE. No
-# -u update information on purpose: the in-app updater handles updates.
-ARCH=x86_64 "$TOOLS/appimagetool-x86_64.AppImage" --appimage-extract-and-run \
-    --runtime-file "$TOOLS/runtime-x86_64" --comp zstd \
-    "$APPDIR" "$OUT/rox-v$VERSION-linux-x86_64.AppImage"
+# Update information for AppImageUpdate and the launchers built on it. They
+# resolve "latest" through GitHub's latest endpoint, which skips
+# prereleases, so a candidate would be offered the previous stable as an
+# update. Candidates take "latest-all" instead and follow the newest
+# release of either kind.
+case "$VERSION" in
+    *-*) CHANNEL=latest-all ;;
+    *) CHANNEL=latest ;;
+esac
+UPDATE_INFO="gh-releases-zsync|zealsprince|rox|$CHANNEL|rox-v*-linux-x86_64.AppImage.zsync"
+
+# --appimage-extract-and-run because the build container has no FUSE. -u
+# makes appimagetool run its bundled zsyncmake, which writes the .zsync into
+# the working directory, so it runs from the output dir to keep the pair
+# together. The .zsync points at the AppImage by bare filename, which
+# resolves against the release's download folder.
+NAME="rox-v$VERSION-linux-x86_64.AppImage"
+(
+    cd "$OUT"
+    ARCH=x86_64 "$TOOLS/appimagetool-x86_64.AppImage" --appimage-extract-and-run \
+        --runtime-file "$TOOLS/runtime-x86_64" --comp zstd \
+        -u "$UPDATE_INFO" "$APPDIR" "$NAME"
+)
+
+if [ ! -f "$OUT/$NAME.zsync" ]; then
+    echo "appimagetool didn't write $NAME.zsync" >&2
+    exit 1
+fi

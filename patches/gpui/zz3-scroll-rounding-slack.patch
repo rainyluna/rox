@@ -1,0 +1,40 @@
+Content within two device pixels of a scroll container's bounds doesn't scroll.
+
+Taffy rounds each node's location on its own but its size against its
+absolute position, and gpui sums the rounded locations, so a child's far
+edge can land a device pixel past its parent's even though the unrounded
+layout fits. The unrounded padding added to the content size adds up to
+another. The scroll max picked that up as real overflow, and a container
+sized to its content got a full-length scrollbar and a one-pixel wheel
+scroll. Whether it hits depends on the fractional offset of the container
+in the tree, so one panel's context menu can show it while another's with
+the same rows doesn't. A sweep of offsets, row heights and paddings at
+scale 2 measured 1 device pixel with integral padding and 1.6 with
+fractional padding.
+
+Diffed against the tree with every earlier patch applied.
+
+--- a/src/elements/div.rs	2006-07-23 19:21:28.000000000 -0600
++++ b/src/elements/div.rs	2026-10-01 17:15:13.558754807 -0600
+@@ -1744,8 +1744,20 @@
+             // high for the maximum scroll, we round the scroll max to 2 decimal
+             // places here.
+             let padded_content_size = self.content_size + padding_size;
++
++            // rox patch: Taffy rounds a node's location on its own but its size
++            // against its absolute position, and the padding above is unrounded,
++            // so content that fits can still land up to two device pixels past
++            // the bounds. That much overflow is rounding, not content.
++            let slack = px(2.) / window.scale_factor();
+             let scroll_max = (padded_content_size - bounds.size)
+-                .map(round_to_two_decimals)
++                .map(|overflow| {
++                    if overflow < slack {
++                        px(0.)
++                    } else {
++                        round_to_two_decimals(overflow)
++                    }
++                })
+                 .max(&Default::default());
+             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
+             // were removed or the bounds became larger).

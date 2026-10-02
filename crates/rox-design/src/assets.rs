@@ -67,6 +67,9 @@ pub mod icons {
     pub const FILE_TEXT: &str = "icons/file-text.svg";
     pub const DOWNLOAD: &str = "icons/download.svg";
     pub const UPLOAD: &str = "icons/upload.svg";
+    /// Scrobbling, which sends plays up to a service.
+    pub const CLOUD_UPLOAD: &str = "icons/cloud-upload.svg";
+    pub const CLOUD_OFF: &str = "icons/cloud-off.svg";
     pub const TRASH: &str = "icons/trash-2.svg";
     /// The stats window's clear, where a trash icon would read as deleting a row.
     pub const BROOM: &str = "icons/brush-cleaning.svg";
@@ -78,10 +81,19 @@ pub mod icons {
     pub const HEART_FILLED: &str = "icons/heart-filled.svg";
     pub const SLIDERS: &str = "icons/sliders-horizontal.svg";
     pub const RADIO: &str = "icons/radio.svg";
+    /// The Icecast stream. Not the radio icon, which is stations and
+    /// ordering by sound.
+    pub const RADIO_TOWER: &str = "icons/radio-tower.svg";
+    /// Only the icon picker offers this one.
+    pub const CAST: &str = "icons/cast.svg";
+    /// Station capture: the record dot.
+    pub const CIRCLE_DOT: &str = "icons/circle-dot.svg";
     pub const DATABASE: &str = "icons/database.svg";
     pub const CLOCK: &str = "icons/clock.svg";
     /// The tasks window. A clock would read as any of the time surfaces.
     pub const LIST_CHECKS: &str = "icons/list-checks.svg";
+    /// Only the icon picker offers this one, for a clear-queue button.
+    pub const LIST_X: &str = "icons/list-x.svg";
     /// The armed sleep timer, for the same reason.
     pub const BED: &str = "icons/bed.svg";
     pub const CALENDAR: &str = "icons/calendar.svg";
@@ -89,6 +101,8 @@ pub mod icons {
     pub const IMAGE: &str = "icons/image.svg";
     /// Only the icon picker offers this one.
     pub const WAND_SPARKLES: &str = "icons/wand-sparkles.svg";
+    /// Only the icon picker offers this one.
+    pub const SPARKLES: &str = "icons/sparkles.svg";
     pub const LINK: &str = "icons/link.svg";
     pub const PALETTE: &str = "icons/palette.svg";
     pub const CONTRAST: &str = "icons/contrast.svg";
@@ -108,6 +122,8 @@ pub mod icons {
     pub const ALERT: &str = "icons/triangle-alert.svg";
     pub const BUG: &str = "icons/bug.svg";
     pub const MESSAGES: &str = "icons/messages-square.svg";
+    /// Discord presence.
+    pub const GAMEPAD: &str = "icons/gamepad-2.svg";
     pub const HASH: &str = "icons/hash.svg";
     pub const LAYOUT_GRID: &str = "icons/layout-grid.svg";
     pub const GALLERY: &str = "icons/gallery-horizontal-end.svg";
@@ -147,6 +163,7 @@ pub mod icons {
     pub const LOCK: &str = "icons/lock.svg";
     pub const LOCK_OPEN: &str = "icons/lock-open.svg";
     pub const PIN: &str = "icons/pin.svg";
+    pub const PIN_OFF: &str = "icons/pin-off.svg";
     pub const ARROW_UP: &str = "icons/arrow-up.svg";
     pub const ARROW_DOWN: &str = "icons/arrow-down.svg";
     pub const ARROW_LEFT: &str = "icons/arrow-left.svg";
@@ -206,6 +223,8 @@ pub mod icons {
         FILE_TEXT,
         DOWNLOAD,
         UPLOAD,
+        CLOUD_UPLOAD,
+        CLOUD_OFF,
         TRASH,
         PENCIL,
         BOOKMARK,
@@ -215,14 +234,19 @@ pub mod icons {
         HEART_FILLED,
         SLIDERS,
         RADIO,
+        RADIO_TOWER,
+        CAST,
+        CIRCLE_DOT,
         DATABASE,
         CLOCK,
         LIST_CHECKS,
+        LIST_X,
         BED,
         CALENDAR,
         TAG,
         IMAGE,
         WAND_SPARKLES,
+        SPARKLES,
         LINK,
         PALETTE,
         CONTRAST,
@@ -236,6 +260,7 @@ pub mod icons {
         ALERT,
         BUG,
         MESSAGES,
+        GAMEPAD,
         HASH,
         LAYOUT_GRID,
         GALLERY,
@@ -261,6 +286,7 @@ pub mod icons {
         LOCK,
         LOCK_OPEN,
         PIN,
+        PIN_OFF,
         // The chrome, sunk to the bottom because a button rarely wants one.
         CHEVRON_UP,
         CHEVRON_DOWN,

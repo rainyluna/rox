@@ -36,8 +36,8 @@ impl SettingsWindow {
                     rox_i18n::t!("settings-common-copy"),
                     icons::COPY,
                     false,
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(snippet.clone()));
+                    move |_, window, cx| {
+                        rox_panel_api::toast::copy(snippet.clone(), window, cx);
                     },
                 )
                 .into_any_element()

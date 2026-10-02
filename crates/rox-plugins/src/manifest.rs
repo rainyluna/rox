@@ -104,7 +104,45 @@ pub struct SourceCap {
     /// opens or copies on a click.
     #[serde(default)]
     pub links: bool,
+    /// Answers `source.action`: things the plugin does with its items,
+    /// listed in rox's own menus.
+    #[serde(default)]
+    pub actions: Vec<ActionDecl>,
 }
+
+/// One entry a plugin adds to rox's menus. Nothing in it runs in rox:
+/// picking it calls `source.action`, and the work happens in the plugin.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ActionDecl {
+    pub id: String,
+    pub label: String,
+    /// Where it's offered: `track`, `node`, `source` (no item). A name this
+    /// rox doesn't know is skipped, so a later target doesn't refuse the
+    /// plugin.
+    #[serde(default)]
+    pub on: Vec<String>,
+    /// The choices rox asks for before the call, as a JSON Schema object in
+    /// the config page's subset. Null asks nothing.
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+impl ActionDecl {
+    pub fn offered_on(&self, target: &str) -> bool {
+        self.on.iter().any(|on| on == target)
+    }
+
+    /// `(key, schema)` for each param, in key order as serde_json keeps it.
+    pub fn param_fields(&self) -> Vec<(String, serde_json::Value)> {
+        self.params["properties"]
+            .as_object()
+            .map(|props| props.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// A menu with more than this many of one plugin's entries stops being a menu.
+pub const MAX_ACTIONS: usize = 16;
 
 /// A preset of a core panel kind, listed under the plugin in Add Panel.
 /// Nothing in it executes: it's the same dump a saved panel preset holds.
@@ -170,8 +208,50 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         ));
     }
     check_panels(&manifest)?;
+    check_actions(&manifest)?;
 
     Ok(manifest)
+}
+
+fn check_actions(manifest: &Manifest) -> Result<(), String> {
+    let Some(source) = &manifest.capabilities.source else {
+        return Ok(());
+    };
+
+    if source.actions.len() > MAX_ACTIONS {
+        return Err(format!("{FILE}: more than {MAX_ACTIONS} actions"));
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    for action in &source.actions {
+        let refuse = |why: &str| Err(format!("{FILE}: action {:?} {why}", action.id));
+
+        if action.id.is_empty() || action.id.len() > 64 {
+            return Err(format!("{FILE}: an action's id is empty or over 64 bytes"));
+        }
+        if !ids.insert(action.id.as_str()) {
+            return refuse("is declared twice");
+        }
+        if action.label.trim().is_empty() {
+            return refuse("has no label");
+        }
+        if action.on.is_empty() {
+            return refuse("is offered nowhere; `on` is empty");
+        }
+
+        let params_ok = match &action.params {
+            serde_json::Value::Null => true,
+            serde_json::Value::Object(schema) => schema
+                .get("properties")
+                .is_none_or(|props| props.is_object()),
+            _ => false,
+        };
+        if !params_ok {
+            return refuse("has params that aren't a JSON Schema object");
+        }
+    }
+
+    Ok(())
 }
 
 /// The shape a declared panel can take. Whether its kind exists is the
@@ -589,8 +669,56 @@ mod tests {
                 icon: String::new(),
                 radio: false,
                 links: false,
+                actions: Vec::new(),
             })
         );
+    }
+
+    fn with_actions(actions: &str) -> String {
+        script_manifest("").replace(
+            r#""scrobble": false"#,
+            &format!(r#""scrobble": false, "actions": {actions}"#),
+        )
+    }
+
+    #[test]
+    fn actions_parse_with_their_params() {
+        let manifest = parse(&with_actions(
+            r#"[{ "id": "export", "label": "Export WAV", "on": ["track", "node", "later"],
+                  "params": { "type": "object", "properties": {
+                      "seconds": { "type": "integer" }, "loud": { "type": "boolean" } } } }]"#,
+        ))
+        .expect("a declared action loads");
+
+        let action = &manifest.capabilities.source.unwrap().actions[0];
+        assert!(action.offered_on("track") && action.offered_on("node"));
+        assert!(!action.offered_on("source"));
+
+        let mut fields: Vec<String> = action.param_fields().into_iter().map(|f| f.0).collect();
+        fields.sort();
+        assert_eq!(fields, ["loud", "seconds"]);
+    }
+
+    #[test]
+    fn a_broken_action_refuses_the_plugin() {
+        let cases = [
+            (r#"[{ "id": "", "label": "X", "on": ["track"] }]"#, "id"),
+            (r#"[{ "id": "a", "label": " ", "on": ["track"] }]"#, "label"),
+            (r#"[{ "id": "a", "label": "X", "on": [] }]"#, "nowhere"),
+            (
+                r#"[{ "id": "a", "label": "X", "on": ["track"] }, { "id": "a", "label": "Y", "on": ["node"] }]"#,
+                "twice",
+            ),
+            (
+                r#"[{ "id": "a", "label": "X", "on": ["track"], "params": [1] }]"#,
+                "JSON Schema",
+            ),
+        ];
+
+        for (actions, why) in cases {
+            let err = parse(&with_actions(actions)).unwrap_err();
+            assert!(err.contains(why), "{actions}: {err}");
+        }
     }
 
     #[test]

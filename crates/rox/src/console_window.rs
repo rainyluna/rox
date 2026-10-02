@@ -7,9 +7,9 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Div, EntityId, Global, MouseButton, MouseDownEvent,
-    Pixels, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Window, WindowHandle, div, point,
-    prelude::*, px, size,
+    App, Bounds, Context, Div, EntityId, Global, MouseButton, MouseDownEvent, Pixels, Rgba,
+    ScrollHandle, ScrollWheelEvent, SharedString, Window, WindowHandle, div, point, prelude::*, px,
+    size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::Scrollbar;
@@ -264,8 +264,8 @@ impl ConsoleWindow {
                 rox_i18n::t!("console-copy"),
                 icons::COPY,
                 false,
-                cx.listener(|this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(this.as_text()));
+                cx.listener(|this, _, window, cx| {
+                    rox_panel_api::toast::copy(this.as_text(), window, cx);
                 }),
             ))
             .child(settings_ui::small_button(

@@ -17,6 +17,9 @@ What this one adds over tones:
   orders the Archive applies (`views`).
 - A line over the roots with a link (`notice`, `notice-link`).
 - A radio (`source.radio`) and links to each item's page (`source.link`).
+- An action, Download Original, that saves a song's or a release's original
+  upload as a job rox polls for progress (`source.action`, `source.job`,
+  `source.cancel`).
 - Audio streamed from a web server with range requests on a kept-alive
   connection, so a seek in rox is a seek on the server.
 
@@ -30,6 +33,7 @@ import functools
 import hashlib
 import http.client
 import json
+import os
 import re
 import sys
 import threading
@@ -116,6 +120,7 @@ def failed(message):
 
 out_lock = threading.Lock()
 features = set()
+place = {"data_dir": None}
 
 # Fan-out inside one request (the home's shelves, a radio batch) runs here,
 # apart from the request pool, so a request waiting on it never starves it.
@@ -407,6 +412,7 @@ def hello(params):
     if isinstance(listed, list):
         features.update(f for f in listed if isinstance(f, str))
 
+    place["data_dir"] = params.get("data_dir")
     log(f"hello from rox, api {params.get('api')}, features {sorted(features)}")
     return {"name": "Internet Archive", "version": VERSION, "api": API}
 
@@ -825,6 +831,140 @@ def link(params):
     return {"url": f"{DETAILS_URL}{item}/{urllib.parse.quote(name)}"}
 
 
+# ── Download Original ──
+
+
+downloads = {}
+downloads_lock = threading.Lock()
+download_ids = iter(range(1, 1 << 62))
+
+# Bytes per read while downloading, so a Stop lands within one.
+CHUNK = 256 * 1024
+
+
+def originals(item, names=None):
+    """The original upload behind each of the release's songs, as (item,
+    name, size). `names` keeps only the songs whose playable file is named."""
+    files = {f["name"]: f for f in metadata(item).get("files") or []}
+
+    found = []
+    for _, best in songs(item):
+        if names is not None and best["name"] not in names:
+            continue
+
+        root = best["name"] if best.get("source") == "original" else best.get("original", best["name"])
+        original = files.get(root, best)
+        found.append((item, original["name"], int(original.get("size") or 0)))
+
+    return found
+
+
+def download_folder():
+    # Never the plugin's own folder: a write there changes its hash and
+    # switches it off. hello hands over one that's ours.
+    if not place["data_dir"]:
+        raise failed("rox didn't say where this plugin may write")
+
+    folder = os.path.abspath(os.path.join(place["data_dir"], "downloads"))
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def action(params):
+    if params.get("action") != "download":
+        raise bad_params(f"no action {params.get('action')!r}")
+
+    # Tracks are "<item>/<file>" and releases are "item:<item>"; a label or a
+    # genre is too big to download whole.
+    names_by_item = {}
+    for key in params.get("items") or []:
+        kind, _, rest = str(key).partition(":")
+        if kind == "item" and ITEM_RE.match(rest):
+            names_by_item[rest] = None
+        elif ":" not in str(key):
+            item, name = split_key(str(key))
+            if names_by_item.get(item, set()) is not None:
+                names_by_item.setdefault(item, set()).add(name)
+        else:
+            raise bad_params("only a song or a release downloads")
+
+    files = [f for item, names in names_by_item.items() for f in originals(item, names)]
+    if not files:
+        raise failed("nothing here to download")
+
+    folder = download_folder()
+    reveal = os.path.join(folder, files[0][0]) if len(names_by_item) == 1 else folder
+
+    job = {"done": 0, "total": sum(size for _, _, size in files), "text": "", "stop": False, "end": None}
+    with downloads_lock:
+        job_id = f"d{next(download_ids)}"
+        downloads[job_id] = job
+
+    threading.Thread(target=download, args=(job, files, folder, reveal), daemon=True).start()
+    return {"job": job_id}
+
+
+def download(job, files, folder, reveal):
+    try:
+        for item, name, _ in files:
+            job["text"] = name.rsplit("/", 1)[-1]
+            target = os.path.join(folder, item, *name.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+
+            if not fetch_to(job, DOWNLOAD_URL + item + "/" + urllib.parse.quote(name), target):
+                job["end"] = {"error": "stopped"}
+                return
+    except OSError as e:
+        job["end"] = {"error": f"the download failed: {e}"}
+        return
+
+    noun = "file" if len(files) == 1 else "files"
+    job["end"] = {"finished": True, "message": f"Downloaded {len(files)} {noun}", "reveal": reveal}
+
+
+def fetch_to(job, url, target):
+    """Writes beside the target and renames at the end, so a stopped or
+    failed download never leaves a file that looks whole."""
+    part = target + ".part"
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response, open(part, "wb") as out:
+        while chunk := response.read(CHUNK):
+            if job["stop"]:
+                out.close()
+                os.remove(part)
+                return False
+
+            out.write(chunk)
+            job["done"] += len(chunk)
+
+    os.replace(part, target)
+    return True
+
+
+def job_state(params):
+    with downloads_lock:
+        job = downloads.get(params.get("job"))
+    if job is None:
+        raise failed(f"no job {params.get('job')!r}")
+
+    answer = {"done": job["done"], "total": job["total"], "text": job["text"]}
+    if job["end"]:
+        answer.update(job["end"])
+        with downloads_lock:
+            downloads.pop(params.get("job"), None)
+
+    return answer
+
+
+def cancel(params):
+    with downloads_lock:
+        job = downloads.get(params.get("job"))
+    if job is not None:
+        job["stop"] = True
+    return None
+
+
 METHODS = {
     "hello": hello,
     "source.browse": browse,
@@ -836,6 +976,9 @@ METHODS = {
     "source.cover": cover,
     "source.radio": radio,
     "source.link": link,
+    "source.action": action,
+    "source.job": job_state,
+    "source.cancel": cancel,
 }
 
 

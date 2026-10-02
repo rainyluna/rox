@@ -295,6 +295,10 @@ impl DiscordPresence {
         }
     }
 
+    pub fn enabled(&self) -> bool {
+        self.config.enabled
+    }
+
     pub fn reload_config(&mut self, cx: &mut Context<Self>) {
         self.config = Settings::load().accounts.discord;
         self.first_line = line(&self.config.first_line, DEFAULT_PRESENCE_FIRST_LINE);

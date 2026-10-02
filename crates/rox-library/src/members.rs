@@ -13,9 +13,10 @@
 //! Writes here refuse local files, stations and Subsonic servers outright,
 //! and every statement is scoped to the source it was handed.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cue::{self, TrackKey};
 use crate::replaygain::ReplayGain;
@@ -241,6 +242,101 @@ pub fn saved_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
     ids.collect()
 }
 
+/// What keeps a set of rows in the library, for taking them back out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holds {
+    /// `(source, path)` of each row the user added on its own.
+    pub saved: Vec<(String, String)>,
+    /// `(source, collection)` of each kept collection holding any of the
+    /// rows. [`PICKED`] is never one: a pick doesn't keep a row.
+    pub kept: Vec<(String, String)>,
+}
+
+impl Holds {
+    pub fn is_empty(&self) -> bool {
+        self.saved.is_empty() && self.kept.is_empty()
+    }
+}
+
+/// The saved rows among `ids` and the kept collections holding any of them,
+/// each once, in the order the ids first reach them. Rows of other source
+/// shapes hold nothing here and drop out.
+pub fn holds(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Holds> {
+    let mut row = conn.prepare_cached(
+        "SELECT t.source, t.path,
+                EXISTS (SELECT 1 FROM source_saved s
+                         WHERE s.source = t.source AND s.path = t.path)
+           FROM tracks t WHERE t.id = ?1",
+    )?;
+    let mut collections = conn.prepare_cached(
+        "SELECT collection FROM source_members
+          WHERE source = ?1 AND path = ?2 AND collection <> ''
+          ORDER BY collection",
+    )?;
+
+    let mut holds = Holds::default();
+    let (mut saved_seen, mut kept_seen) = (HashSet::new(), HashSet::new());
+
+    for &id in ids {
+        let found: Option<(String, String, bool)> = row
+            .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let Some((source, path, saved)) = found else {
+            continue;
+        };
+        if cue::Origin::of(&source) != cue::Origin::Plugin {
+            continue;
+        }
+
+        let kept = collections
+            .query_map(params![source, path], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for collection in kept {
+            let pair = (source.clone(), collection);
+            if kept_seen.insert(pair.clone()) {
+                holds.kept.push(pair);
+            }
+        }
+
+        let pair = (source, path);
+        if saved && saved_seen.insert(pair.clone()) {
+            holds.saved.push(pair);
+        }
+    }
+
+    Ok(holds)
+}
+
+/// How many of a source's rows are in the library, and how many of those
+/// the user added on their own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InLibrary {
+    /// Rows a kept collection holds or the user saved. Picked-only rows
+    /// stay out of the library, so they don't count.
+    pub tracks: usize,
+    pub saved: usize,
+}
+
+pub fn in_library(conn: &Connection, source: &str) -> rusqlite::Result<InLibrary> {
+    conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(saved), 0) FROM (
+             SELECT EXISTS (SELECT 1 FROM source_saved s
+                             WHERE s.source = t.source AND s.path = t.path) AS saved,
+                    EXISTS (SELECT 1 FROM source_members m
+                             WHERE m.source = t.source AND m.path = t.path
+                               AND m.collection <> '') AS kept
+               FROM tracks t WHERE t.source = ?1)
+          WHERE saved OR kept",
+        [source],
+        |r| {
+            Ok(InLibrary {
+                tracks: r.get::<_, i64>(0)? as usize,
+                saved: r.get::<_, i64>(1)? as usize,
+            })
+        },
+    )
+}
+
 /// Prune picked-only rows neither picked nor played since `cutoff` (unix
 /// seconds), leaving the ids in `keep` alone: the saved queue restores by
 /// row id. A bookmarked row stays, since a mark is the user keeping it.
@@ -429,6 +525,26 @@ pub fn list(conn: &Connection, source: &str, collection: &str) -> rusqlite::Resu
 
     let id = cue::source_id(source);
     let rows = stmt.query_map(params![source, collection], |r| {
+        Ok(TrackKey {
+            source: id.clone(),
+            path: PathBuf::from(r.get::<_, String>(0)?),
+            sub: 0,
+        })
+    })?;
+
+    rows.collect()
+}
+
+/// The source's tracks the user added one at a time, the newest first.
+pub fn saved(conn: &Connection, source: &str) -> rusqlite::Result<Vec<TrackKey>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM source_saved
+          WHERE source = ?1
+          ORDER BY saved_at DESC, path",
+    )?;
+
+    let id = cue::source_id(source);
+    let rows = stmt.query_map([source], |r| {
         Ok(TrackKey {
             source: id.clone(),
             path: PathBuf::from(r.get::<_, String>(0)?),
@@ -632,6 +748,19 @@ mod tests {
 
         assert_eq!(picked_only_ids(&conn).unwrap(), vec![c]);
         assert_eq!(saved_ids(&conn).unwrap(), vec![a]);
+    }
+
+    #[test]
+    fn saved_lists_only_this_sources_added_tracks_newest_first() {
+        let mut conn = store();
+        save(&mut conn, DEMO, &[track("a", "A")]).unwrap();
+        conn.execute("UPDATE source_saved SET saved_at = 1", [])
+            .unwrap();
+        save(&mut conn, DEMO, &[track("b", "B")]).unwrap();
+        set_collection(&mut conn, DEMO, "liked", &[track("c", "C")]).unwrap();
+        save(&mut conn, "plugin:other", &[track("z", "Z")]).unwrap();
+
+        assert_eq!(paths(&saved(&conn, DEMO).unwrap()), ["b", "a"]);
     }
 
     #[test]
@@ -943,5 +1072,83 @@ mod tests {
 
         assert_eq!(rows(&conn, stations::SOURCE), ["a"], "the station stands");
         assert!(rows(&conn, cue::LOCAL).is_empty());
+    }
+
+    #[test]
+    fn holds_name_the_saves_and_kept_collections_once_and_skip_the_rest() {
+        let mut conn = store();
+        pick(&mut conn, DEMO, &[track("picked", "Picked")]).unwrap();
+        save(&mut conn, DEMO, &[track("a", "A"), track("both", "Both")]).unwrap();
+        set_collection(
+            &mut conn,
+            DEMO,
+            "liked",
+            &[track("both", "Both"), track("b", "B")],
+        )
+        .unwrap();
+        set_collection(&mut conn, DEMO, "mix", &[track("b", "B")]).unwrap();
+        stations::put(
+            &mut conn,
+            &[stations::Station {
+                url: "s".into(),
+                name: "Station".into(),
+                genre: String::new(),
+            }],
+        )
+        .unwrap();
+        let station: i64 = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE source = ?1",
+                [stations::SOURCE],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let (a, b, both, picked) = (
+            id_of(&conn, "a"),
+            id_of(&conn, "b"),
+            id_of(&conn, "both"),
+            id_of(&conn, "picked"),
+        );
+        let held = holds(&conn, &[a, both, b, a, picked, station, -1]).unwrap();
+
+        let demo = |path: &str| (DEMO.to_string(), path.to_string());
+        assert_eq!(held.saved, [demo("a"), demo("both")]);
+        assert_eq!(held.kept, [demo("liked"), demo("mix")]);
+
+        assert!(holds(&conn, &[picked, station]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn in_library_counts_what_browses_and_leaves_picks_out() {
+        let mut conn = store();
+        pick(
+            &mut conn,
+            DEMO,
+            &[track("picked", "Picked"), track("a", "A")],
+        )
+        .unwrap();
+        save(&mut conn, DEMO, &[track("a", "A"), track("both", "Both")]).unwrap();
+        set_collection(
+            &mut conn,
+            DEMO,
+            "liked",
+            &[track("both", "Both"), track("b", "B")],
+        )
+        .unwrap();
+        set_collection(&mut conn, DEMO, "mix", &[track("b", "B")]).unwrap();
+        save(&mut conn, "plugin:other", &[track("x", "X")]).unwrap();
+
+        assert_eq!(
+            in_library(&conn, DEMO).unwrap(),
+            InLibrary {
+                tracks: 3,
+                saved: 2
+            }
+        );
+        assert_eq!(
+            in_library(&conn, "plugin:none").unwrap(),
+            InLibrary::default()
+        );
     }
 }
