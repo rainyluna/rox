@@ -15,6 +15,10 @@ fn fixture() -> PathBuf {
 
 /// None, with a line saying why, when this machine can't run the fixture.
 fn host(tag: &str, config: Value) -> Option<Host> {
+    host_in(tag, config, "")
+}
+
+fn host_in(tag: &str, config: Value, locale: &str) -> Option<Host> {
     let dir = fixture();
     let manifest = manifest::load(&dir).expect("the fixture's manifest loads");
 
@@ -27,6 +31,7 @@ fn host(tag: &str, config: Value) -> Option<Host> {
         std::env::temp_dir().join(format!("rox-plugins-echo-{tag}-{}", std::process::id()));
     let mut config = HostConfig::new(dir, manifest, config, data_dir);
     config.backoff = [Duration::ZERO; 4];
+    config.locale = locale.to_string();
 
     Some(Host::new(config))
 }
@@ -39,6 +44,22 @@ fn pattern(offset: u64, len: usize) -> Vec<u8> {
     (0..len as u64)
         .map(|i| ((offset + i) % 251) as u8)
         .collect()
+}
+
+#[test]
+fn hello_carries_the_locale_only_when_there_is_one() {
+    let said = |locale: &str| {
+        let host = host_in(&format!("locale-{locale}"), json!({}), locale)?;
+        Some(host.call("echo.hello", json!({}), listing(&host)).unwrap())
+    };
+
+    let Some(tagged) = said("de-DE") else {
+        return;
+    };
+    assert_eq!(tagged["locale"], "de-DE");
+
+    let untagged = said("").unwrap();
+    assert!(untagged.get("locale").is_none(), "{untagged}");
 }
 
 #[test]

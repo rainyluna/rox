@@ -17,6 +17,7 @@ use rox_library::lyrics::Subject;
 use rox_services::backdrop::NowPlayingArt;
 use rox_services::catalog::Library;
 use rox_services::lyrics::LyricsTarget;
+use rox_services::plugins::Target;
 
 use crate::panel::AppState;
 use crate::panel::shader::edit::ShaderEditTarget;
@@ -67,6 +68,9 @@ pub struct Openers {
     /// A job began that the Tasks window lists, like a plugin action's, so
     /// the windows keep repainting its progress.
     pub task_started: fn(&mut App),
+    /// Open a plugin's node in an External Sources panel on that source,
+    /// adding one when none is open: Go to from a menu outside the panel.
+    pub go_to_source: fn(AppState, String, Target, &mut Window, &mut App),
 }
 
 static OPENERS: OnceLock<Openers> = OnceLock::new();
@@ -271,5 +275,17 @@ pub fn confirm_close_locked(
 pub fn task_started(cx: &mut App) {
     if let Some(openers) = openers("the tasks repaint") {
         (openers.task_started)(cx);
+    }
+}
+
+pub fn go_to_source(
+    state: AppState,
+    source: String,
+    target: Target,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(openers) = openers("Go to") {
+        (openers.go_to_source)(state, source, target, window, cx);
     }
 }

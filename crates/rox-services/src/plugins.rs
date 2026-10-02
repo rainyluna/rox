@@ -19,6 +19,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, Global, Task};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use rox_core::settings::{self, PluginRecord, Settings, ShuffleMode, SyncedCollection};
@@ -68,17 +69,21 @@ pub struct Page {
     /// Where each track's album and artists open, by track key. Keyed rather
     /// than lined up, so it needs no care when rows sort or drop out.
     pub go_to: HashMap<String, GoTo>,
+    /// Each row's flags, by track key or node id, for the rows whose plugin
+    /// knows them. A row missing here can take every action.
+    pub flags: HashMap<String, Vec<String>>,
 }
 
-/// The nodes Go to opens for one track.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The nodes Go to opens for one track. Serialized, it's what the library
+/// keeps beside a plugin row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoTo {
     pub album: Option<Target>,
     pub artists: Vec<Target>,
 }
 
 /// A node Go to opens, with what a place needs to show it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
     pub id: String,
     pub title: String,
@@ -570,12 +575,15 @@ fn reconcile(wanted: HashMap<String, (Loaded, PluginRecord)>) -> (Vec<Host>, Vec
         };
 
         log::info!("{source}: loaded, folder hash {}", folder.hash);
-        let config = HostConfig::new(
+        let mut config = HostConfig::new(
             folder.dir.clone(),
             manifest,
             record.config.clone(),
             settings::plugin_data_dir(&record.id),
         );
+        // Taken at start: a language switch reaches a running plugin the next
+        // time it starts, rather than cutting off what it's playing.
+        config.locale = rox_i18n::locale().to_string();
         table.insert(
             source.clone(),
             Arc::new(Running {
@@ -976,13 +984,95 @@ pub fn changes(approved: &Value, now: &Value) -> Vec<Change> {
     found
 }
 
-/// The engine's end of a plugin stream.
-struct Reader(Stream);
+/// What the engine reads a plugin track through. Reading a track to its end
+/// can change what its row is, like a copy the plugin kept as it played, so
+/// rox asks for the row's flags then, and once more after it closes.
+struct Reader {
+    stream: Option<Stream>,
+    host: Host,
+    source: String,
+    key: String,
+    asked: AtomicBool,
+}
+
+/// How long after a close rox asks again, for a copy the plugin finishes
+/// after the stream is gone.
+const FLAGS_AFTER_CLOSE: Duration = Duration::from_secs(10);
+
+impl Reader {
+    fn new(stream: Stream, host: Host, source: &str, key: &str) -> Reader {
+        Reader {
+            stream: Some(stream),
+            host,
+            source: source.to_string(),
+            key: key.to_string(),
+            asked: AtomicBool::new(false),
+        }
+    }
+
+    fn ask_flags(&self, after: Duration) {
+        if !asks_flags(&self.host) {
+            return;
+        }
+
+        let (host, source, key) = (self.host.clone(), self.source.clone(), self.key.clone());
+        let spawned = std::thread::Builder::new()
+            .name("plugin-row-flags".into())
+            .spawn(move || {
+                std::thread::sleep(after);
+
+                let params = json!({ "items": [key] });
+                let answer = host
+                    .call("source.flags", params, host.timeouts().listing)
+                    .and_then(wire::decode::<wire::FlagsAnswer>);
+                match answer {
+                    Ok(answer) => crate::plugin_actions::report(&source, answer.flags),
+                    Err(e) => log::debug!("{source}: flags for {key}: {e}"),
+                }
+            });
+
+        if let Err(e) = spawned {
+            log::warn!(
+                "{}: couldn't ask for {}'s flags: {e}",
+                self.source,
+                self.key
+            );
+        }
+    }
+}
 
 impl ReadAt for Reader {
     fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-        self.0.read_at(offset, len)
+        let Some(stream) = &self.stream else {
+            return Ok(Vec::new());
+        };
+        let data = stream.read_at(offset, len)?;
+
+        let end = offset + data.len() as u64;
+        let whole = stream.length.is_some_and(|length| end >= length);
+        if whole && !self.asked.swap(true, Ordering::Relaxed) {
+            self.ask_flags(Duration::ZERO);
+        }
+
+        Ok(data)
     }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        // The close goes out first, so the plugin knows the track ended.
+        drop(self.stream.take());
+        self.ask_flags(FLAGS_AFTER_CLOSE);
+    }
+}
+
+/// Whether the plugin gates any action on a flag, the only reason to ask.
+fn asks_flags(host: &Host) -> bool {
+    host.manifest()
+        .capabilities
+        .source
+        .as_ref()
+        .is_some_and(|cap| cap.actions.iter().any(|action| !action.when.is_empty()))
 }
 
 /// How the engine's opens were answered this run, for the prototype's
@@ -1052,7 +1142,12 @@ fn open(stream: &PluginStream) -> Result<Opened, String> {
         seekable: opened.seekable,
         buffer_whole: opened.buffer_whole,
         duration_ms: opened.duration_ms,
-        reader: Box::new(Reader(opened)),
+        reader: Box::new(Reader::new(
+            opened,
+            host.clone(),
+            &stream.source,
+            &stream.key,
+        )),
     })
 }
 
@@ -1198,7 +1293,13 @@ fn follow(player: Entity<Player>, cx: &mut App) {
     .detach();
 }
 
-fn track(wire: wire::Track) -> PluginTrack {
+fn track(mut wire: wire::Track) -> PluginTrack {
+    let go_to = wire
+        .go_to
+        .take()
+        .map(|nodes| go_to_json(&go_to_of(*nodes)))
+        .unwrap_or_default();
+
     PluginTrack {
         key: wire.key,
         title: wire.title,
@@ -1213,32 +1314,43 @@ fn track(wire: wire::Track) -> PluginTrack {
         codec: wire.codec,
         bitrate_kbps: wire.bitrate_kbps,
         live: wire.live,
+        go_to,
     }
 }
 
 fn page(wire: wire::Page) -> Page {
     let mut go_to = HashMap::new();
+    let mut flags = HashMap::new();
 
     let (entries, values) = wire
         .entries
         .into_iter()
         .map(|entry| match entry {
-            wire::Entry::Node(node) => (
-                Entry::Node {
-                    id: node.id,
-                    title: node.title,
-                    subtitle: node.subtitle,
-                    collection: node.collection,
-                    kind: node.kind,
-                    art: node.art,
-                    home: node.home,
-                },
-                values_of(node.values),
-            ),
+            wire::Entry::Node(mut node) => {
+                if let Some(known) = node.flags.take() {
+                    flags.insert(node.id.clone(), known);
+                }
+
+                (
+                    Entry::Node {
+                        id: node.id,
+                        title: node.title,
+                        subtitle: node.subtitle,
+                        collection: node.collection,
+                        kind: node.kind,
+                        art: node.art,
+                        home: node.home,
+                    },
+                    values_of(node.values),
+                )
+            }
             wire::Entry::Track(mut t) => {
                 let values = values_of(std::mem::take(&mut t.values));
-                if let Some(nodes) = t.go_to.take() {
-                    go_to.insert(t.key.clone(), go_to_of(*nodes));
+                if let Some(known) = t.flags.take() {
+                    flags.insert(t.key.clone(), known);
+                }
+                if let Some(nodes) = &t.go_to {
+                    go_to.insert(t.key.clone(), go_to_of((**nodes).clone()));
                 }
 
                 (Entry::Track(track(t)), values)
@@ -1284,7 +1396,43 @@ fn page(wire: wire::Page) -> Page {
             .collect(),
         values,
         go_to,
+        flags,
     }
+}
+
+fn go_to_json(go_to: &GoTo) -> String {
+    serde_json::to_string(go_to).unwrap_or_default()
+}
+
+/// Stores Go to a listing showed for rows already in the library, so rows
+/// that became rows before Go to was kept get it too. Blocking.
+pub fn keep_go_to(db_path: &Path, source: &str, listed: &HashMap<String, GoTo>) {
+    let found: Vec<(String, String)> = listed
+        .iter()
+        .map(|(key, go_to)| (key.clone(), go_to_json(go_to)))
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+
+    let wrote =
+        store::open(db_path).and_then(|mut conn| members::keep_go_to(&mut conn, source, &found));
+    if let Err(e) = wrote {
+        log::warn!("{source}: keeping Go to from a listing: {e}");
+    }
+}
+
+/// The Go to the library keeps for one plugin row, or None.
+pub fn stored_go_to(db_path: &Path, source: &str, key: &str) -> Option<GoTo> {
+    let conn = store::open(db_path).ok()?;
+    let mut stored = members::go_to(&conn, source, &[key.to_string()]).ok()?;
+
+    go_to_from(&stored.remove(key)?)
+}
+
+/// Go to as the library keeps it, or None for what doesn't parse.
+pub fn go_to_from(stored: &str) -> Option<GoTo> {
+    serde_json::from_str(stored).ok()
 }
 
 fn go_to_of(wire: wire::GoTo) -> GoTo {
@@ -1309,9 +1457,13 @@ fn listing(
         let host = host_for(&source)?;
 
         let timeout = host.timeouts().listing;
-        host.call(method, params, timeout)
+        let listed = host
+            .call(method, params, timeout)
             .and_then(wire::decode::<wire::Page>)
-            .map(page)
+            .map(page)?;
+
+        crate::plugin_actions::note(&source, &listed.flags);
+        Ok(listed)
     })
 }
 
@@ -1732,6 +1884,17 @@ pub fn play_similar_to_playing(
     cx: &mut App,
 ) -> Option<Task<Result<(), String>>> {
     let key = player.read(cx).now_playing()?.key;
+    play_similar_to_key(library, player, &key, cx)
+}
+
+/// Play Similar from a library row, when it's a plugin's and the plugin has
+/// a radio. None otherwise.
+pub fn play_similar_to_key(
+    library: Entity<Library>,
+    player: Entity<Player>,
+    key: &TrackKey,
+    cx: &mut App,
+) -> Option<Task<Result<(), String>>> {
     if key.origin() != rox_library::cue::Origin::Plugin {
         return None;
     }
@@ -1766,6 +1929,26 @@ pub fn reload_library(cx: &mut App) {
     library.update(cx, |library, cx| library.reload_projection(cx));
 }
 
+/// The asset path of an action's icon, when its plugin ships one.
+pub fn action_icon(source: &str, action: &str) -> Option<gpui::SharedString> {
+    let id = source.strip_prefix(PLUGIN_PREFIX)?;
+    let folders = FOLDERS.read().ok()?;
+    let folder = folders
+        .iter()
+        .find(|folder| folder.id == id && folder.runs())?;
+    let (_, bytes) = folder
+        .action_icons
+        .iter()
+        .find(|(name, _)| name == action)?;
+
+    // Keyed apart from the source icon and every other action's.
+    Some(rox_design::assets::plugin_icon(
+        &format!("{id}.action.{action}"),
+        &folder.hash,
+        bytes,
+    ))
+}
+
 /// The asset path of a loaded plugin's icon, when it ships one.
 pub fn icon(source: &str) -> Option<gpui::SharedString> {
     let id = source.strip_prefix(PLUGIN_PREFIX)?;
@@ -1776,6 +1959,39 @@ pub fn icon(source: &str) -> Option<gpui::SharedString> {
     let bytes = folder.icon.as_deref()?;
 
     Some(rox_design::assets::plugin_icon(id, &folder.hash, bytes))
+}
+
+/// Asks the plugin what each of its library rows is right now, so their
+/// menus offer only the actions that apply (ADR 30, amended 2026-10-02).
+/// Only a plugin with a `when` on some action is asked. One that doesn't
+/// answer `source.flags` leaves its rows unknown, which offers every action.
+fn refresh_flags(host: &Host, db_path: &Path, source: &str) {
+    if !asks_flags(host) {
+        return;
+    }
+
+    let keys = match store::open(db_path).and_then(|conn| members::keys(&conn, source)) {
+        Ok(keys) => keys,
+        Err(e) => {
+            log::warn!("{source}: reading rows for their flags: {e}");
+            return;
+        }
+    };
+
+    for chunk in keys.chunks(wire::MAX_ENTRIES) {
+        let params = json!({ "items": chunk });
+        let answer = host
+            .call("source.flags", params, host.timeouts().listing)
+            .and_then(wire::decode::<wire::FlagsAnswer>);
+
+        match answer {
+            Ok(answer) => crate::plugin_actions::note(source, &answer.flags),
+            Err(e) => {
+                log::info!("{source}: no flags for its library rows: {e}");
+                return;
+            }
+        }
+    }
 }
 
 /// Every page of one collection. None when the plugin says nothing changed
@@ -1827,7 +2043,16 @@ fn sync_collection(
     synced: &SyncedCollection,
 ) -> Result<Option<usize>, String> {
     let began = Instant::now();
-    let Some((tracks, token)) = fetch_collection(host, &synced.id, &synced.token)? else {
+
+    let resync = store::open(db_path)
+        .and_then(|conn| members::needs_resync(&conn, source, &synced.id))
+        .unwrap_or(false);
+    let token = match resync {
+        true => "",
+        false => synced.token.as_str(),
+    };
+
+    let Some((tracks, token)) = fetch_collection(host, &synced.id, token)? else {
         log::info!("{source}: {} unchanged", synced.id);
         return Ok(None);
     };
@@ -1913,11 +2138,11 @@ fn write_if<T: Send + 'static>(
 }
 
 /// Turns a collection's sync on or off. Answers the rows it now holds.
+/// `collection` carries the node as listed; its token is ignored.
 pub fn set_synced(
     library: Entity<Library>,
     source: &str,
-    node: &str,
-    title: &str,
+    collection: SyncedCollection,
     on: bool,
     cx: &mut App,
 ) -> Task<Result<usize, String>> {
@@ -1936,9 +2161,8 @@ pub fn set_synced(
     };
 
     let collection = SyncedCollection {
-        id: node.to_string(),
-        title: title.to_string(),
         token: String::new(),
+        ..collection
     };
     let stored = collection.clone();
     Settings::update(move |s| {
@@ -1956,7 +2180,9 @@ pub fn set_synced(
     let source = source.to_string();
     write(library, cx, move |db_path| match host {
         Some(host) => {
-            sync_collection(&host, &db_path, &source, &collection).map(|rows| rows.unwrap_or(0))
+            let synced = sync_collection(&host, &db_path, &source, &collection);
+            refresh_flags(&host, &db_path, &source);
+            synced.map(|rows| rows.unwrap_or(0))
         }
 
         None => {
@@ -1966,6 +2192,31 @@ pub fn set_synced(
                 .map_err(|e| e.to_string())
         }
     })
+}
+
+/// Brings kept collections' names, lines, kinds and art up to date with how
+/// a listing just showed them, so the library draws them the same way with
+/// the plugin stopped. Every call writes settings, so `seen` holds only the
+/// collections whose look changed.
+pub fn restyle_synced(source: &str, seen: Vec<SyncedCollection>) {
+    let Some(id) = record_id(source).map(str::to_string) else {
+        return;
+    };
+
+    Settings::update(move |s| {
+        let Some(record) = s.accounts.plugins.iter_mut().find(|r| r.id == id) else {
+            return;
+        };
+
+        for kept in record.synced.iter_mut() {
+            if let Some(look) = seen.iter().find(|look| look.id == kept.id) {
+                kept.title = look.title.clone();
+                kept.subtitle = look.subtitle.clone();
+                kept.kind = look.kind.clone();
+                kept.art = look.art.clone();
+            }
+        }
+    });
 }
 
 /// Syncs every collection the source has switched on. Answers the rows
@@ -2001,6 +2252,7 @@ pub fn sync_now(
             }
         }
 
+        refresh_flags(&host, &db_path, &source);
         (Ok(written), wrote)
     })
 }

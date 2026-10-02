@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    KeyDownEvent, ModifiersChangedEvent, MouseButton, ScrollStrategy, ScrollWheelEvent,
+    AnyElement, AnyWindowHandle, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, KeyDownEvent, ModifiersChangedEvent, MouseButton, ScrollStrategy, ScrollWheelEvent,
     SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle, div, prelude::*, px,
     rems,
 };
@@ -22,10 +22,11 @@ use gpui_component::table::{Column, ColumnSort, Table, TableDelegate, TableEvent
 use gpui_component::{Icon, IconName, Root, Side, Sizable, Size};
 use rox_dock::{Panel, PanelEvent, PanelInfo, PanelState, TabPanel};
 use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
+use rox_panel_api::toast::Toast;
 
 use rox_core::fmt::{fmt_ago, fmt_ms, fmt_num};
 use rox_core::{QUEUE_CAP, SHUFFLE_SEED};
-use rox_library::cue::TrackKey;
+use rox_library::cue::{Origin, TrackKey};
 use rox_library::projection::{Projection, QUERY_FIELDS, QueryField};
 use rox_library::view::{self, Group, Grouping, Row, ViewSpec};
 use rox_services::backdrop::WindowBackdrop;
@@ -37,7 +38,7 @@ use crate::design::{palette, tokens};
 use crate::group_head::{
     self, ArtSide, HeadPiece, Headers, MOSAIC, TileFace, effective_head_lines,
 };
-use crate::panel::{self, AppState, PanelChrome, ResumeIdle, ScrubState};
+use crate::panel::{self, AppState, PanelChrome, ResumeIdle, ScrubState, Tone};
 use crate::panel_settings;
 use crate::query::search::{SearchBox, SearchEvent};
 use crate::query::shared_query::{QueryFilter, QuerySource, SharedQueryEvent};
@@ -386,6 +387,42 @@ impl TrackTable {
             Some(&Row::Track(row)) => Some(row),
             _ => None,
         }
+    }
+
+    /// Play Similar for one row, when something can answer it: the plugin's
+    /// radio for a plugin row, the acoustic vectors for a row the analysis
+    /// pass described.
+    fn similar_item(&self, row_ix: usize, cx: &App) -> Option<PopupMenuItem> {
+        let row = self.track_at(row_ix)?;
+        let projection = self.projection(cx)?;
+        let id = *projection.db_id.get(row as usize)?;
+        let title = projection.resolve(row).title.to_string();
+
+        let library = self.state.library.read(cx);
+        let key = library.keys_for(&[id]).ok()?.into_iter().next()?;
+        let answers = match key.origin() {
+            Origin::Plugin => rox_services::plugins::has_radio(&key.source),
+            _ => {
+                let acoustic = rox_services::acoustic::acoustic_source();
+                crate::settings::similarity_ready() && library.described(id, acoustic.id())
+            }
+        };
+        if !answers {
+            return None;
+        }
+
+        let panel = self.panel.clone();
+        Some(
+            PopupMenuItem::new(rox_i18n::t!("library-play-similar"))
+                .icon(Icon::default().path(icons::RADIO))
+                .on_click(move |_, window, cx| {
+                    let Some(panel) = panel.upgrade() else {
+                        return;
+                    };
+                    let (title, origin) = (title.clone(), window.window_handle());
+                    panel.update(cx, |panel, cx| panel.play_similar(id, title, origin, cx));
+                }),
+        )
     }
 
     /// A grab inside a multi-selection drags the whole set in view order,
@@ -1311,11 +1348,16 @@ impl TableDelegate for TrackTable {
         let from_row = single_row.then_some(row_ix);
         let play_panel = panel.clone();
         let play_rows = rows.clone();
-        let menu = panel::track_actions(
+        let extras = panel::Extras {
+            after_next: single_row.then(|| self.similar_item(row_ix, cx)).flatten(),
+            ..panel::Extras::default()
+        };
+        let menu = panel::track_actions_with(
             menu,
             self.state.clone(),
             ids,
             label,
+            extras,
             window,
             cx,
             move |_, cx| {
@@ -1370,21 +1412,6 @@ impl TableDelegate for TrackTable {
                             let artist = jump_artist.clone();
                             panel
                                 .update(cx, |panel, cx| panel.jump_to_query("artist", &artist, cx));
-                        }),
-                );
-            }
-            // Only once the pass has described something. The switch alone
-            // doesn't build the vectors.
-            if crate::settings::similarity_ready() {
-                let similar_panel = panel.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(rox_i18n::t!("library-play-similar"))
-                        .icon(Icon::default().path(icons::AUDIO_WAVEFORM))
-                        .on_click(move |_, _, cx| {
-                            let Some(panel) = similar_panel.upgrade() else {
-                                return;
-                            };
-                            panel.update(cx, |panel, cx| panel.play_similar(row_ix, cx));
                         }),
                 );
             }
@@ -2964,23 +2991,44 @@ impl LibraryPanel {
     }
 
     /// The clicked track itself doesn't play. A double click already does.
-    fn play_similar(&mut self, row_ix: usize, cx: &mut Context<Self>) {
-        let Some(row) = self.table.read(cx).delegate().track_at(row_ix) else {
-            return;
-        };
-        let Some(&id) = self
-            .table
+    /// A plugin row plays its plugin's station; any other draws from the
+    /// acoustic vectors. Either turns on Similar shuffle.
+    fn play_similar(
+        &mut self,
+        id: i64,
+        title: String,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let (library, player) = (self.state.library.clone(), self.state.player.clone());
+        let key = library
             .read(cx)
-            .delegate()
-            .projection(cx)
-            .and_then(|projection| projection.db_id.get(row as usize))
-        else {
+            .keys_for(&[id])
+            .ok()
+            .and_then(|keys| keys.into_iter().next());
+        let station = key.and_then(|key| {
+            rox_services::plugins::play_similar_to_key(library.clone(), player.clone(), &key, cx)
+        });
+
+        let Some(task) = station else {
+            player.update(cx, |player, cx| player.play_similar_to(id, &library, cx));
             return;
         };
-        let library = self.state.library.clone();
-        self.state
-            .player
-            .update(cx, |player, cx| player.play_similar_to(id, &library, cx));
+
+        // The station answers after the menu has closed.
+        cx.spawn(async move |_, cx| {
+            let Err(e) = task.await else {
+                return;
+            };
+
+            cx.update(|cx| {
+                Toast::new(Tone::Bad, e)
+                    .title(rox_i18n::t!("source-browser-similar-failed", title = title))
+                    .post(origin, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The engine pins the head when shuffle engages, so the first row plays

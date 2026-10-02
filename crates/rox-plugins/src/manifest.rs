@@ -125,11 +125,33 @@ pub struct ActionDecl {
     /// the config page's subset. Null asks nothing.
     #[serde(default)]
     pub params: serde_json::Value,
+    /// An SVG in the plugin's folder, checked like the source icon. Empty
+    /// draws the plug.
+    #[serde(default)]
+    pub icon: String,
+    /// A flag the items' rows carry (`favourite`) or lack (`!favourite`) for
+    /// the action to be offered. Empty offers it on every row.
+    #[serde(default)]
+    pub when: String,
 }
 
 impl ActionDecl {
     pub fn offered_on(&self, target: &str) -> bool {
         self.on.iter().any(|on| on == target)
+    }
+
+    /// Whether a row with these flags can take the action. A row whose
+    /// flags are unknown can take any.
+    pub fn applies_to(&self, flags: Option<&[String]>) -> bool {
+        let Some(flags) = flags else {
+            return true;
+        };
+
+        match self.when.strip_prefix('!') {
+            _ if self.when.is_empty() => true,
+            Some(flag) => !flags.iter().any(|f| f == flag),
+            None => flags.contains(&self.when),
+        }
     }
 
     /// `(key, schema)` for each param, in key order as serde_json keeps it.
@@ -237,6 +259,9 @@ fn check_actions(manifest: &Manifest) -> Result<(), String> {
         }
         if action.on.is_empty() {
             return refuse("is offered nowhere; `on` is empty");
+        }
+        if !action.when.is_empty() && !flag_name(action.when.trim_start_matches('!')) {
+            return refuse("has a `when` that isn't a flag name or one negated with `!`");
         }
 
         let params_ok = match &action.params {
@@ -381,6 +406,30 @@ pub fn icon_for(manifest: &Manifest, dir: &Path) -> Result<Option<Vec<u8>>, Stri
         return Ok(None);
     };
 
+    svg_in(dir, rel).map(Some)
+}
+
+/// Each action's icon by action id, for the actions that name one.
+pub fn action_icons_for(manifest: &Manifest, dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let Some(source) = manifest.capabilities.source.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    source
+        .actions
+        .iter()
+        .filter(|action| !action.icon.is_empty())
+        .map(|action| {
+            svg_in(dir, &action.icon)
+                .map(|bytes| (action.id.clone(), bytes))
+                .map_err(|e| format!("action {:?}: {e}", action.id))
+        })
+        .collect()
+}
+
+/// An icon's bytes: an SVG inside the folder, small, drawing nothing from
+/// outside itself.
+fn svg_in(dir: &Path, rel: &str) -> Result<Vec<u8>, String> {
     if !rel.to_ascii_lowercase().ends_with(".svg") {
         return Err(format!("icon {rel} isn't an .svg file"));
     }
@@ -405,7 +454,16 @@ pub fn icon_for(manifest: &Manifest, dir: &Path) -> Result<Option<Vec<u8>>, Stri
         return Err(format!("icon {rel} embeds an image, which an icon can't"));
     }
 
-    Ok(Some(bytes))
+    Ok(bytes)
+}
+
+/// What a row flag and an action's `when` may be named.
+fn flag_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 /// What to try, in order, for an interpreter name. Any other name is looked
@@ -700,6 +758,29 @@ mod tests {
     }
 
     #[test]
+    fn an_actions_when_reads_a_rows_flags() {
+        let manifest = parse(&with_actions(
+            r#"[{ "id": "add", "label": "Add", "on": ["track"], "when": "!favourite" },
+                { "id": "drop", "label": "Drop", "on": ["track"], "when": "favourite" },
+                { "id": "any", "label": "Any", "on": ["track"] }]"#,
+        ))
+        .unwrap();
+        let actions = manifest.capabilities.source.unwrap().actions;
+        let (add, drop, any) = (&actions[0], &actions[1], &actions[2]);
+
+        let favourite = ["favourite".to_string(), "offline".to_string()];
+        let plain = ["offline".to_string()];
+
+        assert!(!add.applies_to(Some(&favourite)) && add.applies_to(Some(&plain)));
+        assert!(drop.applies_to(Some(&favourite)) && !drop.applies_to(Some(&plain)));
+        assert!(any.applies_to(Some(&favourite)) && any.applies_to(Some(&[])));
+        assert!(
+            add.applies_to(None) && drop.applies_to(None),
+            "a row whose flags nobody knows can take either"
+        );
+    }
+
+    #[test]
     fn a_broken_action_refuses_the_plugin() {
         let cases = [
             (r#"[{ "id": "", "label": "X", "on": ["track"] }]"#, "id"),
@@ -712,6 +793,14 @@ mod tests {
             (
                 r#"[{ "id": "a", "label": "X", "on": ["track"], "params": [1] }]"#,
                 "JSON Schema",
+            ),
+            (
+                r#"[{ "id": "a", "label": "X", "on": ["track"], "when": "Fav ourite" }]"#,
+                "flag name",
+            ),
+            (
+                r#"[{ "id": "a", "label": "X", "on": ["track"], "when": "!" }]"#,
+                "flag name",
             ),
         ];
 

@@ -3,6 +3,7 @@
 //! toasts that report how it went. The work runs in the plugin; everything
 //! here is rox's own drawing around it.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::{
@@ -37,7 +38,10 @@ pub fn items(menu: PopupMenu, state: &AppState, ids: &[i64], cx: &mut App) -> Po
     let source = source.clone();
     let items = rows.into_iter().map(|(_, key)| key).collect();
 
-    offer(menu, &source, "track", items)
+    // Library rows carry no flags of their own: these are the newest the
+    // session saw for them, from a listing or an action.
+    let flags = plugin_actions::known_flags(&source);
+    offer(menu, &source, "track", items, &flags)
 }
 
 pub fn offers(source: &str, target: &str) -> bool {
@@ -47,17 +51,33 @@ pub fn offers(source: &str, target: &str) -> bool {
 }
 
 /// An entry for every action `source` offers on `target` (`track`, `node`,
-/// `source`), each run on `items`.
-pub fn offer(menu: PopupMenu, source: &str, target: &str, items: Vec<String>) -> PopupMenu {
+/// `source`), each run on `items`. An action with a `when` shows if any item
+/// can take it, by its `flags`; an item missing there can take any. The
+/// caller sets the plugin's section apart with separators.
+pub fn offer(
+    menu: PopupMenu,
+    source: &str,
+    target: &str,
+    items: Vec<String>,
+    flags: &HashMap<String, Vec<String>>,
+) -> PopupMenu {
     plugin_actions::actions(source)
         .into_iter()
         .filter(|action| action.offered_on(target))
+        .filter(|action| {
+            items.is_empty()
+                || items
+                    .iter()
+                    .any(|item| action.applies_to(flags.get(item).map(Vec::as_slice)))
+        })
         .fold(menu, |menu, action| {
             let (source, items) = (source.to_string(), items.clone());
+            let icon = rox_services::plugins::action_icon(&source, &action.id)
+                .unwrap_or_else(|| icons::PLUG.into());
 
             menu.item(
                 PopupMenuItem::new(action.label.clone())
-                    .icon(Icon::default().path(icons::PLUG))
+                    .icon(Icon::default().path(icon))
                     .on_click(move |_, window, cx| {
                         pick(source.clone(), action.clone(), items.clone(), window, cx);
                     }),
@@ -152,6 +172,16 @@ fn watch(
 /// A result that names a folder or a page keeps its toast up until it's
 /// used or dismissed, since the button is the point of it.
 fn finished(label: &str, outcome: Outcome, origin: AnyWindowHandle, cx: &mut App) {
+    // An answer that's only a path is the action itself, like Show in Folder:
+    // the click already asked for it, so it opens without a toast.
+    if outcome.message.is_empty()
+        && outcome.link.is_none()
+        && let Some(path) = &outcome.reveal
+    {
+        reveal(path, cx);
+        return;
+    }
+
     let message: SharedString = match outcome.message.is_empty() {
         true => rox_i18n::t!("plugin-action-done", action = label.to_string()),
         false => outcome.message.into(),

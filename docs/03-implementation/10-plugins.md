@@ -204,7 +204,7 @@ is logged and dropped (`parse_line`, `wire.rs:92-117`).
 ### `hello`
 
 ```json
-> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64","features":["notice"]}}
+> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64","locale":"en-CA","features":["notice"]}}
 < {"jsonrpc":"2.0","id":1,"result":{"name":"Tones","version":"0.1.0","api":1}}
 ```
 
@@ -212,7 +212,10 @@ is logged and dropped (`parse_line`, `wire.rs:92-117`).
 there are none. The answer's `api` has to be in `SUPPORTED_API`, or rox hangs up
 (`start`, `rox-plugins/src/host.rs:382-405`). `features` is `wire::FEATURES`, the
 optional parts of API 1 this host reads. A plugin uses one only when it's listed, since
-an older host refuses a result that carries it.
+an older host refuses a result that carries it. `locale` is `rox_i18n::locale()`, taken
+when `reconcile` (`rox-services/src/plugins.rs`) makes the host and left out when empty.
+A language switch doesn't restart a running plugin, since that would cut off a track it's
+playing; the new locale reaches it on its next start.
 
 ### `source.browse`
 
@@ -242,11 +245,53 @@ becomes the row's path. A plugin that changes its key scheme orphans every row i
 With `go-to` listed, a track may also carry `go_to`: the nodes its album and artists
 open, each checked like a browse node (`GoTo`, `wire.rs`). It's boxed, since most tracks
 leave it out and the entry enum would otherwise carry its size on every row. `page` in
-`rox-services/src/plugins.rs` moves it off the track into `Page::go_to`, keyed by track
-key, so it never reaches a `PluginTrack` or a kept row. The source browser merges each
-page's map into its listing and builds Go to from it (`go_to_submenu`,
-`rox-panels/src/source_browser.rs`). Keyed rather than lined up with the entries, it
-survives a sort and a dropped row without upkeep.
+`rox-services/src/plugins.rs` copies it into `Page::go_to`, keyed by track key. The
+source browser merges each page's map into its listing and builds Go to from it
+(`go_to_submenu`, `rox-panels/src/source_browser.rs`). Keyed rather than lined up with
+the entries, it survives a sort and a dropped row without upkeep.
+
+A row keeps its Go to too (ADR 30, amended 2026-10-02). `track` serializes rox's own
+`GoTo` onto the `PluginTrack`, so every library write (a sync, a pick, an add) passes
+it to `members::upsert`, which stores it in `source_go_to` beside the row. A write
+without one leaves the stored one alone. Every path that deletes plugin rows sweeps
+`source_go_to` after itself (`drop_stale_go_to`, `rox-library/src/members.rs`), since a
+trigger on `tracks` wouldn't survive a migration that rebuilds that table. The library
+view reads it back for its rows (`library_go_to`). The `plugin-go-to` migration also
+lists every kept collection in `source_resync`, and `sync_collection` sends no token for
+those once, so collections kept before rows stored Go to fill it in.
+
+With `flags` listed, a track or node may carry `flags`: a short list of names for what
+the row is right now, like `favourite`. An action's `when` reads them (below). A missing
+`flags` means the plugin doesn't know, and `[]` means none. `page` collects them into
+`Page::flags` by track key or node id, the ids an action's items carry. Sync ignores
+them, since they go stale. `listing` notes every page's flags, and actions report the
+ones they changed, into one per-source map (`note`, `report` and `known_flags`,
+`rox-services/src/plugin_actions.rs`). A library row's menu reads it, so a track keeps
+the newest flags the session saw for it. `refresh_flags` (`rox-services/src/plugins.rs`)
+asks `source.flags` for every row the source has (`members::keys`), 500 at a time, at
+the end of `sync_now`, which runs once per plugin at launch, and after a newly kept
+collection syncs. It asks only a plugin with a `when` on some action. Playing a track can change
+its row too, like a copy the plugin keeps as it plays, so the engine's `Reader` asks for
+that one track's flags when a read reaches its last byte and again ten seconds after the
+stream closes, and reports the answer so an open listing merges it.
+
+The shared track menu (`track_actions_with`, `rox-panel-api/src/panel.rs`) offers Go to
+from `plugins::stored_go_to`. Picking an entry goes up through `openers::go_to_source` to
+`source_browser::go_to_source`, which opens the node in the browser whose menu opened
+last when it shows that plugin (`MenuOrigin`), else the first browser on it in
+`TabHosts::groups`, else a new browser in `TabHosts::last_live`. When the listing has Go
+to for the row, the browser builds its own, which skips the node shown, and passes it as
+`Extras::go_to`, which stands in for the kept one. A listing that shows rows
+already in the library stores their Go to too (`keep_listed_go_to`, then
+`members::keep_go_to`), writing only what moved, so rows from before Go to was kept
+pick it up wherever they're listed.
+
+A plugin row's own items are one section of the shared menu, set apart by separators:
+Open in Browser and Copy Link, the plugin's actions, then what holds the row in the
+library, Remove from Library and Stop Keeping. A surface adds its own to the end of the
+section through `Extras::plugin`, like the browser's Add to Library for a row that was
+only played. `plugin_actions::offer` draws no separators, so the browser's node and
+source menus bracket it the same way.
 
 ### `source.search`
 
@@ -523,7 +568,11 @@ membership and a prune would delete them.
 Kept collections sync once when the plugin starts, and on Sync Now on the Plugins page
 (`sync_now`, `rox-services/src/plugins.rs:1062-1090`). A kept collection opens in the
 External Sources panel from the library, with no plugin call, so it still browses with
-the plugin stopped or the network down.
+the plugin stopped or the network down. Its row draws from what `SyncedCollection` cached
+of the node: title, second line, kind and art key, taken when it's kept and refreshed
+whenever a listing shows the node again (`restyle_kept`,
+`rox-panels/src/source_browser.rs`). A kept node's second line is the plugin's, then the
+library's count of its tracks (`kept_line`).
 
 A browse or search waits for the first `apply` before it looks up its host
 (`listing`, `rox-services/src/plugins.rs`), since a panel restored at launch lists

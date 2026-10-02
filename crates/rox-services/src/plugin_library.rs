@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Entity, Task};
-use rox_core::settings::Settings;
+use rox_core::settings::{Settings, SyncedCollection};
 use rox_library::cue::PLUGIN_PREFIX;
 use rox_library::members::{self, InLibrary};
 use rox_library::store;
@@ -124,7 +124,13 @@ pub fn stop_keeping(
     kept: &Kept,
     cx: &mut App,
 ) -> Task<Result<usize, String>> {
-    plugins::set_synced(library, &kept.source, &kept.id, &kept.title, false, cx)
+    let collection = SyncedCollection {
+        id: kept.id.clone(),
+        title: kept.title.clone(),
+        ..SyncedCollection::default()
+    };
+
+    plugins::set_synced(library, &kept.source, collection, false, cx)
 }
 
 /// How many of the plugin's rows are in the library. Zero when the library

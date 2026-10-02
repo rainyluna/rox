@@ -1268,6 +1268,7 @@ mod tests {
                 .collect(),
             error: error.map(str::to_string),
             icon: None,
+            action_icons: Vec::new(),
         }
     }
 

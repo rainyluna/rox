@@ -2098,6 +2098,12 @@ pub struct SyncedCollection {
     pub id: String,
     /// Cached so the offline browser can name it.
     pub title: String,
+    /// The node's second line as the plugin last gave it, empty for none.
+    pub subtitle: String,
+    /// The node's kind as the wire names it, empty for none.
+    pub kind: String,
+    /// The node's key for `source.cover`, empty for none.
+    pub art: String,
     /// The last complete sync's token, empty for none.
     pub token: String,
 }
@@ -3891,6 +3897,9 @@ mod tests {
             synced: vec![SyncedCollection {
                 id: "likes".into(),
                 title: "Liked".into(),
+                subtitle: "Example Artist, 2024".into(),
+                kind: "album".into(),
+                art: "album:7".into(),
                 token: "t-1".into(),
             }],
             config: serde_json::json!({ "region": "ca" }),

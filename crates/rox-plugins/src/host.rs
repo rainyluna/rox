@@ -70,6 +70,9 @@ pub struct HostConfig {
     /// The plugin's own writable folder, outside its plugin folder so nothing
     /// it writes changes its hash. Created on the first `hello`.
     pub data_dir: PathBuf,
+    /// The interface language as a BCP 47 tag, handed over in `hello`. Empty
+    /// leaves it out.
+    pub locale: String,
     pub timeouts: Timeouts,
     /// [`BACKOFF`] outside tests.
     pub backoff: [Duration; 4],
@@ -82,6 +85,7 @@ impl HostConfig {
             manifest,
             config,
             data_dir,
+            locale: String::new(),
             timeouts: Timeouts::default(),
             backoff: BACKOFF,
         }
@@ -379,13 +383,16 @@ impl Host {
             .spawn(move || read_answers(&tag, host, reading, stdout))
             .map_err(|e| format!("could not start the reader: {e}"))?;
 
-        let params = json!({
+        let mut params = json!({
             "api": config.manifest.api,
             "config": config.config,
             "data_dir": config.data_dir.to_string_lossy(),
             "platform": manifest::platform(),
             "features": wire::FEATURES,
         });
+        if !config.locale.is_empty() {
+            params["locale"] = json!(config.locale);
+        }
         let asked = Instant::now();
         let answer = std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| format!("could not create {}: {e}", config.data_dir.display()))

@@ -120,14 +120,17 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     )?;
 
     // Takes the local track's source too: a listen that lands here belongs to
-    // the local file from now on.
+    // the local file from now on. Driven from the dangling listens, each
+    // looked up by tags: as an UPDATE ... FROM, SQLite looped every local
+    // track over a full listens scan, about 3 billion rows on a 60k-track
+    // library, and an un-keep that pruned one played track never finished.
     let by_tags = conn.execute(
-        "UPDATE listens SET track_id = t.id, path = t.path, source = t.source FROM tracks t
+        "UPDATE listens SET (track_id, path, source) = (
+             SELECT t.id, t.path, t.source FROM tracks t WHERE t.source = 'local'
+               AND t.title = listens.title AND t.artist = listens.artist
+               AND t.album = listens.album)
          WHERE NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = listens.track_id)
            AND NOT (listens.title = '' AND listens.artist = '' AND listens.album = '')
-           AND t.source = 'local'
-           AND t.title = listens.title AND t.artist = listens.artist
-           AND t.album = listens.album
            AND (SELECT COUNT(*) FROM tracks c WHERE c.source = 'local'
                 AND c.title = listens.title AND c.artist = listens.artist
                 AND c.album = listens.album) = 1",
@@ -1302,6 +1305,78 @@ mod tests {
                 .all(|t| t.track_id != new_id),
             "the returned file is not a stranger to its own history"
         );
+    }
+
+    #[test]
+    fn reattach_falls_back_to_the_tag_snapshot() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[
+                track("/m/1.mp3", "One", "A", "First", "rock"),
+                track("/m/2.mp3", "Two", "A", "First", "rock"),
+            ],
+        )
+        .unwrap();
+        listen(&conn, "/m/1.mp3", 100);
+
+        conn.execute("DELETE FROM tracks WHERE id = 1", []).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[track("/new/1.mp3", "One", "A", "First", "rock")],
+        )
+        .unwrap();
+        let new_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE path = '/new/1.mp3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(reattach(&conn).unwrap(), Some(1));
+        let (track_id, path): (i64, String) = conn
+            .query_row("SELECT track_id, path FROM listens", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(track_id, new_id);
+        assert_eq!(
+            path, "/new/1.mp3",
+            "the tag match rewrites the path snapshot for next time"
+        );
+    }
+
+    #[test]
+    fn reattach_never_guesses_between_ambiguous_tags() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[
+                track("/m/1.mp3", "One", "A", "First", "rock"),
+                track("/m/2.mp3", "Two", "A", "First", "rock"),
+            ],
+        )
+        .unwrap();
+        listen(&conn, "/m/1.mp3", 100);
+
+        conn.execute("DELETE FROM tracks WHERE id = 1", []).unwrap();
+        store::insert_batch(
+            &mut conn,
+            &[
+                track("/x/1.mp3", "One", "A", "First", "rock"),
+                track("/y/1.mp3", "One", "A", "First", "rock"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(reattach(&conn).unwrap(), Some(0));
+        let path: String = conn
+            .query_row("SELECT path FROM listens", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(path, "/m/1.mp3", "the listen stays a snapshot");
     }
 
     #[test]

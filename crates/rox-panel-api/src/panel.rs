@@ -127,6 +127,14 @@ impl TabHosts {
         self.hosts.push(tabs);
     }
 
+    /// Every tab group still alive, oldest first.
+    pub fn groups(&self) -> Vec<Entity<TabPanel>> {
+        self.hosts
+            .iter()
+            .filter_map(|tabs| tabs.upgrade())
+            .collect()
+    }
+
     pub fn last_live(&self, cx: &App) -> Option<Entity<TabPanel>> {
         self.hosts.iter().rev().find_map(|tabs| {
             let tabs = tabs.upgrade()?;
@@ -796,18 +804,30 @@ pub fn track_actions(
     cx: &mut App,
     on_play: impl Fn(&mut Window, &mut App) + 'static,
 ) -> PopupMenu {
-    track_actions_with(menu, state, ids, play_label, None, window, cx, on_play)
+    let extras = Extras::default();
+    track_actions_with(menu, state, ids, play_label, extras, window, cx, on_play)
 }
 
-/// [`track_actions`] with a surface's own item right under Play Next, like a
-/// plugin's Play Similar.
+/// What a surface adds to the shared track menu.
+#[derive(Default)]
+pub struct Extras {
+    /// Right under Play Next, like Play Similar.
+    pub after_next: Option<PopupMenuItem>,
+    /// The surface's own Go to, in place of a plugin row's kept one.
+    pub go_to: Option<PopupMenuItem>,
+    /// The end of the plugin section, like the source browser's Add to
+    /// Library.
+    pub plugin: Vec<PopupMenuItem>,
+}
+
+/// [`track_actions`] with a surface's own items.
 #[allow(clippy::too_many_arguments)]
 pub fn track_actions_with(
     menu: PopupMenu,
     state: AppState,
     ids: Vec<i64>,
     play_label: impl Into<SharedString>,
-    after_next: Option<PopupMenuItem>,
+    extras: Extras,
     window: &mut Window,
     cx: &mut App,
     on_play: impl Fn(&mut Window, &mut App) + 'static,
@@ -843,7 +863,7 @@ pub fn track_actions_with(
                     queue_tracks(&next_state, &next_ids, true, cx);
                 }),
         )
-        .when_some(after_next, |menu, item| menu.item(item))
+        .when_some(extras.after_next, |menu, item| menu.item(item))
         .item(
             PopupMenuItem::new(rox_i18n::t!("panel-add-to-queue"))
                 .icon(Icon::default().path(icons::LIST_MUSIC))
@@ -932,15 +952,117 @@ pub fn track_actions_with(
             .and_then(|keys| keys.first().and_then(plugin_item)),
         _ => None,
     };
-    let menu = match plugin {
-        Some((source, item)) => link_items(menu, &source, item),
-        None => menu,
+
+    // A plugin row's page, the plugin's actions and what holds the row in
+    // the library are a section of their own, apart from rox's items.
+    let plugin_rows = !extras.plugin.is_empty()
+        || state
+            .library
+            .read(cx)
+            .keys_for(&ids)
+            .is_ok_and(|keys| keys.iter().any(|key| plugin_item(key).is_some()));
+    let menu = match plugin_rows {
+        true => {
+            let menu = match &plugin {
+                Some((source, item)) => link_items(menu.separator(), source, item.clone()),
+                None => menu.separator(),
+            };
+            let menu = crate::plugin_actions::items(menu, &state, &ids, cx);
+            let menu = crate::plugin_library::items(menu, &state, &ids, cx);
+
+            extras
+                .plugin
+                .into_iter()
+                .fold(menu, |menu, item| menu.item(item))
+                .separator()
+        }
+
+        false => menu,
     };
-    let menu = crate::plugin_actions::items(menu, &state, &ids, cx);
-    let menu = crate::plugin_library::items(menu, &state, &ids, cx);
+
+    let go_to = extras.go_to.or_else(|| {
+        let (source, item) = plugin?;
+        let db = state.library.read(cx).db_path();
+        let stored = rox_services::plugins::stored_go_to(&db, &source, &item)?;
+
+        go_to_submenu(state.clone(), source, stored, window, cx)
+    });
 
     let menu = copy_ids_submenu(menu, state.clone(), ids, window, cx);
+    let menu = menu.when_some(go_to, |menu, item| menu.item(item));
     reveal_item(menu, state, reveal)
+}
+
+/// Go to for one plugin row outside the External Sources panel: its album
+/// and artists, opened in a panel on that plugin.
+fn go_to_submenu(
+    state: AppState,
+    source: String,
+    go_to: rox_services::plugins::GoTo,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<PopupMenuItem> {
+    use rox_services::plugins::Target;
+
+    if go_to.album.is_none() && go_to.artists.is_empty() {
+        return None;
+    }
+
+    let item = move |label: SharedString, target: Target, state: AppState, source: String| {
+        PopupMenuItem::new(label)
+            .icon(Icon::default().path(match target.kind {
+                Some(rox_services::plugins::NodeKind::Album) => icons::DISC,
+                _ => icons::USER,
+            }))
+            .on_click(move |_, window, cx| {
+                crate::openers::go_to_source(
+                    state.clone(),
+                    source.clone(),
+                    target.clone(),
+                    window,
+                    cx,
+                );
+            })
+    };
+
+    let submenu = PopupMenu::build(window, cx, move |mut submenu, window, cx| {
+        if let Some(album) = go_to.album.clone() {
+            let label = rox_i18n::t!("source-browser-go-to-album");
+            submenu = submenu.item(item(label, album, state.clone(), source.clone()));
+        }
+
+        let label = rox_i18n::t!("source-browser-go-to-artist");
+        match go_to.artists.as_slice() {
+            [] => {}
+
+            [artist] => {
+                submenu = submenu.item(item(label, artist.clone(), state.clone(), source.clone()));
+            }
+
+            // Several artists get one entry each, by name.
+            several => {
+                let several = several.to_vec();
+                let (state, source) = (state.clone(), source.clone());
+                let names = PopupMenu::build(window, cx, move |mut names, _, _| {
+                    for artist in several {
+                        let name = SharedString::from(artist.title.clone());
+                        names = names.item(item(name, artist, state.clone(), source.clone()));
+                    }
+                    names
+                });
+                submenu = submenu.item(
+                    PopupMenuItem::submenu(label, names).icon(Icon::default().path(icons::USER)),
+                );
+            }
+        }
+
+        submenu
+    });
+
+    Some(
+        PopupMenuItem::submenu(rox_i18n::t!("source-browser-go-to"), submenu)
+            .icon(Icon::default().path(icons::ARROW_RIGHT)),
+    )
 }
 
 /// Move a docked panel into its own OS window. The entity itself moves, so

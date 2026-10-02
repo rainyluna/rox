@@ -2102,7 +2102,8 @@ impl Player {
     /// executor: the first ask after the analysis pass writes rereads the
     /// table, a few hundred milliseconds on a fifty-thousand-track library.
     /// One track and no scope: what follows is continuation's business
-    /// (ADR 17).
+    /// (ADR 17), under Similar shuffle, which this turns on as a plugin's
+    /// radio does.
     pub fn play_similar_to(
         &mut self,
         seed: i64,
@@ -2138,6 +2139,8 @@ impl Player {
                     return;
                 };
                 this.play(keys, cx);
+                // After the play: the mode orders and draws from what's queued.
+                this.shuffle_in_mode(ShuffleMode::Similar, cx);
             })
             .ok();
         })

@@ -237,6 +237,7 @@ rolls to `rox.log.1` at 2 MiB. The plugin never sends requests to rox.
 | `source.action`  | `action`, `items`, `params`       | an outcome, or `{job}` for work rox polls        |
 | `source.job`     | `job`                             | the job's progress, and its outcome once it ends |
 | `source.cancel`  | `job`                             | null                                             |
+| `source.flags`   | `items`                           | `{flags}`, each item's flags now                 |
 | `shutdown`       |                                   | null, then the plugin exits                      |
 
 ### hello
@@ -244,18 +245,25 @@ rolls to `rox.log.1` at 2 MiB. The plugin never sends requests to rox.
 The first request, and nothing else is sent until it's answered:
 
 ```
-→ {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64","features":["notice"]}}
+→ {"jsonrpc":"2.0","id":1,"method":"hello","params":{"api":1,"config":{"volume":30},"data_dir":"/home/me/.local/share/rox/plugin-data/tones","platform":"linux-x86_64","locale":"en-CA","features":["notice"]}}
 ← {"jsonrpc":"2.0","id":1,"result":{"name":"Tones","version":"0.1.0","api":1}}
 ```
 
 `config` is the plugin's settings as the Plugins page stored them, `{}` or null when
 there are none. The answer's `api` has to be one the host supports, or rox hangs up.
 
+`locale` is the language rox's interface is in, as a BCP 47 tag like `en-CA` or
+`zh-Hans`. A plugin can use it for the text it writes itself: titles and lines it makes
+up, errors, and action messages. Text from the manifest, like an action's label, still
+shows as written. rox takes the locale when it starts the plugin, so a language change
+reaches a running plugin the next time it starts. A host from before `locale` doesn't
+send it, so a plugin treats a missing `locale` as unknown.
+
 `features` names the optional parts of API 1 this host reads. A host from before a
 feature refuses a result that uses it, so a plugin uses one only when it's listed, and
 treats a missing `features` as an empty list. This host lists `notice`, `notice-link`,
 `node-kind`, `node-art`, `sections`, `views`, `fields`, `tiles`, `home`,
-`open-duration` and `go-to`.
+`open-duration`, `go-to` and `flags`.
 
 ### source.browse and source.search
 
@@ -343,7 +351,11 @@ on the panel's trail is stepped back to, an album or artist page gives way to th
 one, and anywhere else the node opens on from the place shown. Each is a node in the same shape as a browse entry, and its `id` has to be one
 `source.browse` answers for. `album` and `artists` are both optional, and several
 artists are listed by name. The node the panel is already showing isn't offered. Sync
-ignores `go_to`.
+keeps `go_to` with the row, and so does a track the user plays or adds from the panel,
+so the library's view of the source offers Go to too, and so does every other menu on
+the row, like the queue's. From those, the node opens in an External Sources panel on
+the plugin, a new one when none is open. A listing without `go_to` leaves
+the kept one alone.
 
 ```
 {"track": {"key": "t1", "title": "Example Song", "go_to": {"album": {"id": "album:500", "title": "Example Album", "collection": true, "kind": "album"}, "artists": [{"id": "artist:7", "title": "Example Artist", "kind": "artist"}]}}}
@@ -582,6 +594,45 @@ A name rox doesn't know is skipped. A plugin can declare up to 16 actions, and a
 that repeats, an empty `label` or an empty `on` refuses the plugin. The label shows as
 written, untranslated.
 
+`icon` is optional: an SVG in the plugin's folder, held to the same rules as the source
+icon (see [The icon](#the-icon)), and a bad one refuses the plugin the same way. Without
+one, rox draws a plug.
+
+`when` is optional too: a flag name, or one negated with `!`, that rows have to carry or
+lack for rox to offer the action. A pair like Add to Favourites and Remove from
+Favourites declares `"when": "!favourite"` and `"when": "favourite"`. Flag names are
+lowercase letters, digits, `-` and `_`.
+
+When `hello` listed `flags`, a track or node can carry `flags`, a list of what it is
+right now, up to 16. Leaving `flags` out says the plugin doesn't know, and `[]` says the
+row has none. rox offers an action with a `when` if any picked row can take it, and a row
+whose flags it doesn't know can take any. Sync ignores `flags`, since they go stale.
+
+A library row holds only its tags, so rox asks for its flags with `source.flags`, once the
+plugin is up and again after each sync, up to 500 keys a call. rox only asks a plugin
+that gives some action a `when`. An item left out of the answer stays unknown, and a
+plugin that doesn't answer the call leaves every library row offering every action:
+
+```
+→ {"jsonrpc":"2.0","id":20,"method":"source.flags","params":{"items":["t1","t2"]}}
+← {"jsonrpc":"2.0","id":20,"result":{"flags":{"t1":["favourite"],"t2":[]}}}
+```
+
+Between those calls, a library row's menu uses the newest flags rox saw for its track, in
+a listing, a `source.flags` answer or an action's answer.
+
+```
+{"track": {"key": "t1", "title": "Example Song", "flags": ["favourite"]}}
+```
+
+An action's answer, or a job's last state, can carry `flags` for the items it changed,
+keyed by the same keys and ids as `items`. rox merges them into what it shows, so the
+next menu on those rows reflects the action without the panel listing the place again:
+
+```
+← {"jsonrpc":"2.0","id":14,"result":{"message":"Added to favourites","flags":{"t1":["favourite"]}}}
+```
+
 `params` is optional. When an action has it, picking the action opens a dialog with a row
 per property, drawn from the same subset of JSON Schema as `config_schema`: strings,
 `"format": "password"`, numbers, integers, booleans and enums. A property's `default`
@@ -600,8 +651,10 @@ An action that finishes within the call answers its outcome instead of a job: a
 `message`, and optionally a `link` and a `reveal`. rox shows the message in a toast, or
 "<label> finished" when there's none. A `link` has to be an `http` or `https` address and
 becomes an Open Link button. A `reveal` has to be an absolute path and becomes a Show in
-Folder button, which shows it in the file manager and never opens it. A toast with a
-button stays until the user presses one or dismisses it. `null` is an outcome with
+Folder button, which shows it in the file manager and never opens it. An answer that's
+only a `reveal`, with no `message` and no `link`, is the action itself: rox shows the
+path in the file manager at once, with no toast. A toast with a button stays until the
+user presses one or dismisses it. `null` is an outcome with
 nothing in it. An error shows in a toast that stays until dismissed.
 
 A job is work that outlasts a call. rox lists it in the Tasks window and asks

@@ -343,6 +343,14 @@ const MIGRATIONS: &[crate::migrate::Migration] = &[
         up: crate::members::add_saved,
         rescan: false,
     },
+    // Go to for kept plugin rows (ADR 30, amended 2026-10-02), and a one-time
+    // full sync for the collections kept before it was stored. No mtime
+    // reset: nothing here is read from a tag.
+    crate::migrate::Migration {
+        name: "plugin-go-to",
+        up: crate::members::add_go_to,
+        rescan: false,
+    },
 ];
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {

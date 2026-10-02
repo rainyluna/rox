@@ -230,6 +230,7 @@ fn install_openers() {
         host_settings_item: composite::host_settings_item,
         confirm_close_locked,
         task_started: tasks_window::repaint_while_running,
+        go_to_source: rox_panels::source_browser::go_to_source,
     });
 }
 

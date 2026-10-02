@@ -7,7 +7,7 @@
 //! at [`MAX_ENTRIES`], and a frame that doesn't parse is the plugin's error,
 //! never a panic. Conversion to library types happens in `rox-services`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -173,6 +173,19 @@ fn list<T>(field: &str, items: &[T]) -> Result<(), String> {
     }
 }
 
+/// A row's flags, the `flags` feature: None when the plugin doesn't know them.
+fn flags(value: &Option<Vec<String>>) -> Result<(), String> {
+    let Some(flags) = value else {
+        return Ok(());
+    };
+
+    if flags.len() > MAX_FLAGS {
+        return Err(format!("a row has more than {MAX_FLAGS} flags"));
+    }
+
+    flags.iter().try_for_each(|flag| string("flag", flag))
+}
+
 fn cursor(value: &Option<String>) -> Result<(), String> {
     value.as_deref().map_or(Ok(()), |c| string("cursor", c))
 }
@@ -273,7 +286,11 @@ pub const FEATURES: &[&str] = &[
     "home",
     "open-duration",
     "go-to",
+    "flags",
 ];
+
+/// More flags than a row has states worth gating an action on.
+pub const MAX_FLAGS: usize = 16;
 
 /// More than a row of chips holds.
 pub const MAX_VIEWS: usize = 12;
@@ -422,13 +439,36 @@ impl Checked for Section {
 }
 
 /// What a node is, for its icon: the `node-kind` feature.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {
     Album,
     Playlist,
     Artist,
     Folder,
+}
+
+impl NodeKind {
+    /// The wire's name for it, which settings store.
+    pub fn name(self) -> &'static str {
+        match self {
+            NodeKind::Album => "album",
+            NodeKind::Playlist => "playlist",
+            NodeKind::Artist => "artist",
+            NodeKind::Folder => "folder",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<NodeKind> {
+        [
+            NodeKind::Album,
+            NodeKind::Playlist,
+            NodeKind::Artist,
+            NodeKind::Folder,
+        ]
+        .into_iter()
+        .find(|kind| kind.name() == name)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -451,6 +491,10 @@ pub struct Node {
     /// its page under the roots instead of as a node of its own.
     #[serde(default)]
     pub home: bool,
+    /// What the node is right now, for actions' `when`: the `flags`
+    /// feature. None when the plugin doesn't know.
+    #[serde(default)]
+    pub flags: Option<Vec<String>>,
 }
 
 impl Checked for Node {
@@ -463,6 +507,7 @@ impl Checked for Node {
         string("title", &self.title)?;
         string("subtitle", &self.subtitle)?;
         string("node art", &self.art)?;
+        flags(&self.flags)?;
         values("node value", &self.values)
     }
 }
@@ -488,9 +533,11 @@ pub struct Track {
     /// The `fields` feature's values. Sync ignores them: a kept row holds
     /// only its tags.
     pub values: Values,
-    /// The `go-to` feature. Sync ignores it too. Boxed, since most tracks
-    /// leave it out.
+    /// The `go-to` feature. Sync keeps it beside the row, so a kept row
+    /// offers Go to too. Boxed, since most tracks leave it out.
     pub go_to: Option<Box<GoTo>>,
+    /// The `flags` feature, as on a node. Sync ignores them: they go stale.
+    pub flags: Option<Vec<String>>,
 }
 
 impl Checked for Track {
@@ -512,6 +559,7 @@ impl Checked for Track {
         .try_for_each(|(field, value)| string(field, value))?;
 
         values("track value", &self.values)?;
+        flags(&self.flags)?;
         self.go_to.as_ref().map_or(Ok(()), |go_to| go_to.check())
     }
 }
@@ -731,6 +779,9 @@ pub struct ActionAnswer {
     pub link: Option<String>,
     #[serde(default)]
     pub reveal: Option<String>,
+    /// The items' flags now that the action ran, the `flags` feature.
+    #[serde(default)]
+    pub flags: HashMap<String, Vec<String>>,
 }
 
 impl ActionAnswer {
@@ -752,7 +803,34 @@ impl Checked for ActionAnswer {
             }
         }
 
+        changed_flags(&self.flags)?;
         self.outcome().check()
+    }
+}
+
+/// An action's or job's flags for the items it touched.
+fn changed_flags(changed: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    if changed.len() > MAX_ENTRIES {
+        return Err(format!("flags name more than {MAX_ENTRIES} items"));
+    }
+
+    changed.iter().try_for_each(|(item, now)| {
+        string("flagged item", item)?;
+        flags(&Some(now.clone()))
+    })
+}
+
+/// `source.flags`'s answer: what each item asked about is right now. An
+/// item left out stays unknown.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct FlagsAnswer {
+    pub flags: HashMap<String, Vec<String>>,
+}
+
+impl Checked for FlagsAnswer {
+    fn check(&self) -> Result<(), String> {
+        changed_flags(&self.flags)
     }
 }
 
@@ -778,6 +856,9 @@ pub struct JobState {
     pub link: Option<String>,
     #[serde(default)]
     pub reveal: Option<String>,
+    /// As on an action's answer, read once the job finishes.
+    #[serde(default)]
+    pub flags: HashMap<String, Vec<String>>,
 }
 
 impl JobState {
@@ -797,6 +878,7 @@ impl Checked for JobState {
             string("error", error)?;
         }
 
+        changed_flags(&self.flags)?;
         self.outcome().check()
     }
 }
@@ -813,6 +895,25 @@ pub fn is_null(value: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_node_kind_round_trips_through_its_name() {
+        for kind in [
+            NodeKind::Album,
+            NodeKind::Playlist,
+            NodeKind::Artist,
+            NodeKind::Folder,
+        ] {
+            assert_eq!(NodeKind::named(kind.name()), Some(kind));
+            assert_eq!(
+                serde_json::from_value::<NodeKind>(json!(kind.name())).unwrap(),
+                kind,
+                "settings store the wire's own name"
+            );
+        }
+
+        assert_eq!(NodeKind::named(""), None);
+    }
 
     #[test]
     fn a_request_is_one_line_with_its_id() {
@@ -1187,6 +1288,58 @@ mod tests {
 
         assert!(decode::<ActionAnswer>(json!({"job": ""})).is_err());
         assert!(decode::<ActionAnswer>(json!({"then": "x"})).is_err());
+
+        let flagged: ActionAnswer =
+            decode(json!({"message": "Added", "flags": {"7": ["favourite"]}})).unwrap();
+        assert_eq!(flagged.flags["7"], ["favourite"]);
+    }
+
+    #[test]
+    fn a_flags_answer_names_each_item_it_knows() {
+        let answer: FlagsAnswer =
+            decode(json!({"flags": {"t1": ["favourite"], "t2": []}})).unwrap();
+        assert_eq!(answer.flags["t1"], ["favourite"]);
+        assert!(answer.flags["t2"].is_empty());
+
+        let crowded: Vec<String> = (0..=MAX_FLAGS).map(|i| format!("f{i}")).collect();
+        assert!(decode::<FlagsAnswer>(json!({"flags": {"t1": crowded}})).is_err());
+        assert!(decode::<FlagsAnswer>(json!({"flags": {}, "more": 1})).is_err());
+    }
+
+    #[test]
+    fn a_row_may_say_its_flags_or_leave_them_unknown() {
+        let page: Page = decode(json!({"entries": [
+            {"track": {"key": "t1", "flags": ["favourite"]}},
+            {"track": {"key": "t2", "flags": []}},
+            {"track": {"key": "t3"}},
+            {"node": {"id": "n1", "title": "N", "flags": ["offline"]}},
+        ]}))
+        .unwrap();
+
+        let flags: Vec<Option<Vec<String>>> = page
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Track(t) => t.flags.clone(),
+                Entry::Node(n) => n.flags.clone(),
+                Entry::Section(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                Some(vec!["favourite".to_string()]),
+                Some(vec![]),
+                None,
+                Some(vec!["offline".to_string()]),
+            ]
+        );
+
+        let crowded: Vec<String> = (0..=MAX_FLAGS).map(|i| format!("f{i}")).collect();
+        assert!(
+            decode::<Page>(json!({"entries": [{"track": {"key": "t", "flags": crowded}}]}))
+                .is_err()
+        );
     }
 
     #[test]

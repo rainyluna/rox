@@ -13,7 +13,7 @@
 //! Writes here refuse local files, stations and Subsonic servers outright,
 //! and every statement is scoped to the source it was handed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -57,6 +57,9 @@ pub struct PluginTrack {
     pub bitrate_kbps: u16,
     /// The stream never ends: no duration, no gapless boundary.
     pub live: bool,
+    /// The nodes Go to opens, as `rox-services` serializes them. Opaque here,
+    /// and empty for none.
+    pub go_to: String,
 }
 
 /// `(source, path)` backs the orphan prune, which asks per row whether any
@@ -85,6 +88,29 @@ pub(crate) fn add_saved(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (source, path)
         );",
     )
+}
+
+/// Go to for kept rows (ADR 30, amended 2026-10-02): the nodes a row's album
+/// and artists open, kept beside the row rather than as columns on `tracks`.
+/// `source_resync` names the collections kept before this stored anything,
+/// so their next sync ignores its token and fills it in once.
+pub(crate) fn add_go_to(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS source_go_to (
+            source TEXT NOT NULL,
+            path   TEXT NOT NULL,
+            go_to  TEXT NOT NULL,
+            PRIMARY KEY (source, path)
+        );
+        CREATE TABLE IF NOT EXISTS source_resync (
+            source     TEXT NOT NULL,
+            collection TEXT NOT NULL,
+            PRIMARY KEY (source, collection)
+        );
+        INSERT OR IGNORE INTO source_resync (source, collection)
+            SELECT DISTINCT source, collection FROM source_members
+             WHERE collection <> '{PICKED}';"
+    ))
 }
 
 /// The row a plugin track becomes. It stores no stream URL: a plugin row
@@ -375,6 +401,11 @@ pub fn expire_picks(
     }
 
     if expired > 0 {
+        let sources: HashSet<&String> = stale.iter().map(|(_, source, _)| source).collect();
+        for source in sources {
+            drop_stale_go_to(&tx, source)?;
+        }
+
         playlists::reattach(&tx)?;
         listens::reattach(&tx)?;
         bookmarks::reattach(&tx)?;
@@ -408,6 +439,10 @@ pub fn set_collection(
         params![source, collection],
     )?;
     hold(&tx, source, collection, tracks)?;
+    tx.execute(
+        "DELETE FROM source_resync WHERE source = ?1 AND collection = ?2",
+        params![source, collection],
+    )?;
 
     let pruned = prune_orphans(&tx, source)?;
     playlists::reattach(&tx)?;
@@ -430,6 +465,10 @@ pub fn drop_collection(
     let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM source_members WHERE source = ?1 AND collection = ?2",
+        params![source, collection],
+    )?;
+    tx.execute(
+        "DELETE FROM source_resync WHERE source = ?1 AND collection = ?2",
         params![source, collection],
     )?;
 
@@ -459,6 +498,7 @@ pub fn remove_track(conn: &mut Connection, source: &str, path: &str) -> rusqlite
         "DELETE FROM tracks WHERE source = ?1 AND path = ?2",
         params![source, path],
     )?;
+    drop_stale_go_to(&tx, source)?;
     playlists::reattach(&tx)?;
     listens::reattach(&tx)?;
     bookmarks::reattach(&tx)?;
@@ -474,6 +514,8 @@ pub fn remove_source(conn: &mut Connection, source: &str) -> rusqlite::Result<us
     tx.execute("DELETE FROM source_members WHERE source = ?1", [source])?;
     tx.execute("DELETE FROM source_saved WHERE source = ?1", [source])?;
     let removed = tx.execute("DELETE FROM tracks WHERE source = ?1", [source])?;
+    tx.execute("DELETE FROM source_go_to WHERE source = ?1", [source])?;
+    tx.execute("DELETE FROM source_resync WHERE source = ?1", [source])?;
     playlists::reattach(&tx)?;
     listens::reattach(&tx)?;
     bookmarks::reattach(&tx)?;
@@ -487,10 +529,12 @@ pub fn remove_source(conn: &mut Connection, source: &str) -> rusqlite::Result<us
 /// row.
 pub fn track(conn: &Connection, source: &str, key: &str) -> rusqlite::Result<Option<PluginTrack>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT title, artist, album_artist, album, genre, year, disc_no, track_no,
-                duration_ms, codec, bitrate, remote_live
-           FROM tracks
-          WHERE source = ?1 AND path = ?2 AND sub = 0",
+        "SELECT t.title, t.artist, t.album_artist, t.album, t.genre, t.year, t.disc_no,
+                t.track_no, t.duration_ms, t.codec, t.bitrate, t.remote_live,
+                COALESCE(g.go_to, '')
+           FROM tracks t
+           LEFT JOIN source_go_to g ON g.source = t.source AND g.path = t.path
+          WHERE t.source = ?1 AND t.path = ?2 AND t.sub = 0",
     )?;
     let mut rows = stmt.query(params![source, key])?;
 
@@ -512,6 +556,7 @@ pub fn track(conn: &Connection, source: &str, key: &str) -> rusqlite::Result<Opt
         codec: row.get(9)?,
         bitrate_kbps: row.get(10)?,
         live: row.get::<_, i64>(11)? != 0,
+        go_to: row.get(12)?,
     }))
 }
 
@@ -593,7 +638,100 @@ fn refuse_other_shapes(source: &str) -> rusqlite::Result<()> {
 fn upsert(conn: &Connection, source: &str, tracks: &[PluginTrack]) -> rusqlite::Result<()> {
     let now = unix_now();
     let rows: Vec<TrackRow> = tracks.iter().map(|track| row_for(track, now)).collect();
-    store::upsert_source_rows_in(conn, source, &rows)
+    store::upsert_source_rows_in(conn, source, &rows)?;
+
+    // A listing without Go to, like a plugin's older answer, leaves the
+    // stored one alone.
+    let mut go_to = conn.prepare_cached(
+        "INSERT INTO source_go_to (source, path, go_to) VALUES (?1, ?2, ?3)
+         ON CONFLICT (source, path) DO UPDATE SET go_to = excluded.go_to",
+    )?;
+    for track in tracks.iter().filter(|track| !track.go_to.is_empty()) {
+        go_to.execute(params![source, track.key, track.go_to])?;
+    }
+
+    Ok(())
+}
+
+/// Go to for rows already in the library, from a listing that showed them.
+/// Writes only what moved, and never makes a row.
+pub fn keep_go_to(
+    conn: &mut Connection,
+    source: &str,
+    found: &[(String, String)],
+) -> rusqlite::Result<usize> {
+    refuse_other_shapes(source)?;
+
+    let tx = conn.transaction()?;
+    let mut wrote = 0;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO source_go_to (source, path, go_to)
+             SELECT ?1, ?2, ?3 WHERE EXISTS
+                 (SELECT 1 FROM tracks WHERE source = ?1 AND path = ?2)
+             ON CONFLICT (source, path) DO UPDATE SET go_to = excluded.go_to
+             WHERE source_go_to.go_to <> excluded.go_to",
+        )?;
+        for (key, go_to) in found.iter().filter(|(_, go_to)| !go_to.is_empty()) {
+            wrote += stmt.execute(params![source, key, go_to])?;
+        }
+    }
+    tx.commit()?;
+
+    Ok(wrote)
+}
+
+/// Go to for rows that are gone. Every path that deletes plugin rows calls it.
+fn drop_stale_go_to(conn: &Connection, source: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM source_go_to WHERE source = ?1
+           AND NOT EXISTS (SELECT 1 FROM tracks t
+                            WHERE t.source = ?1 AND t.path = source_go_to.path)",
+        [source],
+    )?;
+
+    Ok(())
+}
+
+/// The stored Go to of each key that has one.
+pub fn go_to(
+    conn: &Connection,
+    source: &str,
+    keys: &[String],
+) -> rusqlite::Result<HashMap<String, String>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT go_to FROM source_go_to WHERE source = ?1 AND path = ?2")?;
+
+    let mut found = HashMap::new();
+    for key in keys {
+        let stored: Option<String> = stmt
+            .query_row(params![source, key], |r| r.get(0))
+            .optional()?;
+        if let Some(stored) = stored {
+            found.insert(key.clone(), stored);
+        }
+    }
+
+    Ok(found)
+}
+
+/// Every key the source has a row under, kept, added or picked.
+pub fn keys(conn: &Connection, source: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT path FROM tracks WHERE source = ?1 AND sub = 0 ORDER BY id")?;
+    let keys = stmt.query_map([source], |r| r.get(0))?;
+
+    keys.collect()
+}
+
+/// Whether the collection's next sync has to ignore its token: it was kept
+/// before Go to was stored.
+pub fn needs_resync(conn: &Connection, source: &str, collection: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM source_resync WHERE source = ?1 AND collection = ?2)",
+        params![source, collection],
+        |r| r.get(0),
+    )
 }
 
 /// Append `tracks` to the collection after its last member. A key already
@@ -631,14 +769,17 @@ fn hold(
 /// and a subquery binds nothing but the source.
 /// A saved row counts as held.
 fn prune_orphans(conn: &Connection, source: &str) -> rusqlite::Result<usize> {
-    conn.execute(
+    let pruned = conn.execute(
         "DELETE FROM tracks WHERE source = ?1
            AND NOT EXISTS (SELECT 1 FROM source_members m
                             WHERE m.source = ?1 AND m.path = tracks.path)
            AND NOT EXISTS (SELECT 1 FROM source_saved s
                             WHERE s.source = ?1 AND s.path = tracks.path)",
         [source],
-    )
+    )?;
+    drop_stale_go_to(conn, source)?;
+
+    Ok(pruned)
 }
 
 #[cfg(test)]
@@ -676,6 +817,130 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    fn with_go_to(key: &str, go_to: &str) -> PluginTrack {
+        PluginTrack {
+            go_to: go_to.into(),
+            ..track(key, key)
+        }
+    }
+
+    fn stored_go_to(conn: &Connection, key: &str) -> Option<String> {
+        go_to(conn, DEMO, &[key.to_string()]).unwrap().remove(key)
+    }
+
+    #[test]
+    fn a_kept_rows_go_to_is_stored_and_read_back() {
+        let mut conn = store();
+        set_collection(
+            &mut conn,
+            DEMO,
+            "liked",
+            &[with_go_to("a", "{\"album\":null}")],
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_go_to(&conn, "a").as_deref(),
+            Some("{\"album\":null}")
+        );
+        assert_eq!(
+            crate::members::track(&conn, DEMO, "a")
+                .unwrap()
+                .unwrap()
+                .go_to,
+            "{\"album\":null}",
+            "a row reads back as the plugin gave it"
+        );
+    }
+
+    #[test]
+    fn a_listing_without_go_to_leaves_the_stored_one() {
+        let mut conn = store();
+        set_collection(&mut conn, DEMO, "liked", &[with_go_to("a", "first")]).unwrap();
+        pick(&mut conn, DEMO, &[track("a", "a")]).unwrap();
+        assert_eq!(stored_go_to(&conn, "a").as_deref(), Some("first"));
+
+        set_collection(&mut conn, DEMO, "liked", &[with_go_to("a", "second")]).unwrap();
+        assert_eq!(stored_go_to(&conn, "a").as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn keys_are_every_row_the_source_has() {
+        let mut conn = store();
+        set_collection(&mut conn, DEMO, "liked", &a_and_b()).unwrap();
+        pick(&mut conn, DEMO, &[track("c", "C")]).unwrap();
+        pick(&mut conn, "plugin:other", &[track("z", "Z")]).unwrap();
+
+        let mut found = keys(&conn, DEMO).unwrap();
+        found.sort();
+        assert_eq!(found, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_listing_fills_in_go_to_for_rows_already_kept() {
+        let mut conn = store();
+        pick(&mut conn, DEMO, &[track("a", "A")]).unwrap();
+
+        let found = [
+            ("a".to_string(), "x".to_string()),
+            ("ghost".to_string(), "y".to_string()),
+        ];
+        assert_eq!(keep_go_to(&mut conn, DEMO, &found).unwrap(), 1);
+        assert_eq!(stored_go_to(&conn, "a").as_deref(), Some("x"));
+        assert_eq!(
+            stored_go_to(&conn, "ghost"),
+            None,
+            "a listing never makes a row"
+        );
+
+        assert_eq!(
+            keep_go_to(&mut conn, DEMO, &found).unwrap(),
+            0,
+            "nothing moved"
+        );
+    }
+
+    #[test]
+    fn go_to_leaves_with_its_row() {
+        let mut conn = store();
+        set_collection(
+            &mut conn,
+            DEMO,
+            "liked",
+            &[with_go_to("a", "x"), with_go_to("b", "y")],
+        )
+        .unwrap();
+
+        drop_collection(&mut conn, DEMO, "liked").unwrap();
+        assert_eq!(stored_go_to(&conn, "a"), None);
+        assert_eq!(stored_go_to(&conn, "b"), None);
+    }
+
+    #[test]
+    fn collections_kept_before_go_to_sync_in_full_once() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::run_ladder_before(&conn, "plugin-go-to").unwrap();
+        conn.execute(
+            "INSERT INTO source_members (source, collection, path, position)
+             VALUES (?1, 'liked', 'a', 0), (?1, ?2, 'b', 0)",
+            params![DEMO, PICKED],
+        )
+        .unwrap();
+
+        store::init_schema(&conn).unwrap();
+        assert!(needs_resync(&conn, DEMO, "liked").unwrap());
+        assert!(
+            !needs_resync(&conn, DEMO, PICKED).unwrap(),
+            "picks aren't a collection anyone syncs"
+        );
+
+        set_collection(&mut conn, DEMO, "liked", &[track("a", "A")]).unwrap();
+        assert!(
+            !needs_resync(&conn, DEMO, "liked").unwrap(),
+            "once is enough"
+        );
     }
 
     fn paths(keys: &[TrackKey]) -> Vec<String> {

@@ -517,3 +517,67 @@ The declaration goes under `capabilities.source`, which ignores keys it doesn't 
 `api` stays 1, and rox sends `source.action` only to a plugin that declares actions. The
 enable card lists them by label. Adding or changing an action changes the manifest, so it
 goes back to the card, and Developer mode doesn't approve it on its own.
+
+**Amended 2026-10-02: Go to on kept rows.** Andrew's product call, after finding a kept
+album's tracks in the library offered no Go to while the same tracks browsed did. Sync no
+longer ignores `go_to`: rox keeps it beside the row, and a row added or picked from the
+browser keeps the one it was listed with. The library's view of a source offers Go to
+from what's kept, and a target the library doesn't keep opens from the plugin as it would
+from a browsed row. A listing without `go_to` leaves the kept one alone, so a plugin's
+older answer can't erase it. Collections kept before this sync once without their token,
+so their rows fill it in.
+
+**Amended 2026-10-02: action icons and conditions.** Andrew's product call, after the
+favourites plugin offered Add to Favourites and Remove from Favourites on the same
+track, both behind a plug. An action may name an `icon`, an SVG in the plugin's folder
+held to the source icon's rules: inside the folder, small, drawing nothing from outside
+itself. A bad one refuses the plugin with the reason, the way a bad source icon does,
+rather than quietly falling back to the plug. It's drawn as a mask in the theme's colour,
+so the plugin supplies a shape and rox does the drawing.
+
+An action may also name a `when`: a flag the rows carry (`favourite`) or lack
+(`!favourite`). Rows carry `flags` on the wire, gated by the `flags` feature. rox
+offers the action when any picked row can take it, so a mixed selection shows both
+halves of a pair. A row whose flags the plugin didn't say can take any action. A library
+row has no flags of its own, so its menu reads the newest ones the session saw for its
+track, from a listing or an action, and takes any action when there are none. Flags ride on the rows for the same
+reason Go to does: a menu is built whole when it opens, and asking the plugin then would
+hold it up.
+
+An action's answer, or a job's last state, may carry `flags` for the items it changed.
+rox merges them into what's on screen, so the menu after Add to Favourites offers
+Remove without listing the place again, which would drop the pages already scrolled
+through. Flags are hints for a menu, never a record: sync ignores them, and rox keeps
+the ones it saw only for the session.
+
+**Amended 2026-10-02: asking for a library row's flags, and Go to from any menu.**
+Andrew's call, after a kept album's tracks in the library still offered both halves of
+every pair: rows the library builds from tags carried no flags, and the ones the session
+had seen in listings didn't reach them. rox now asks with `source.flags`, a list of keys
+in and their flags out, once a plugin is up and again after each sync. It's still a call
+rox makes, and only to a plugin that gives an action a `when`. A plugin that doesn't
+answer it leaves its rows unknown, which offers every action, as before. The answers
+are hints like any other flags: kept for the session, and replaced by a newer listing or
+action report.
+
+Go to also leaves the source browser. A row's kept Go to puts the entry in every menu
+the row has, the queue's and the library's included, and the node opens in an External
+Sources panel on that plugin: the one whose menu was open, else one in any tab group,
+else a new one. The panel still does the opening, so a node still only opens where a
+plugin's nodes can.
+
+An answer that's only a `reveal`, with no message or link, shows the path in the file
+manager at once instead of offering it on a toast. The click on the action is already
+the user asking for it, so Show in Folder takes one click, not two. rox still only ever
+shows the path and never opens it.
+
+**Amended 2026-10-02: the locale in `hello`.** Andrew's call, after asking whether a
+plugin can localize itself and finding it can't: everything a plugin supplies shows as
+written, and nothing told it which language the user reads. `hello` now carries
+`locale`, the interface language as a BCP 47 tag, so a plugin can write its own text in
+it: listings, errors and action messages. It's a parameter rox sends, not something it
+reads back, so it isn't a feature, and a plugin treats a missing one as unknown. rox
+takes it when the plugin starts and doesn't restart a running plugin on a language
+switch, which would cut off what it's playing. Manifest text (labels, action labels,
+settings titles) still shows as written; a per-language map for it waits until a plugin
+ships translations.

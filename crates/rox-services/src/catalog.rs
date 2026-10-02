@@ -622,6 +622,15 @@ impl Library {
             .unwrap_or(false)
     }
 
+    /// Whether the analysis pass described this track, so it has neighbours
+    /// to draw from.
+    pub fn described(&self, track_id: i64, model: &str) -> bool {
+        self.conn
+            .as_ref()
+            .and_then(|conn| embeddings::has(conn, track_id, model).ok())
+            .unwrap_or(false)
+    }
+
     pub fn acoustic_coverage(&self, model: &str) -> embeddings::Coverage {
         self.conn
             .as_ref()

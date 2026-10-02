@@ -10,6 +10,7 @@ so each test sets its own:
   sleep          {method: seconds} to wait before answering
   crash_on       a method that makes it exit without answering
   hello_crash    exit during hello instead
+  echo.hello     a method answering the params hello carried
   loop_file      a file the endless "live" key plays over and over; also
                  lists a live track in the collection
   live_kbps      how fast the live key's bytes come (default 128)
@@ -35,6 +36,7 @@ LIVE = {"key": "live", "title": "Echo live", "artist": "Echo", "album": "Fixture
         "track_no": 0, "duration_ms": 0, "codec": "", "bitrate_kbps": 0, "live": True}
 
 config = {}
+hello = {}
 out_lock = threading.Lock()
 streams = {}
 streams_lock = threading.Lock()
@@ -88,6 +90,9 @@ def handle(rid, method, params):
 
     if method == config.get("crash_on"):
         os._exit(3)
+
+    if method == "echo.hello":
+        return hello
 
     if method == "source.browse":
         if params.get("node") is None:
@@ -173,6 +178,8 @@ def main():
         rid, method, params = frame.get("id"), frame.get("method"), frame.get("params") or {}
 
         if method == "hello":
+            hello.clear()
+            hello.update(params)
             config.clear()
             config.update(params.get("config") or {})
             if config.get("hello_crash"):

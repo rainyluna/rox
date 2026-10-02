@@ -11,13 +11,14 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Axis, Context, Div, ElementId, EventEmitter,
-    FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, ScrollStrategy, SharedString, Subscription, Task, WeakEntity, Window, canvas, div,
-    ease_out_quint, img, prelude::*, px, size, svg,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Axis, Context, Div, ElementId,
+    EventEmitter, FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    ObjectFit, Pixels, ScrollStrategy, SharedString, Subscription, Task, WeakEntity, Window,
+    canvas, div, ease_out_quint, img, prelude::*, px, size, svg,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
@@ -25,10 +26,11 @@ use gpui_component::{Icon, Sizable, VirtualListScrollHandle, v_virtual_list};
 use rox_core::QUEUE_CAP;
 use rox_core::fmt::fmt_num;
 use rox_core::settings::{Settings, SyncedCollection};
-use rox_dock::{Panel, PanelEvent, TabPanel};
+use rox_dock::{Panel, PanelEvent, PanelView, TabPanel};
 use rox_library::cue::{PLUGIN_PREFIX, TrackKey, source_id};
 use rox_library::members::{self, PluginTrack};
 use rox_panel_api::plugin_actions;
+use rox_panel_api::toast::Toast;
 use rox_services::plugins::{
     self, Entry, Field, FieldKind, FieldValue, GoTo, NodeKind, Notice, NoticeLink, Page, RadioSeed,
     Target, Unavailable, Values, View,
@@ -185,6 +187,16 @@ fn slide(shelf: &gpui::ScrollHandle, by: Pixels) {
     shelf.set_offset(offset);
 }
 
+/// A kept collection's second line: the plugin's own, then how many of its
+/// tracks the library holds.
+fn kept_line(subtitle: &str, count: usize) -> SharedString {
+    let count = rox_i18n::t!("source-browser-members", count = count as u64);
+    match subtitle.is_empty() {
+        true => count,
+        false => format!("{subtitle}, {count}").into(),
+    }
+}
+
 fn node_glyph(kind: Option<NodeKind>, collection: bool) -> &'static str {
     match (kind, collection) {
         (Some(NodeKind::Album), _) => icons::DISC,
@@ -192,6 +204,69 @@ fn node_glyph(kind: Option<NodeKind>, collection: bool) -> &'static str {
         (Some(NodeKind::Artist), _) => icons::USER,
         (Some(NodeKind::Folder), _) | (None, false) => icons::FOLDER,
     }
+}
+
+/// The browser whose track menu opened last. Go to picked from the shared
+/// menu inside it opens there, not in another browser on the same plugin.
+struct MenuOrigin(WeakEntity<SourceBrowserPanel>);
+
+impl gpui::Global for MenuOrigin {}
+
+/// Go to from a menu outside a browser's own: the browser the menu opened in
+/// when it shows that plugin, else the first one on it in any tab group,
+/// else a new one in the newest group.
+pub fn go_to_source(
+    state: AppState,
+    source: String,
+    target: Target,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin = cx
+        .try_global::<MenuOrigin>()
+        .and_then(|origin| origin.0.upgrade())
+        .filter(|browser| browser.read(cx).config.source == source);
+    if let Some(browser) = origin {
+        browser.update(cx, |this, cx| this.open_target(&target, cx));
+
+        // The menu may have opened elsewhere since, so its tab comes forward.
+        let tabs = browser
+            .read(cx)
+            .tab_panel
+            .as_ref()
+            .and_then(|tabs| tabs.upgrade());
+        if let Some(tabs) = tabs {
+            let panel: Arc<dyn PanelView> = Arc::new(browser);
+            tabs.update(cx, |tabs, cx| tabs.focus_panel(&panel, window, cx));
+        }
+        return;
+    }
+
+    for tabs in state.tab_hosts.read(cx).groups() {
+        let found = tabs.read(cx).panels().iter().find_map(|panel| {
+            let browser = panel.view().downcast::<SourceBrowserPanel>().ok()?;
+            (browser.read(cx).config.source == source).then(|| (panel.clone(), browser))
+        });
+
+        if let Some((panel, browser)) = found {
+            browser.update(cx, |this, cx| this.open_target(&target, cx));
+            tabs.update(cx, |tabs, cx| tabs.focus_panel(&panel, window, cx));
+            return;
+        }
+    }
+
+    let Some(tabs) = state.tab_hosts.read(cx).last_live(cx) else {
+        log::warn!("Go to {}: no tab group to open {source} in", target.id);
+        return;
+    };
+
+    let config = SourceBrowserConfig {
+        source,
+        ..SourceBrowserConfig::default()
+    };
+    let browser = cx.new(|cx| SourceBrowserPanel::new(state.clone(), config, window, cx));
+    browser.update(cx, |this, cx| this.open_target(&target, cx));
+    tabs.update(cx, |tabs, cx| tabs.add_panel(Arc::new(browser), window, cx));
 }
 
 fn go_to_item(
@@ -402,6 +477,8 @@ struct Listing {
     values: Vec<Values>,
     /// Every page's Go to nodes, by track key.
     go_to: HashMap<String, GoTo>,
+    /// Every page's row flags, by track key or node id.
+    flags: HashMap<String, Vec<String>>,
     /// The field the list is sorted by, None for the plugin's order.
     sort: Option<String>,
     home: Home,
@@ -482,6 +559,7 @@ impl Listing {
                 self.values = page.values;
                 self.values.resize(self.entries.len(), Values::new());
                 self.go_to = page.go_to;
+                self.flags = page.flags;
                 self.sort = None;
                 self.home = Home::None;
                 Landed::Replaced { moved }
@@ -500,6 +578,7 @@ impl Listing {
                 self.values.extend(page.values);
                 self.values.resize(self.entries.len(), Values::new());
                 self.go_to.extend(page.go_to);
+                self.flags.extend(page.flags);
                 Landed::Appended
             }
         }
@@ -584,6 +663,8 @@ pub struct SourceBrowserPanel {
     ids: HashMap<String, i64>,
     /// Collections whose switch is still working.
     syncing: HashSet<String>,
+    /// How many flag reports from the plugin's actions the listing has merged.
+    flags_seen: u64,
     /// Track keys a pick is still adding.
     picking: HashSet<String>,
     playing: Option<TrackKey>,
@@ -729,6 +810,7 @@ impl SourceBrowserPanel {
             listing: Listing::default(),
             ids: HashMap::new(),
             syncing: HashSet::new(),
+            flags_seen: 0,
             picking: HashSet::new(),
             playing,
             opening,
@@ -828,6 +910,60 @@ impl SourceBrowserPanel {
 
     fn is_synced(&self, node: &str) -> bool {
         self.synced.iter().any(|c| c.id == node)
+    }
+
+    /// The node at `ix` as a kept collection stores it.
+    fn kept_look(&self, ix: usize) -> Option<SyncedCollection> {
+        let Some(Entry::Node {
+            id,
+            title,
+            subtitle,
+            kind,
+            art,
+            ..
+        }) = self.listing.entries.get(ix)
+        else {
+            return None;
+        };
+
+        Some(SyncedCollection {
+            id: id.clone(),
+            title: title.clone(),
+            subtitle: subtitle.clone(),
+            kind: kind.map(NodeKind::name).unwrap_or_default().to_string(),
+            art: art.clone(),
+            token: String::new(),
+        })
+    }
+
+    /// Kept collections in this listing whose look moved since they were
+    /// stored, written back so the library draws them the same offline.
+    fn restyle_kept(&mut self) {
+        let seen: Vec<SyncedCollection> = (0..self.listing.entries.len())
+            .filter_map(|ix| self.kept_look(ix))
+            .filter(|look| {
+                self.synced.iter().any(|kept| {
+                    kept.id == look.id
+                        && (&kept.title, &kept.subtitle, &kept.kind, &kept.art)
+                            != (&look.title, &look.subtitle, &look.kind, &look.art)
+                })
+            })
+            .collect();
+
+        if seen.is_empty() {
+            return;
+        }
+
+        for kept in self.synced.iter_mut() {
+            if let Some(look) = seen.iter().find(|look| look.id == kept.id) {
+                kept.title = look.title.clone();
+                kept.subtitle = look.subtitle.clone();
+                kept.kind = look.kind.clone();
+                kept.art = look.art.clone();
+            }
+        }
+
+        plugins::restyle_synced(self.source(), seen);
     }
 
     fn key_for(&self, key: &str) -> TrackKey {
@@ -965,6 +1101,8 @@ impl SourceBrowserPanel {
 
         if failed {
             self.listing.unavailable = plugins::unavailable(self.source());
+        } else {
+            self.restyle_kept();
         }
 
         if matches!(landed, Landed::Replaced { .. })
@@ -994,6 +1132,9 @@ impl SourceBrowserPanel {
         }
 
         self.resolve_ids(cx);
+        if !failed && !self.listing.place.library {
+            self.keep_listed_go_to(cx);
+        }
         cx.notify();
     }
 
@@ -1071,14 +1212,16 @@ impl SourceBrowserPanel {
 
     /// Plays the plugin's station from a row: the row's own tracks first,
     /// then the station. `busy` is the row's key or id, spinning meanwhile.
+    /// A failure lands after the menu has closed, so it's a toast on
+    /// `origin`.
     fn play_similar(
         &mut self,
         seed: RadioSeed,
         busy: String,
         title: String,
+        origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        self.failure = None;
         self.picking.insert(busy.clone());
         cx.notify();
 
@@ -1095,10 +1238,9 @@ impl SourceBrowserPanel {
             this.update(cx, |this, cx| {
                 this.picking.remove(&busy);
                 if let Err(e) = result {
-                    this.failure = Some((
-                        rox_i18n::t!("source-browser-similar-failed", title = title),
-                        e,
-                    ));
+                    Toast::new(Tone::Bad, e)
+                        .title(rox_i18n::t!("source-browser-similar-failed", title = title))
+                        .post(origin, cx);
                 }
                 cx.notify();
             })
@@ -1114,16 +1256,11 @@ impl SourceBrowserPanel {
             .map(|c| Entry::Node {
                 id: c.id.clone(),
                 title: c.title.clone(),
-                subtitle: self
-                    .members
-                    .get(&c.id)
-                    .map(|count| {
-                        rox_i18n::t!("source-browser-members", count = *count as u64).to_string()
-                    })
-                    .unwrap_or_default(),
+                // The row adds the library's count, as it does for any kept node.
+                subtitle: c.subtitle.clone(),
                 collection: true,
-                kind: None,
-                art: String::new(),
+                kind: NodeKind::named(&c.kind),
+                art: c.art.clone(),
                 home: false,
             })
             .collect();
@@ -1175,6 +1312,7 @@ impl SourceBrowserPanel {
         Page {
             entries,
             notice,
+            go_to: self.library_go_to(&saved, cx),
             ..Page::default()
         }
     }
@@ -1189,8 +1327,25 @@ impl SourceBrowserPanel {
 
         Page {
             entries: self.track_entries(&keys, cx),
+            go_to: self.library_go_to(&keys, cx),
             ..Page::default()
         }
+    }
+
+    /// Go to for library rows, as the plugin last gave it with them.
+    fn library_go_to(&self, keys: &[TrackKey], cx: &App) -> HashMap<String, GoTo> {
+        let paths: Vec<String> = keys
+            .iter()
+            .map(|key| key.path.to_string_lossy().into_owned())
+            .collect();
+
+        rox_library::store::open(&self.state.library.read(cx).db_path())
+            .ok()
+            .and_then(|conn| members::go_to(&conn, self.source(), &paths).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, stored)| Some((key, plugins::go_to_from(&stored)?)))
+            .collect()
     }
 
     /// Rows for library tracks, from the tags the library holds.
@@ -1282,15 +1437,9 @@ impl SourceBrowserPanel {
         true
     }
 
-    fn set_synced(&mut self, node: String, title: String, on: bool, cx: &mut Context<Self>) {
-        let task = plugins::set_synced(
-            self.state.library.clone(),
-            self.source(),
-            &node,
-            &title,
-            on,
-            cx,
-        );
+    fn set_synced(&mut self, kept: SyncedCollection, on: bool, cx: &mut Context<Self>) {
+        let (node, title) = (kept.id.clone(), kept.title.clone());
+        let task = plugins::set_synced(self.state.library.clone(), self.source(), kept, on, cx);
 
         // The record is written before the task starts, so the switch reads
         // the new state now and spins until the rows follow.
@@ -1540,14 +1689,26 @@ impl SourceBrowserPanel {
             false => (rox_i18n::t!("source-browser-add-to-library"), icons::PLUS),
         };
 
+        // Inside the collection there's no row to read its line and art
+        // from; the next listing that shows it fills them in.
+        let kept = SyncedCollection {
+            id: node.id.clone(),
+            title: node.title.clone(),
+            kind: node
+                .kind
+                .map(NodeKind::name)
+                .unwrap_or_default()
+                .to_string(),
+            ..SyncedCollection::default()
+        };
+
         let panel = cx.entity().downgrade();
-        let (id, title) = (node.id.clone(), node.title.clone());
         crate::settings::ui::small_button(label, icon, busy, move |_, _, cx| {
-            let (id, title) = (id.clone(), title.clone());
+            let kept = kept.clone();
             panel
                 .update(cx, |this, cx| {
-                    if !this.syncing.contains(&id) {
-                        this.set_synced(id, title, !synced, cx);
+                    if !this.syncing.contains(&kept.id) {
+                        this.set_synced(kept, !synced, cx);
                     }
                 })
                 .ok();
@@ -1642,6 +1803,12 @@ impl SourceBrowserPanel {
 
     fn gone_to(&self, target: &Target) -> Place {
         self.listing.place.clone().going_to(target)
+    }
+
+    /// Opens a node Go to named, from wherever the panel is.
+    pub fn open_target(&mut self, target: &Target, cx: &mut Context<Self>) {
+        let place = self.gone_to(target);
+        self.go(place, cx);
     }
 
     /// Keeps the first `depth` crumbs. The crumb being shown reloads, which
@@ -1864,6 +2031,14 @@ impl SourceBrowserPanel {
 
         // Switching a plugin on from Settings redraws this window.
         self.retry_if_back(cx);
+
+        // An action's toast redraws it too, with the flags it reported.
+        if let Some((seen, flags)) =
+            rox_services::plugin_actions::flags_since(self.source(), self.flags_seen)
+        {
+            self.flags_seen = seen;
+            self.listing.flags.extend(flags);
+        }
 
         let failed = match self.listing.unavailable {
             Some(reason) => Some(self.unavailable_banner(reason)),
@@ -2454,7 +2629,10 @@ impl SourceBrowserPanel {
                     self.state.clone(),
                     vec![id],
                     rox_i18n::t!("queue-play-now"),
-                    similar,
+                    panel::Extras {
+                        after_next: similar,
+                        ..panel::Extras::default()
+                    },
                     window,
                     cx,
                     play,
@@ -2483,11 +2661,14 @@ impl SourceBrowserPanel {
         Some(
             PopupMenuItem::new(rox_i18n::t!("library-play-similar"))
                 .icon(Icon::default().path(icons::RADIO))
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     let (busy, title) = (track.key.clone(), track.title.clone());
                     let seed = RadioSeed::Track(track.clone());
+                    let origin = window.window_handle();
                     panel
-                        .update(cx, |this, cx| this.play_similar(seed, busy, title, cx))
+                        .update(cx, |this, cx| {
+                            this.play_similar(seed, busy, title, origin, cx)
+                        })
                         .ok();
                 }),
         )
@@ -3055,9 +3236,7 @@ impl SourceBrowserPanel {
 
         // Plugin text renders as it came, never through the translator.
         let second = match (synced, self.members.get(&id)) {
-            (true, Some(&count)) if !self.syncing.contains(&id) => {
-                rox_i18n::t!("source-browser-members", count = count as u64)
-            }
+            (true, Some(&count)) if !self.syncing.contains(&id) => kept_line(&subtitle, count),
             _ => SharedString::from(subtitle),
         };
 
@@ -3093,7 +3272,11 @@ impl SourceBrowserPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let syncing = self.syncing.contains(id);
-        let (node, name) = (id.to_string(), title.to_string());
+        let kept = self.kept_look(ix).unwrap_or_else(|| SyncedCollection {
+            id: id.to_string(),
+            title: title.to_string(),
+            ..SyncedCollection::default()
+        });
 
         let tip = match synced {
             true => rox_i18n::t!("source-browser-synced"),
@@ -3159,8 +3342,8 @@ impl SourceBrowserPanel {
             // The press stops here, or it would open the row or tile too.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                if !this.syncing.contains(&node) {
-                    this.set_synced(node.clone(), name.clone(), !synced, cx);
+                if !this.syncing.contains(&kept.id) {
+                    this.set_synced(kept.clone(), !synced, cx);
                 }
             }))
             .child(face)
@@ -3484,7 +3667,7 @@ impl SourceBrowserPanel {
             .flatten();
         let tracks = self.tracks_at(&rows);
         if tracks.is_empty() {
-            let menu = self.node_items(menu, &rows, similar, cx);
+            let menu = self.node_items(menu, &rows, similar, cx).separator();
             let menu = match (rows.as_slice(), self.listing.entries.get(row)) {
                 ([_], Some(Entry::Node { id, .. })) => {
                     panel::link_items(menu, self.source(), id.clone())
@@ -3499,7 +3682,8 @@ impl SourceBrowserPanel {
                     _ => None,
                 })
                 .collect();
-            let menu = plugin_actions::offer(menu, self.source(), "node", nodes);
+            let menu =
+                plugin_actions::offer(menu, self.source(), "node", nodes, &self.listing.flags);
 
             return self.dropdown_menu(menu.separator(), window, cx);
         }
@@ -3530,62 +3714,99 @@ impl SourceBrowserPanel {
                 .ok();
         };
 
-        let shared = ids.is_some();
-        let menu = match ids {
-            Some(ids) => panel::track_actions_with(
-                menu,
-                self.state.clone(),
-                ids,
-                play_label,
-                similar,
-                window,
-                cx,
-                on_play,
-            ),
+        cx.set_global(MenuOrigin(cx.entity().downgrade()));
 
-            // The shared menu brings its own links; a track not in the
-            // library yet gets them here.
-            None => {
-                let menu = self.unpicked_menu(
+        // The listing's Go to is the plugin's newest and skips the node shown,
+        // so it stands in for the one the library kept.
+        let go_to = match tracks.as_slice() {
+            [track] => self.go_to_submenu(&track.key, window, cx),
+            _ => None,
+        };
+        let add = self.library_item(&tracks, cx);
+
+        let menu = match ids {
+            Some(ids) => {
+                let extras = panel::Extras {
+                    after_next: similar,
+                    go_to,
+                    plugin: add.into_iter().collect(),
+                };
+                panel::track_actions_with(
                     menu,
-                    tracks.clone(),
+                    self.state.clone(),
+                    ids,
                     play_label,
-                    on_play,
-                    similar,
+                    extras,
                     window,
                     cx,
-                );
+                    on_play,
+                )
+            }
+
+            // A track not in the library yet gets the shared menu's plugin
+            // section here, in the same order.
+            None => {
+                let menu = self
+                    .unpicked_menu(
+                        menu,
+                        tracks.clone(),
+                        play_label,
+                        on_play,
+                        similar,
+                        window,
+                        cx,
+                    )
+                    .separator();
                 let menu = match tracks.as_slice() {
                     [track] => panel::link_items(menu, self.source(), track.key.clone()),
                     _ => menu,
                 };
 
                 let keys = tracks.iter().map(|track| track.key.clone()).collect();
-                plugin_actions::offer(menu, self.source(), "track", keys)
+                let menu =
+                    plugin_actions::offer(menu, self.source(), "track", keys, &self.listing.flags);
+
+                menu.when_some(add, |menu, item| menu.item(item))
+                    .separator()
+                    .when_some(go_to, |menu, item| menu.item(item))
             }
         };
-        let menu = match tracks.as_slice() {
-            [track] => self.go_to_submenu(menu, &track.key, window, cx),
-            _ => menu,
-        };
-        // The shared menu brings its own Remove from Library and Stop Keeping.
-        let menu = self.library_item(menu, tracks, shared, cx);
 
         self.dropdown_menu(menu.separator(), window, cx)
+    }
+
+    /// Rows already in the library keep the Go to this listing showed, so a
+    /// row from before Go to was kept gets it everywhere it's listed.
+    fn keep_listed_go_to(&self, cx: &mut Context<Self>) {
+        let listed: HashMap<String, GoTo> = self
+            .listing
+            .go_to
+            .iter()
+            .filter(|(key, _)| self.ids.contains_key(*key))
+            .map(|(key, go_to)| (key.clone(), go_to.clone()))
+            .collect();
+        if listed.is_empty() {
+            return;
+        }
+
+        let (db, source) = (
+            self.state.library.read(cx).db_path(),
+            self.source().to_string(),
+        );
+        cx.background_executor()
+            .spawn(async move { plugins::keep_go_to(&db, &source, &listed) })
+            .detach();
     }
 
     /// Go to the track's album or one of its artists, when the plugin named
     /// them. The node the list is already showing isn't offered.
     fn go_to_submenu(
         &self,
-        menu: PopupMenu,
         key: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> PopupMenu {
-        let Some(go_to) = self.listing.go_to.get(key) else {
-            return menu;
-        };
+    ) -> Option<PopupMenuItem> {
+        let go_to = self.listing.go_to.get(key)?;
 
         let here = self.listing.place.node().map(|crumb| crumb.id.as_str());
         let elsewhere = |target: &&Target| Some(target.id.as_str()) != here;
@@ -3593,7 +3814,7 @@ impl SourceBrowserPanel {
         let artists: Vec<Target> = go_to.artists.iter().filter(elsewhere).cloned().collect();
 
         if album.is_none() && artists.is_empty() {
-            return menu;
+            return None;
         }
 
         let panel = cx.entity().downgrade();
@@ -3631,7 +3852,7 @@ impl SourceBrowserPanel {
             submenu
         });
 
-        menu.item(
+        Some(
             PopupMenuItem::submenu(rox_i18n::t!("source-browser-go-to"), submenu)
                 .icon(Icon::default().path(icons::ARROW_RIGHT)),
         )
@@ -3653,15 +3874,16 @@ impl SourceBrowserPanel {
         Some(
             PopupMenuItem::new(rox_i18n::t!("library-play-similar"))
                 .icon(Icon::default().path(icons::RADIO))
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     let (busy, title) = (busy.clone(), title.clone());
+                    let origin = window.window_handle();
                     panel
                         .update(cx, |this, cx| {
                             let seed = match this.listing.entries.get(row) {
                                 Some(Entry::Track(track)) => RadioSeed::Track(track.clone()),
                                 _ => RadioSeed::Node(busy.clone()),
                             };
-                            this.play_similar(seed, busy, title, cx)
+                            this.play_similar(seed, busy, title, origin, cx)
                         })
                         .ok();
                 }),
@@ -3721,48 +3943,35 @@ impl SourceBrowserPanel {
     }
 
     /// Playing a track doesn't add it (ADR 29), so adding is its own item.
-    /// Tracks added one at a time can be taken back out; a kept collection's
-    /// tracks follow its switch instead, so they get neither.
+    /// Taking rows back out is the shared menu's, since only rows already in
+    /// the library can be.
     fn library_item(
         &self,
-        menu: PopupMenu,
-        tracks: Vec<PluginTrack>,
-        shared: bool,
+        tracks: &[PluginTrack],
         cx: &mut Context<Self>,
-    ) -> PopupMenu {
+    ) -> Option<PopupMenuItem> {
         let library = self.state.library.read(cx);
-        let id = |track: &PluginTrack| self.ids.get(&track.key).copied();
         let missing: Vec<PluginTrack> = tracks
             .iter()
-            .filter(|track| !id(track).is_some_and(|id| library.in_library(id)))
+            .filter(|track| {
+                !self
+                    .ids
+                    .get(&track.key)
+                    .is_some_and(|id| library.in_library(*id))
+            })
             .cloned()
             .collect();
-        let all_saved = tracks
-            .iter()
-            .all(|track| id(track).is_some_and(|id| library.is_saved(id)));
+        if missing.is_empty() {
+            return None;
+        }
 
         let panel = cx.entity().downgrade();
-        if !missing.is_empty() {
-            return menu.separator().item(
-                PopupMenuItem::new(rox_i18n::t!("source-browser-add-to-library"))
-                    .icon(Icon::default().path(icons::PLUS))
-                    .on_click(move |_, _, cx| {
-                        let tracks = missing.clone();
-                        panel.update(cx, |this, cx| this.save(tracks, cx)).ok();
-                    }),
-            );
-        }
-        if !all_saved || shared {
-            return menu;
-        }
-
-        let paths: Vec<String> = tracks.into_iter().map(|track| track.key).collect();
-        menu.separator().item(
-            PopupMenuItem::new(rox_i18n::t!("source-browser-remove-from-library"))
-                .icon(Icon::default().path(icons::MINUS))
+        Some(
+            PopupMenuItem::new(rox_i18n::t!("source-browser-add-to-library"))
+                .icon(Icon::default().path(icons::PLUS))
                 .on_click(move |_, _, cx| {
-                    let paths = paths.clone();
-                    panel.update(cx, |this, cx| this.unsave(paths, cx)).ok();
+                    let tracks = missing.clone();
+                    panel.update(cx, |this, cx| this.save(tracks, cx)).ok();
                 }),
         )
     }
@@ -4027,7 +4236,11 @@ impl Panel for SourceBrowserPanel {
 
         // An action on no item is the panel's, so it's in the panel's own menu.
         let menu = match plugin_actions::offers(self.source(), "source") {
-            true => plugin_actions::offer(menu, self.source(), "source", Vec::new()).separator(),
+            true => {
+                let menu = menu.separator();
+                plugin_actions::offer(menu, self.source(), "source", Vec::new(), &HashMap::new())
+                    .separator()
+            }
             false => menu,
         };
 

@@ -144,16 +144,16 @@ pub fn reattach(conn: &Connection) -> rusqlite::Result<Option<usize>> {
     )?;
 
     // Takes the local track's source too: a plugin member that lands here
-    // belongs to the local file from now on.
+    // belongs to the local file from now on. Driven from the dangling
+    // members for the reason `listens::reattach` gives.
     let by_tags = conn.execute(
-        "UPDATE playlist_tracks SET track_id = t.id, path = t.path, source = t.source
-         FROM tracks t
+        "UPDATE playlist_tracks SET (track_id, path, source) = (
+             SELECT t.id, t.path, t.source FROM tracks t WHERE t.source = 'local'
+               AND t.title = playlist_tracks.title AND t.artist = playlist_tracks.artist
+               AND t.album = playlist_tracks.album)
          WHERE NOT EXISTS (SELECT 1 FROM tracks x WHERE x.id = playlist_tracks.track_id)
            AND NOT (playlist_tracks.title = '' AND playlist_tracks.artist = ''
                     AND playlist_tracks.album = '')
-           AND t.source = 'local'
-           AND t.title = playlist_tracks.title AND t.artist = playlist_tracks.artist
-           AND t.album = playlist_tracks.album
            AND (SELECT COUNT(*) FROM tracks c WHERE c.source = 'local'
                 AND c.title = playlist_tracks.title AND c.artist = playlist_tracks.artist
                 AND c.album = playlist_tracks.album) = 1",

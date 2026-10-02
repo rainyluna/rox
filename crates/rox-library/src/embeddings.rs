@@ -111,6 +111,16 @@ pub fn any(conn: &Connection, model: &str) -> rusqlite::Result<bool> {
     )
 }
 
+/// Whether the track has a vector under `model`, for a menu deciding whether
+/// to offer Play Similar on it.
+pub fn has(conn: &Connection, track_id: i64, model: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM embeddings WHERE track_id = ?1 AND model = ?2)",
+        rusqlite::params![track_id, model],
+        |r| r.get(0),
+    )
+}
+
 /// A vector with a NaN or an infinity is silently refused: one of them turns
 /// every score in the library into NaN through the corpus mean. Failing the
 /// batch would throw away the good tracks beside it.
@@ -1196,6 +1206,21 @@ mod tests {
         upsert(&conn, id, "m", &[1.0, 2.0]).unwrap();
         assert!(any(&conn, "m").unwrap());
         assert!(!any(&conn, "other").unwrap());
+    }
+
+    #[test]
+    fn a_track_is_described_only_by_its_own_vector() {
+        let conn = conn();
+        let one = add_track(&conn, "/m/1.mp3", 200_000);
+        let two = add_track(&conn, "/m/2.mp3", 200_000);
+        upsert(&conn, one, "m", &[1.0, 2.0]).unwrap();
+
+        assert!(has(&conn, one, "m").unwrap());
+        assert!(
+            !has(&conn, two, "m").unwrap(),
+            "a neighbour's vector isn't its own"
+        );
+        assert!(!has(&conn, one, "other").unwrap());
     }
 
     #[test]
