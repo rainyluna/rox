@@ -12,21 +12,14 @@
 //!
 //! Follows the ADR 19 bypass rule: when disabled or with no impulse response and
 //! neutral spatial settings, samples pass bit-exact and internal filter state stays clear.
-#![allow(
-    clippy::too_many_arguments,
-    clippy::needless_range_loop,
-    clippy::manual_div_ceil,
-    clippy::approx_constant,
-    clippy::vec_init_then_push,
-    clippy::chunks_exact_to_as_chunks
-)]
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::chain::Node;
+use crate::resample::Resampler;
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
@@ -191,15 +184,34 @@ pub struct WavIr {
 
 impl WavIr {
     /// Resample this impulse response's channels to the target sample rate if needed.
+    ///
+    /// Uses the playback [`Resampler`], which is interleaved stereo, so the
+    /// channels go through in pairs (an odd last channel is paired with
+    /// silence). Each channel comes out `round(len * target / source)` long.
     pub fn resampled_to(&self, target_rate: u32) -> Self {
         if self.sample_rate == target_rate || self.channels.is_empty() {
             return self.clone();
         }
-        let resampled = self
-            .channels
-            .iter()
-            .map(|ch| resample_channel(ch, self.sample_rate, target_rate))
-            .collect();
+        let mut resampler = Resampler::new(self.sample_rate, target_rate);
+        let mut resampled = Vec::with_capacity(self.channels.len());
+        let mut pair_in = Vec::new();
+        let mut pair_out = Vec::new();
+        for pair in self.channels.chunks(2) {
+            let (left, right) = (&pair[0], pair.get(1));
+            pair_in.clear();
+            pair_out.clear();
+            for (i, &l) in left.iter().enumerate() {
+                pair_in.push(l);
+                pair_in.push(right.and_then(|r| r.get(i)).copied().unwrap_or(0.0));
+            }
+            resampler.process(&pair_in, &mut pair_out);
+            // Flush lands on the exact frame count and re-arms for the next pair.
+            resampler.flush(&mut pair_out);
+            resampled.push(pair_out.iter().step_by(2).copied().collect());
+            if right.is_some() {
+                resampled.push(pair_out.iter().skip(1).step_by(2).copied().collect());
+            }
+        }
         WavIr {
             name: self.name.clone(),
             sample_rate: target_rate,
@@ -209,47 +221,46 @@ impl WavIr {
     }
 }
 
-/// Parse a RIFF/WAVE file into a [`WavIr`].
-/// Supports 16-bit, 24-bit, and 32-bit integer PCM, as well as 32-bit and 64-bit IEEE float,
-/// including standard RIFF and WAVE_FORMAT_EXTENSIBLE headers.
-pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
-    if data.len() < 12 {
-        return Err("WAV data too short".into());
-    }
-    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+/// Parse a RIFF/WAVE source into a [`WavIr`] using any seekable reader.
+/// Only reads the header and up to [`MAX_IR_SAMPLES`] frames from the data chunk,
+/// avoiding reading entire multi-gigabyte audio files into memory.
+pub fn parse_wav_reader<R: std::io::Read + std::io::Seek>(
+    name: &str,
+    mut reader: R,
+) -> Result<WavIr, String> {
+    let mut header = [0u8; 12];
+    reader
+        .read_exact(&mut header)
+        .map_err(|_| "WAV data too short")?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
         return Err("Not a valid RIFF/WAVE file".into());
     }
 
-    let mut pos = 12;
     let mut channels: Option<u16> = None;
     let mut sample_rate: Option<u32> = None;
     let mut bits_per_sample: Option<u16> = None;
     let mut format_tag: Option<u16> = None;
     let mut sub_format: Option<[u8; 16]> = None;
-    let mut raw_data: Option<&[u8]> = None;
+    let mut data_chunk: Option<(u64, usize)> = None;
 
-    while pos + 8 <= data.len() {
-        let chunk_id = &data[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes(
-            data[pos + 4..pos + 8]
-                .try_into()
-                .map_err(|_| "chunk size slice")?,
-        ) as usize;
-        pos += 8;
-
-        let end = pos.saturating_add(chunk_size);
-        if end > data.len() {
-            return Err("WAV chunk truncated".into());
-        }
+    let mut chunk_header = [0u8; 8];
+    while reader.read_exact(&mut chunk_header).is_ok() {
+        let chunk_id = &chunk_header[0..4];
+        let chunk_size = u32::from_le_bytes(chunk_header[4..8].try_into().unwrap()) as usize;
+        let pad = (chunk_size % 2) as i64;
 
         if chunk_id == b"fmt " {
             if chunk_size < 16 {
                 return Err("fmt chunk too small".into());
             }
-            let fmt = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap());
-            let ch = u16::from_le_bytes(data[pos + 2..pos + 4].try_into().unwrap());
-            let sr = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
-            let bps = u16::from_le_bytes(data[pos + 14..pos + 16].try_into().unwrap());
+            let mut fmt_buf = vec![0u8; chunk_size];
+            reader
+                .read_exact(&mut fmt_buf)
+                .map_err(|_| "Failed to read fmt chunk")?;
+            let fmt = u16::from_le_bytes(fmt_buf[0..2].try_into().unwrap());
+            let ch = u16::from_le_bytes(fmt_buf[2..4].try_into().unwrap());
+            let sr = u32::from_le_bytes(fmt_buf[4..8].try_into().unwrap());
+            let bps = u16::from_le_bytes(fmt_buf[14..16].try_into().unwrap());
 
             format_tag = Some(fmt);
             channels = Some(ch);
@@ -258,15 +269,25 @@ pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
 
             if fmt == 0xFFFE && chunk_size >= 40 {
                 let mut guid = [0u8; 16];
-                guid.copy_from_slice(&data[pos + 24..pos + 40]);
+                guid.copy_from_slice(&fmt_buf[24..40]);
                 sub_format = Some(guid);
             }
+            if pad > 0 {
+                reader
+                    .seek(std::io::SeekFrom::Current(pad))
+                    .map_err(|e| e.to_string())?;
+            }
         } else if chunk_id == b"data" {
-            raw_data = Some(&data[pos..end]);
+            let pos = reader.stream_position().map_err(|e| e.to_string())?;
+            data_chunk = Some((pos, chunk_size));
+            reader
+                .seek(std::io::SeekFrom::Current(chunk_size as i64 + pad))
+                .map_err(|e| e.to_string())?;
+        } else {
+            reader
+                .seek(std::io::SeekFrom::Current(chunk_size as i64 + pad))
+                .map_err(|e| e.to_string())?;
         }
-
-        // RIFF chunks are word-aligned (padded to even byte boundary)
-        pos = end + (chunk_size % 2);
     }
 
     let (ch_count, rate, bps, fmt) = match (channels, sample_rate, bits_per_sample, format_tag) {
@@ -274,15 +295,12 @@ pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
         _ => return Err("Missing or invalid fmt chunk in WAV".into()),
     };
 
-    let pcm_data = raw_data.ok_or_else(|| "Missing data chunk in WAV".to_string())?;
+    let (data_offset, chunk_size) =
+        data_chunk.ok_or_else(|| "Missing data chunk in WAV".to_string())?;
 
-    // Determine sample encoding
     let is_float = match fmt {
         3 => true,
-        0xFFFE => {
-            // Check sub-format GUID for IEEE_FLOAT: 00000003-0000-0010-8000-00aa00389b71
-            sub_format.is_some_and(|g| g[0] == 3 && g[1] == 0)
-        }
+        0xFFFE => sub_format.is_some_and(|g| g[0] == 3 && g[1] == 0),
         _ => false,
     };
 
@@ -291,18 +309,27 @@ pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
         return Err("Invalid zero bits per sample".into());
     }
     let block_align = ch_count * bytes_per_sample;
-    let num_frames = pcm_data.len() / block_align;
+    let num_frames = chunk_size / block_align;
     if num_frames == 0 {
         return Err("No audio frames found in WAV data".into());
     }
 
-    // Limit impulse response frames to MAX_IR_SAMPLES to prevent accidental load of full songs
     let frames_to_read = num_frames.min(MAX_IR_SAMPLES);
+    let bytes_to_read = frames_to_read * block_align;
+
+    reader
+        .seek(std::io::SeekFrom::Start(data_offset))
+        .map_err(|e| e.to_string())?;
+    let mut pcm_data = vec![0u8; bytes_to_read];
+    reader
+        .read_exact(&mut pcm_data)
+        .map_err(|_| "Failed to read audio frames".to_string())?;
+
     let mut channel_data = vec![Vec::with_capacity(frames_to_read); ch_count];
 
     for frame in 0..frames_to_read {
         let frame_offset = frame * block_align;
-        for c in 0..ch_count {
+        for (c, out) in channel_data.iter_mut().enumerate() {
             let sample_offset = frame_offset + c * bytes_per_sample;
             let sample = if is_float {
                 match bps {
@@ -346,7 +373,7 @@ pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
                     _ => return Err(format!("Unsupported PCM bit depth: {bps}")),
                 }
             };
-            channel_data[c].push(sample);
+            out.push(sample);
         }
     }
 
@@ -363,70 +390,23 @@ pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
         }
     }
 
-    // Global normalization across all channels:
-    // Scale so peak absolute value across all channels is well-conditioned (e.g. max 0.707).
-    // Scaling uniformly preserves all interaural level and delay cues without clipping.
-    let global_peak = channel_data
-        .iter()
-        .flat_map(|ch| ch.iter())
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max);
+    // The IR is kept at its recorded level. Output headroom is worked out when
+    // an engine is built, from the routing the current mode actually uses
+    // (see `lf_headroom_scale`), because it depends on how channels sum.
 
-    if global_peak > 0.0001 {
-        // If peak is too high, normalize to 0.707. If already reasonable, preserve.
-        let target_peak = 0.7071f32;
-        let scale = if global_peak > 1.0 {
-            target_peak / global_peak
-        } else if global_peak < 0.1 {
-            (0.5 / global_peak).min(4.0)
-        } else {
-            1.0
-        };
-        if (scale - 1.0).abs() > 0.01 {
-            for ch in &mut channel_data {
-                for sample in ch {
-                    *sample *= scale;
-                }
-            }
-        }
-    }
-
-    // Expand 7-channel HeSuVi compact format to full 14-channel layout.
-    // The 7-ch format stores only the to-left-ear impulse responses:
-    //   src[0]=FL→L, src[1]=SL→L, src[2]=BL→L, src[3]=FC→L,
-    //   src[4]=FR→L, src[5]=SR→L, src[6]=BR→L
-    // By head symmetry, the to-right-ear response for a speaker equals
-    // the to-left-ear response for its mirror (FL↔FR, SL↔SR, BL↔BR, FC=FC).
+    // Expand the 7-channel HeSuVi compact format to the 14-channel layout.
+    // A 7-channel file is the first half of the 14-channel order, the left
+    // speakers and the centre:
+    //   FL→L, FL→R, SL→L, SL→R, BL→L, BL→R, FC→L
+    // The right speakers are their mirror images (swap the ears), so the second
+    // half of the 14-channel order repeats the first seven in the same order:
+    //   FR→R=FL→L, FR→L=FL→R, SR→R=SL→L, SR→L=SL→R, BR→R=BL→L, BR→L=BL→R, FC→R=FC→L
     let (final_channels, final_layout) = if ch_count == 7 {
-        let mut full = Vec::with_capacity(14);
-        // Ch  0: FL→L = src[0]
-        full.push(channel_data[0].clone());
-        // Ch  1: FL→R = src[4] (= FR→L by symmetry)
-        full.push(channel_data[4].clone());
-        // Ch  2: SL→L = src[1]
-        full.push(channel_data[1].clone());
-        // Ch  3: SL→R = src[5] (= SR→L by symmetry)
-        full.push(channel_data[5].clone());
-        // Ch  4: BL→L = src[2]
-        full.push(channel_data[2].clone());
-        // Ch  5: BL→R = src[6] (= BR→L by symmetry)
-        full.push(channel_data[6].clone());
-        // Ch  6: FC→L = src[3]
-        full.push(channel_data[3].clone());
-        // Ch  7: FR→R = src[0] (= FL→L by symmetry)
-        full.push(channel_data[0].clone());
-        // Ch  8: FR→L = src[4]
-        full.push(channel_data[4].clone());
-        // Ch  9: SR→R = src[1] (= SL→L by symmetry)
-        full.push(channel_data[1].clone());
-        // Ch 10: SR→L = src[5]
-        full.push(channel_data[5].clone());
-        // Ch 11: BR→R = src[2] (= BL→L by symmetry)
-        full.push(channel_data[2].clone());
-        // Ch 12: BR→L = src[6]
-        full.push(channel_data[6].clone());
-        // Ch 13: FC→R = src[3] (= FC→L by symmetry)
-        full.push(channel_data[3].clone());
+        let full = channel_data
+            .iter()
+            .chain(channel_data.iter())
+            .cloned()
+            .collect();
         (full, IrLayout::Hesuvi14)
     } else {
         (channel_data, IrLayout::from_channels(ch_count))
@@ -440,53 +420,79 @@ pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
     })
 }
 
-/// Bandlimited windowed-sinc resampling for a static 1D slice.
-fn resample_channel(src: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
-    if src_rate == dst_rate || src.is_empty() {
-        return src.to_vec();
-    }
-    let out_len = ((src.len() as u64 * dst_rate as u64) / src_rate as u64) as usize;
-    if out_len == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(out_len);
-    let step = src_rate as f64 / dst_rate as f64;
-    let ratio = dst_rate as f64 / src_rate as f64;
-    let cutoff = (ratio.min(1.0) * 0.95).min(1.0);
-    let filter_half = 16isize;
+/// Parse a RIFF/WAVE in-memory byte slice into a [`WavIr`].
+pub fn parse_wav(name: &str, data: &[u8]) -> Result<WavIr, String> {
+    parse_wav_reader(name, std::io::Cursor::new(data))
+}
 
-    for i in 0..out_len {
-        let src_pos = i as f64 * step;
-        let center = src_pos.floor() as isize;
-        let frac = src_pos - center as f64;
-        let mut sum = 0.0f64;
-        let mut weight_sum = 0.0f64;
+/// Number of log-spaced frequencies in the headroom probe.
+const HEADROOM_PROBES: usize = 16;
+/// The band the headroom probe covers, in Hz. HRIRs from the same side sum
+/// closest to coherently down here, which is where a loud master peaks.
+const HEADROOM_BAND_HZ: (f64, f64) = (20.0, 300.0);
 
-        for k in -filter_half..=filter_half {
-            let idx = center + k;
-            if idx >= 0 && (idx as usize) < src.len() {
-                let t = (k as f64 - frac) * cutoff;
-                let sinc = if t.abs() < 1e-7 {
-                    1.0
-                } else {
-                    (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
-                };
-                let w_arg = (k as f64 - frac + filter_half as f64) / (2.0 * filter_half as f64);
-                let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * w_arg).cos()
-                    + 0.08 * (4.0 * std::f64::consts::PI * w_arg).cos();
-                let weight = sinc * w * cutoff;
-                sum += src[idx as usize] as f64 * weight;
-                weight_sum += weight;
+/// The gain (at most 1) that keeps a full-scale low-frequency signal from
+/// leaving the engine above 0 dBFS, for the routing `routings` describes.
+///
+/// For each probe frequency it sums every routing's filter response into each
+/// ear, for a hard-left, hard-right and centred (in-phase) full-scale input, and
+/// takes the largest result. Measuring the real sum matters: a profile's
+/// per-filter peak says little about how much its filters add up to.
+///
+/// `upmix` says the inputs are the 7 upmixed speaker feeds rather than the two
+/// stereo channels. Only the default channel gains are assumed.
+fn lf_headroom_scale(
+    ir_channels: &[Vec<f32>],
+    rate: u32,
+    routings: &[ChannelRouting],
+    upmix: bool,
+) -> f32 {
+    let sources = [[1.0f64, 0.0], [0.0, 1.0], [1.0, 1.0]];
+    let (lo, hi) = HEADROOM_BAND_HZ;
+    let mut peak = 0.0f64;
+    for k in 0..HEADROOM_PROBES {
+        let t = k as f64 / (HEADROOM_PROBES - 1) as f64;
+        let w = std::f64::consts::TAU * lo * (hi / lo).powf(t) / f64::from(rate.max(1));
+        let responses: Vec<(f64, f64)> = ir_channels.iter().map(|ir| dft_at(ir, w)).collect();
+        for src in sources {
+            for ear_is_left in [true, false] {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for r in routings.iter().filter(|r| r.to_left == ear_is_left) {
+                    let feed = if upmix {
+                        let row = STEREO_UPMIX[r.in_ch];
+                        f64::from(row[0]) * src[0] + f64::from(row[1]) * src[1]
+                    } else {
+                        src[r.in_ch.min(1)]
+                    };
+                    let (h_re, h_im) = responses[r.filter_idx];
+                    let g = feed * f64::from(r.scale);
+                    re += g * h_re;
+                    im += g * h_im;
+                }
+                peak = peak.max(re.hypot(im));
             }
         }
-        let val = if weight_sum.abs() > 1e-7 {
-            (sum / weight_sum) as f32
-        } else {
-            0.0
-        };
-        out.push(val);
     }
-    out
+    if peak.is_finite() && peak > 1.0 {
+        (1.0 / peak) as f32
+    } else {
+        1.0
+    }
+}
+
+/// The impulse response's complex frequency response at angular frequency
+/// `w` (radians per sample), by direct summation with a rotating phasor.
+fn dft_at(ir: &[f32], w: f64) -> (f64, f64) {
+    let (sin, cos) = w.sin_cos();
+    let (mut pr, mut pi) = (1.0f64, 0.0f64);
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for &x in ir {
+        let x = f64::from(x);
+        re += x * pr;
+        im -= x * pi;
+        (pr, pi) = (pr * cos - pi * sin, pr * sin + pi * cos);
+    }
+    (re, im)
 }
 
 /// Partition block size B for zero-latency hybrid convolution.
@@ -517,7 +523,7 @@ impl PartitionedFilter {
         let mut tail_spectra = Vec::new();
         if ir.len() > b {
             let tail = &ir[b..];
-            let p_tail = (tail.len() + b - 1) / b;
+            let p_tail = tail.len().div_ceil(b);
             let mut time_buf = vec![0.0f32; FFT_LEN];
             let mut complex_buf = vec![Complex32::default(); NUM_BINS];
 
@@ -536,6 +542,18 @@ impl PartitionedFilter {
             tail_spectra,
         }
     }
+
+    /// Scale the whole filter, head and tail, by `gain`.
+    fn scale(&mut self, gain: f32) {
+        for h in &mut self.head_rev {
+            *h *= gain;
+        }
+        for spectrum in &mut self.tail_spectra {
+            for bin in spectrum {
+                *bin *= gain;
+            }
+        }
+    }
 }
 
 /// An input-to-output channel routing tap:
@@ -551,6 +569,11 @@ pub struct ChannelRouting {
 /// State for one input channel in the partitioned convolver.
 #[derive(Clone)]
 pub struct InputChannelState {
+    /// The last `PARTITION_LEN` input samples as a double-written ring of
+    /// `2 * PARTITION_LEN`: every sample is stored at `pos` and `pos +
+    /// PARTITION_LEN`, so the history in order is always one contiguous slice
+    /// and a push never shifts anything. `pos` is the block position, which
+    /// wraps at the same length.
     pub head_hist: Vec<f32>,
     pub cur_block: Vec<f32>,
     pub prev_block: Vec<f32>,
@@ -560,7 +583,7 @@ pub struct InputChannelState {
 impl InputChannelState {
     pub fn new(p_tail: usize) -> Self {
         InputChannelState {
-            head_hist: vec![0.0; PARTITION_LEN],
+            head_hist: vec![0.0; 2 * PARTITION_LEN],
             cur_block: vec![0.0; PARTITION_LEN],
             prev_block: vec![0.0; PARTITION_LEN],
             spectra_history: vec![vec![Complex32::default(); NUM_BINS]; p_tail.max(1)],
@@ -576,17 +599,36 @@ impl InputChannelState {
         }
     }
 
+    /// Record the sample for block position `pos`.
     #[inline(always)]
     pub fn push_sample(&mut self, x: f32, pos: usize) {
-        self.head_hist.copy_within(1..PARTITION_LEN, 0);
-        self.head_hist[PARTITION_LEN - 1] = x;
+        self.head_hist[pos] = x;
+        self.head_hist[pos + PARTITION_LEN] = x;
         self.cur_block[pos] = x;
+    }
+
+    /// The last `PARTITION_LEN` samples, oldest first, as of the push at `pos`.
+    #[inline(always)]
+    pub fn head_history(&self, pos: usize) -> &[f32] {
+        &self.head_hist[pos + 1..pos + 1 + PARTITION_LEN]
     }
 }
 
+/// Dot product with independent partial sums, so the adds don't form one
+/// serial dependency chain and the compiler can vectorize the loop.
 #[inline(always)]
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    const LANES: usize = 8;
+    let (a_lanes, a_rest) = a.as_chunks::<LANES>();
+    let (b_lanes, b_rest) = b.as_chunks::<LANES>();
+    let mut acc = [0.0f32; LANES];
+    for (x, y) in a_lanes.iter().zip(b_lanes) {
+        for ((s, p), q) in acc.iter_mut().zip(x).zip(y) {
+            *s += p * q;
+        }
+    }
+    let rest: f32 = a_rest.iter().zip(b_rest).map(|(p, q)| p * q).sum();
+    acc.iter().sum::<f32>() + rest
 }
 
 /// A zero-latency partitioned convolution engine (ADR 19).
@@ -625,7 +667,7 @@ impl PartitionedConvolver {
         c2r: Arc<dyn ComplexToReal<f32>>,
     ) -> Self {
         let b = PARTITION_LEN;
-        let filters: Vec<PartitionedFilter> = ir
+        let mut filters: Vec<PartitionedFilter> = ir
             .channels
             .iter()
             .map(|ch| PartitionedFilter::new(ch, r2c.as_ref()))
@@ -841,6 +883,18 @@ impl PartitionedConvolver {
             ),
         };
 
+        // Default settings must not push a loud master past full scale: fold
+        // the headroom the routing needs into the filters themselves.
+        let upmix = layout == IrLayout::Hesuvi14
+            && filters.len() >= 14
+            && mode == ConvolverMode::Surround7_1;
+        let headroom = lf_headroom_scale(&ir.channels, ir.sample_rate, &routings, upmix);
+        if headroom < 1.0 {
+            for filter in &mut filters {
+                filter.scale(headroom);
+            }
+        }
+
         let input_channels = vec![InputChannelState::new(p_tail); num_inputs];
 
         PartitionedConvolver {
@@ -880,22 +934,14 @@ impl PartitionedConvolver {
         // Push samples to input channels according to mode, scaled by per-channel gains
         match (self.layout, self.mode) {
             (IrLayout::Hesuvi14, ConvolverMode::Surround7_1) => {
-                // HeSuVi official stereo upmix matrix
-                let fl = 0.5 * in_l * channel_gains[0];
-                let fr = 0.5 * in_r * channel_gains[1];
-                let fc = 0.2 * (in_l + in_r) * channel_gains[2];
-                let sl = (0.45 * in_l - 0.25 * in_r) * channel_gains[3];
-                let sr = (-0.25 * in_l + 0.45 * in_r) * channel_gains[4];
-                let bl = (0.3 * in_l - 0.2 * in_r) * channel_gains[5];
-                let br = (-0.2 * in_l + 0.3 * in_r) * channel_gains[6];
-
-                self.input_channels[0].push_sample(fl, pos);
-                self.input_channels[1].push_sample(fr, pos);
-                self.input_channels[2].push_sample(fc, pos);
-                self.input_channels[3].push_sample(sl, pos);
-                self.input_channels[4].push_sample(sr, pos);
-                self.input_channels[5].push_sample(bl, pos);
-                self.input_channels[6].push_sample(br, pos);
+                for (i, (ch, row)) in self
+                    .input_channels
+                    .iter_mut()
+                    .zip(&STEREO_UPMIX)
+                    .enumerate()
+                {
+                    ch.push_sample((row[0] * in_l + row[1] * in_r) * channel_gains[i], pos);
+                }
             }
             _ => {
                 self.input_channels[0].push_sample(in_l * channel_gains[0], pos);
@@ -906,7 +952,7 @@ impl PartitionedConvolver {
         let mut out_r = self.tail_block_r[pos];
 
         for r in &self.routings {
-            let hist = &self.input_channels[r.in_ch].head_hist;
+            let hist = self.input_channels[r.in_ch].head_history(pos);
             let head = &self.filters[r.filter_idx].head_rev;
             let head_val = dot_product(head, hist) * r.scale;
             if r.to_left {
@@ -956,27 +1002,25 @@ impl PartitionedConvolver {
             let filter = &self.filters[r.filter_idx];
             let in_spectra = &self.input_channels[r.in_ch].spectra_history;
             let scale = r.scale;
-            let num_parts = p_tail.min(filter.tail_spectra.len());
             let target = if r.to_left {
                 &mut self.accum_freq_l
             } else {
                 &mut self.accum_freq_r
             };
 
+            // Zip stops at the shorter list: a filter with a short tail only
+            // reaches back as far as it has partitions.
+            let partitions = in_spectra.iter().zip(&filter.tail_spectra);
             if (scale - 1.0).abs() < 0.001 {
-                for p in 0..num_parts {
-                    let x = &in_spectra[p];
-                    let h = &filter.tail_spectra[p];
-                    for k in 0..NUM_BINS {
-                        target[k] += x[k] * h[k];
+                for (x, h) in partitions {
+                    for ((t, x), h) in target.iter_mut().zip(x).zip(h) {
+                        *t += x * h;
                     }
                 }
             } else {
-                for p in 0..num_parts {
-                    let x = &in_spectra[p];
-                    let h = &filter.tail_spectra[p];
-                    for k in 0..NUM_BINS {
-                        target[k] += (x[k] * h[k]) * scale;
+                for (x, h) in partitions {
+                    for ((t, x), h) in target.iter_mut().zip(x).zip(h) {
+                        *t += (x * h) * scale;
                     }
                 }
             }
@@ -1095,6 +1139,20 @@ pub const POINT_SR: usize = 4;
 pub const POINT_BL: usize = 5;
 pub const POINT_BR: usize = 6;
 
+/// Stereo to 7.1 upmix for [`ConvolverMode::Surround7_1`]: one
+/// `[from_left, from_right]` row per speaker, in point order (FL, FR, FC, SL,
+/// SR, BL, BR). HeSuVi's own stereo upmix, from its Equalizer APO setup:
+/// <https://sourceforge.net/projects/hesuvi/>.
+const STEREO_UPMIX: [[f32; 2]; SURROUND_POINTS] = [
+    [0.5, 0.0],    // FL
+    [0.0, 0.5],    // FR
+    [0.2, 0.2],    // FC
+    [0.45, -0.25], // SL
+    [-0.25, 0.45], // SR
+    [0.3, -0.2],   // BL
+    [-0.2, 0.3],   // BR
+];
+
 /// Shared parameters between the UI and the [`Convolver`] node running on the decode thread.
 pub struct ConvolverParams {
     enabled: AtomicBool,
@@ -1116,9 +1174,32 @@ pub struct ConvolverParams {
     /// Bumped by set_ir so the decode thread can cheaply detect changes
     /// without taking the lock on every buffer.
     ir_gen: AtomicU64,
+    /// Device rate of the live node, 0 until it has been reset. Off-thread
+    /// builds target it.
+    rate: AtomicU32,
+    r2c: Arc<dyn RealToComplex<f32>>,
+    c2r: Arc<dyn ComplexToReal<f32>>,
+    /// An engine built off the decode thread, waiting for the node to swap it in.
+    prepared: Mutex<Option<PreparedEngine>>,
+    /// Set whenever the IR or mode changed since the worker last looked.
+    rebuild_wanted: AtomicBool,
+    /// True while a build worker thread is alive, so changes coalesce into one.
+    worker_running: AtomicBool,
+}
+
+/// An engine built for one (IR generation, mode, device rate) combination.
+/// The node only takes it if all three still match what it wants.
+struct PreparedEngine {
+    ir_gen: u64,
+    mode: ConvolverMode,
+    rate: u32,
+    /// `None` when the IR was cleared.
+    engine: Option<PartitionedConvolver>,
 }
 
 impl ConvolverParams {
+    // One argument per persisted setting, mirroring `settings::ConvolverSettings`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         enabled: bool,
         wet: f32,
@@ -1131,6 +1212,7 @@ impl ConvolverParams {
     ) -> ConvolverParams {
         let default_gains = [0.0f32; 7];
         let gains = channel_gains_db.unwrap_or(&default_gains);
+        let mut planner = RealFftPlanner::<f32>::new();
         ConvolverParams {
             enabled: AtomicBool::new(enabled),
             wet: AtomicU32::new(wet.clamp(0.0, 1.0).to_bits()),
@@ -1144,8 +1226,15 @@ impl ConvolverParams {
             }),
             ir: RwLock::new(ir.map(Arc::new)),
             ir_gen: AtomicU64::new(0),
+            rate: AtomicU32::new(0),
+            r2c: planner.plan_fft_forward(FFT_LEN),
+            c2r: planner.plan_fft_inverse(FFT_LEN),
+            prepared: Mutex::new(None),
+            rebuild_wanted: AtomicBool::new(false),
+            worker_running: AtomicBool::new(false),
         }
     }
+
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
@@ -1184,8 +1273,9 @@ impl ConvolverParams {
         ConvolverMode::from_u8(self.mode.load(Ordering::Relaxed))
     }
 
-    pub fn set_mode(&self, mode: ConvolverMode) {
-        self.mode.store(mode as u8, Ordering::Relaxed);
+    pub fn set_mode(self: &Arc<Self>, mode: ConvolverMode) {
+        self.mode.store(mode as u8, Ordering::SeqCst);
+        self.request_build();
     }
 
     pub fn stereo_width(&self) -> f32 {
@@ -1243,79 +1333,165 @@ impl ConvolverParams {
         self.ir.read().ok()?.clone()
     }
 
-    pub fn set_ir(&self, ir: Option<WavIr>) {
+    pub fn set_ir(self: &Arc<Self>, ir: Option<WavIr>) {
         if let Ok(mut lock) = self.ir.write() {
             *lock = ir.map(Arc::new);
         }
-        self.ir_gen.fetch_add(1, Ordering::Release);
+        self.ir_gen.fetch_add(1, Ordering::SeqCst);
+        self.request_build();
+    }
+
+    /// Ask for an engine matching the current IR, mode and device rate to be
+    /// built off the decode thread. Requests made while a worker is running
+    /// coalesce into one more pass.
+    ///
+    /// Does nothing until a node has been reset, which records the device
+    /// rate: that reset builds synchronously, and it stores the rate before it
+    /// reads the generation, so a change racing it is never lost.
+    fn request_build(self: &Arc<Self>) {
+        if self.rate.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        self.rebuild_wanted.store(true, Ordering::SeqCst);
+        if self.worker_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let params = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("rox-convolver-build".into())
+            .spawn(move || params.build_worker());
+        if let Err(e) = spawned {
+            log::error!("convolver build thread could not start: {e}");
+            self.worker_running.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn build_worker(self: Arc<Self>) {
+        loop {
+            while self.rebuild_wanted.swap(false, Ordering::SeqCst) {
+                self.build_once();
+            }
+            self.worker_running.store(false, Ordering::SeqCst);
+            // A request between the last check and the store above saw the
+            // worker still running and returned; pick it up unless another
+            // worker already has.
+            if !self.rebuild_wanted.load(Ordering::SeqCst)
+                || self.worker_running.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
+        }
+    }
+
+    fn build_once(&self) {
+        let rate = self.rate.load(Ordering::SeqCst);
+        if rate == 0 {
+            return;
+        }
+        let mode = self.mode();
+        let ir_gen = self.ir_gen();
+        let engine = self
+            .current_ir()
+            .map(|ir| build_engine(&ir, mode, rate, &self.r2c, &self.c2r));
+        let Ok(mut slot) = self.prepared.lock() else {
+            return;
+        };
+        // Something changed while this was building: a newer pass is queued.
+        if self.ir_gen() != ir_gen
+            || self.mode() != mode
+            || self.rate.load(Ordering::SeqCst) != rate
+        {
+            return;
+        }
+        *slot = Some(PreparedEngine {
+            ir_gen,
+            mode,
+            rate,
+            engine,
+        });
+    }
+}
+
+/// Build an engine for `ir` at the device `rate`. Resamples the IR if its rate
+/// differs, and allocates and transforms everything the engine needs, so it
+/// belongs on a worker thread or in `reset`, never in `process`.
+fn build_engine(
+    ir: &WavIr,
+    mode: ConvolverMode,
+    rate: u32,
+    r2c: &Arc<dyn RealToComplex<f32>>,
+    c2r: &Arc<dyn ComplexToReal<f32>>,
+) -> PartitionedConvolver {
+    if ir.sample_rate == rate {
+        PartitionedConvolver::new(ir, mode, r2c.clone(), c2r.clone())
+    } else {
+        PartitionedConvolver::new(&ir.resampled_to(rate), mode, r2c.clone(), c2r.clone())
     }
 }
 
 /// The Convolver DSP node, implementing [`Node`] for inclusion in [`crate::chain::Chain`].
 pub struct Convolver {
     params: Arc<ConvolverParams>,
-    active_ir: Option<Arc<WavIr>>,
     rate: u32,
     engine: Option<PartitionedConvolver>,
     spatial: SpatialProcessor,
     seen_ir_gen: u64,
     seen_mode: ConvolverMode,
-    r2c: Arc<dyn RealToComplex<f32>>,
-    c2r: Arc<dyn ComplexToReal<f32>>,
 }
 
 impl Convolver {
     pub fn new(params: Arc<ConvolverParams>) -> Convolver {
-        let mut planner = RealFftPlanner::<f32>::new();
-        let r2c = planner.plan_fft_forward(FFT_LEN);
-        let c2r = planner.plan_fft_inverse(FFT_LEN);
         Convolver {
             params,
-            active_ir: None,
             rate: 0,
             engine: None,
             spatial: SpatialProcessor::new(48000),
             seen_ir_gen: u64::MAX,
             seen_mode: ConvolverMode::VirtualStereo,
-            r2c,
-            c2r,
         }
     }
 
-    fn rebuild_filters(&mut self) {
-        if self.rate == 0 {
-            self.engine = None;
+    /// Swap in the engine a worker built for the generation and mode the node
+    /// wants, if one is ready. Never blocks and never builds: until the new
+    /// engine lands the old one keeps playing.
+    ///
+    /// The retired engine is freed here. Freeing is a few hundred small
+    /// deallocations, nothing next to the work the swap replaces.
+    fn take_prepared(&mut self, ir_gen: u64, mode: ConvolverMode) {
+        let Ok(mut slot) = self.params.prepared.try_lock() else {
             return;
+        };
+        let rate = self.rate;
+        let ready = slot.take_if(|p| p.ir_gen == ir_gen && p.mode == mode && p.rate == rate);
+        drop(slot);
+        if let Some(ready) = ready {
+            self.engine = ready.engine;
+            self.seen_ir_gen = ir_gen;
+            self.seen_mode = mode;
         }
-        let Some(ir) = &self.active_ir else {
-            self.engine = None;
-            return;
-        };
-        // Resample IR to device rate if needed
-        let ready_ir = if ir.sample_rate != self.rate {
-            ir.resampled_to(self.rate)
-        } else {
-            (**ir).clone()
-        };
-        let mode = self.params.mode();
-        self.seen_mode = mode;
-        self.engine = Some(PartitionedConvolver::new(
-            &ready_ir,
-            mode,
-            self.r2c.clone(),
-            self.c2r.clone(),
-        ));
     }
 }
 
 impl Node for Convolver {
+    /// Allocates: builds the engine for the current IR and mode on the calling
+    /// thread. Live changes after this go through the worker instead.
     fn reset(&mut self, rate: u32) {
         self.rate = rate;
+        self.params.rate.store(rate, Ordering::SeqCst);
         self.spatial.reset(rate);
-        self.active_ir = self.params.current_ir();
         self.seen_ir_gen = self.params.ir_gen();
         self.seen_mode = self.params.mode();
-        self.rebuild_filters();
+        let (mode, r2c, c2r) = (self.seen_mode, &self.params.r2c, &self.params.c2r);
+        self.engine = match self.params.current_ir() {
+            Some(ir) if rate != 0 => Some(build_engine(&ir, mode, rate, r2c, c2r)),
+            _ => None,
+        };
+        // Drop a prepared engine that the build above already covers. One for
+        // a newer change has a different tag and must survive.
+        let (seen_gen, seen_mode) = (self.seen_ir_gen, self.seen_mode);
+        if let Ok(mut slot) = self.params.prepared.lock() {
+            slot.take_if(|p| p.ir_gen == seen_gen && p.mode == seen_mode);
+        }
     }
 
     fn process(&mut self, buf: &mut [f32]) {
@@ -1326,14 +1502,12 @@ impl Node for Convolver {
             return;
         }
 
-        // Check if loaded IR or mode has changed
+        // A changed IR or mode is built on a worker thread. Swap the result in
+        // once it is ready, and keep playing the old engine until then.
         let ir_gen_now = self.params.ir_gen();
         let mode = self.params.mode();
         if ir_gen_now != self.seen_ir_gen || mode != self.seen_mode {
-            self.seen_ir_gen = ir_gen_now;
-            self.seen_mode = mode;
-            self.active_ir = self.params.current_ir();
-            self.rebuild_filters();
+            self.take_prepared(ir_gen_now, mode);
         }
 
         let wet = self.params.wet();
@@ -1343,7 +1517,8 @@ impl Node for Convolver {
         let has_ir = self.engine.is_some();
         let channel_gains = self.params.all_channel_gains_linear();
 
-        for chunk in buf.chunks_exact_mut(2) {
+        let (frames, _) = buf.as_chunks_mut::<2>();
+        for chunk in frames {
             let in_l = chunk[0];
             let in_r = chunk[1];
 
@@ -1627,7 +1802,7 @@ mod tests {
         let resampled = ir.resampled_to(48000);
         assert_eq!(resampled.sample_rate, 48000);
         assert_eq!(resampled.channels.len(), 2);
-        let expected_len = (44 * 48000) / 44100;
+        let expected_len = (44.0 * 48000.0 / 44100.0f64).round() as usize;
         assert_eq!(resampled.channels[0].len(), expected_len);
     }
 

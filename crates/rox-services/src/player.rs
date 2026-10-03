@@ -3620,18 +3620,14 @@ pub fn convolver_ir_layout() -> Option<IrLayout> {
     convolver_params().current_ir().map(|ir| ir.layout)
 }
 
-pub fn convolver_ir_path() -> Option<String> {
-    Settings::load().eq.convolver.ir_path
-}
-
 pub fn apply_convolver_ir(path: std::path::PathBuf, cx: &mut App) -> Result<IrLayout, String> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("ir.wav")
         .to_string();
-    let data = std::fs::read(&path).map_err(|e| format!("Failed to read WAV file: {e}"))?;
-    let ir = convolver::parse_wav(&name, &data)?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open WAV file: {e}"))?;
+    let ir = convolver::parse_wav_reader(&name, std::io::BufReader::new(file))?;
     let layout = ir.layout;
     convolver_params().set_ir(Some(ir));
     let path_str = path.to_string_lossy().to_string();
