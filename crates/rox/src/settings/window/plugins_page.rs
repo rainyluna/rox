@@ -1,8 +1,8 @@
 //! The Plugins settings page (ADR 30): every folder in the plugins folder and
 //! every plugin record, each with its switch, and Developer mode beside a
-//! switched-on one. Under a switched-on plugin sit its config, how many of
-//! its tracks are in the library, its synced collections and, when it asks
-//! for it, scrobbling. The Plugins switch at the head of the page lets any of
+//! switched-on one. A switched-on plugin's row unfolds to its config, how
+//! many of its tracks are in the library, its synced collections and, when
+//! it asks for it, scrobbling. The Plugins switch at the head of the page lets any of
 //! them run, and the list shows only while it's on.
 //!
 //! The switch is the approving act. Turning on a folder this machine hasn't
@@ -50,6 +50,8 @@ pub(super) struct PluginsPage {
     errors: HashMap<String, String>,
     /// A field changed since the hosts last picked up config.
     config_dirty: bool,
+    /// Plugins whose details are unfolded, by id.
+    open: HashSet<String>,
 }
 
 /// Search terms for the Program Folders row on both pages it sits on.
@@ -304,6 +306,9 @@ impl EnableCard {
             if source.scrobble {
                 lines.push(rox_i18n::t!("settings-plugins-card-scrobbles"));
             }
+            if source.lyrics {
+                lines.push(rox_i18n::t!("settings-plugins-card-lyrics"));
+            }
 
             if !source.actions.is_empty() {
                 let labels: Vec<&str> = source.actions.iter().map(|a| a.label.as_str()).collect();
@@ -552,6 +557,7 @@ impl SettingsWindow {
         // This exact folder was approved before: switching on asks nothing.
         if settings::plugin_approved(id, &folder.hash) {
             host::approve(&folder, cx);
+            self.plugin_page.open.insert(id.to_string());
             self.refresh_plugins(cx);
         } else if let Some(card) = EnableCard::of(folder, self.record(id)) {
             self.pending = Some(Pending::EnablePlugin(Box::new(card)));
@@ -563,6 +569,7 @@ impl SettingsWindow {
     /// Only ever called from the enable card's Switch On.
     pub(super) fn confirm_enable_plugin(&mut self, card: Box<EnableCard>, cx: &mut Context<Self>) {
         host::approve(&card.folder, cx);
+        self.plugin_page.open.insert(card.folder.id.clone());
         self.refresh_plugins(cx);
         cx.notify();
     }
@@ -572,6 +579,7 @@ impl SettingsWindow {
         self.plugin_page
             .inputs
             .retain(|(plugin, _), _| *plugin != id);
+        self.plugin_page.open.remove(&id);
         self.refresh_plugins(cx);
 
         cx.spawn(async move |this, cx| {
@@ -615,6 +623,13 @@ impl SettingsWindow {
                     .filter(|label| !label.is_empty())
             })
             .unwrap_or_else(|| id.to_string())
+    }
+
+    fn toggle_plugin_open(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.plugin_page.open.remove(id) {
+            self.plugin_page.open.insert(id.to_string());
+        }
+        cx.notify();
     }
 
     fn sync_plugin(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -752,11 +767,34 @@ impl SettingsWindow {
         let approved = folder.is_some_and(|f| settings::plugin_approved(id, &f.hash));
         let standing = standing(folder, record, approved, host::status(id));
         let on = record.is_some_and(|r| r.enabled) && folder.is_some_and(Loaded::runs);
+        let open = on && self.plugin_page.open.contains(id);
 
         let version = folder
             .and_then(|f| f.manifest.as_ref())
             .map(|m| m.version.clone())
             .unwrap_or_default();
+
+        // Only a switched-on plugin has details to fold. The rest keep the
+        // chevron's width so every name lines up.
+        let fold = match on {
+            true => {
+                let plugin = id.to_string();
+                icon_button(
+                    match open {
+                        true => icons::CHEVRON_DOWN,
+                        false => icons::CHEVRON_RIGHT,
+                    },
+                    false,
+                    cx.listener(move |this, _, _, cx| this.toggle_plugin_open(&plugin, cx)),
+                )
+                .keyed(SharedString::from(format!("plugin-fold-{id}")))
+                .into_any_element()
+            }
+            false => div()
+                .flex_none()
+                .w(px(14.) + tokens::SPACE_XS * 2.)
+                .into_any_element(),
+        };
 
         let name = div()
             .flex_1()
@@ -765,6 +803,7 @@ impl SettingsWindow {
             .flex_row()
             .items_center()
             .gap(tokens::SPACE_SM)
+            .child(fold)
             .child(
                 svg()
                     .path(icons::PLUG)
@@ -872,7 +911,7 @@ impl SettingsWindow {
             _ => None,
         };
         let sync_error = self.plugin_page.errors.get(id).cloned();
-        let below = on || failure.is_some() || sync_error.is_some();
+        let below = open || failure.is_some() || sync_error.is_some();
 
         div()
             .id(SharedString::from(format!("plugin-{id}")))
@@ -896,23 +935,24 @@ impl SettingsWindow {
                     vec![error.into()],
                 ))
             })
-            .when(on, |d| {
+            .when(open, |d| {
                 d.children(folder.map(|folder| self.plugin_details(folder, cx)))
             })
     }
 
-    /// Under a switched-on plugin: scrobbling if it asks, its config, what it
-    /// has in the library, and its synced collections.
+    /// Under a switched-on plugin: scrobbling and lyrics if it asks, its
+    /// config, what it has in the library, and its synced collections.
     fn plugin_details(&self, folder: &Loaded, cx: &mut Context<Self>) -> Div {
         let id = folder.id.clone();
         let record = self.record(&id);
         let config = record.map(|r| r.config.clone()).unwrap_or(Value::Null);
 
-        let declares_scrobble = folder
+        let cap = folder
             .manifest
             .as_ref()
-            .and_then(|m| m.capabilities.source.as_ref())
-            .is_some_and(|cap| cap.scrobble);
+            .and_then(|m| m.capabilities.source.as_ref());
+        let declares_scrobble = cap.is_some_and(|cap| cap.scrobble);
+        let declares_lyrics = cap.is_some_and(|cap| cap.lyrics);
 
         let mut body = div().flex().flex_col().gap(tokens::SPACE_SM);
         // Each row under its own name, so its switch keeps its own focus.
@@ -928,6 +968,24 @@ impl SettingsWindow {
                     scrobble,
                     move |this: &mut Self, on, cx| {
                         host::set_scrobble(&plugin, on);
+                        this.refresh_plugins(cx);
+                        cx.notify();
+                    },
+                    cx,
+                ),
+            )));
+        }
+
+        if declares_lyrics {
+            let lyrics = record.is_some_and(|r| r.lyrics);
+            let plugin = id.clone();
+            body = body.child(row("lyrics".into()).child(panel::setting_row(
+                rox_i18n::t!("settings-plugins-lyrics"),
+                rox_i18n::try_translate("settings-plugins-lyrics.description"),
+                panel::toggle(
+                    lyrics,
+                    move |this: &mut Self, on, cx| {
+                        host::set_lyrics(&plugin, on);
                         this.refresh_plugins(cx);
                         cx.notify();
                     },

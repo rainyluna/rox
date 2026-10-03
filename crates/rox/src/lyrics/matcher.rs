@@ -24,7 +24,7 @@ use rox_net::providers::{self, LyricsCandidate, TrackQuery};
 use rox_panel_api::panel::AppState;
 use rox_panel_kit::ui::{self as settings_ui, SECTION_GAP, Seg, kbd_line, section};
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
-use rox_services::lyrics::{LyricsTarget, save_target};
+use rox_services::lyrics::{LyricsTarget, PluginLyrics, save_target};
 use rox_services::player::fmt_time;
 
 const DEFAULT_SIZE: (f32, f32) = (720., 560.);
@@ -90,7 +90,11 @@ impl LyricsMatch {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let LyricsTarget { subject, query } = target.clone();
+        let LyricsTarget {
+            subject,
+            query,
+            plugin,
+        } = target.clone();
         let duration_ms = query
             .duration_secs
             .map(|secs| (secs * 1000.0) as u32)
@@ -114,20 +118,21 @@ impl LyricsMatch {
             _backdrop_changed,
         };
         // Nothing to match on: say so rather than search for an empty result.
-        if query.artist.is_empty() || query.title.is_empty() {
+        // A plugin answers by the track itself, so it still gets asked.
+        if plugin.is_none() && (query.artist.is_empty() || query.title.is_empty()) {
             let mut this = this;
             this.phase = Phase::Failed(rox_i18n::t!("lyrics-matcher-no-query"));
             return this;
         }
-        this.search(query, cx);
+        this.search(query, plugin, cx);
         this
     }
 
-    fn search(&self, query: TrackQuery, cx: &mut Context<Self>) {
+    fn search(&self, query: TrackQuery, plugin: Option<PluginLyrics>, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { providers::search_lyrics(&query) })
+                .spawn(async move { search_with(&query, plugin.as_ref()) })
                 .await;
             this.update(cx, |this, cx| {
                 match result {
@@ -274,10 +279,10 @@ impl LyricsMatch {
                                     .child(if candidate.synced {
                                         rox_i18n::t!(
                                             "lyrics-matcher-synced-tag",
-                                            provider = candidate.provider
+                                            provider = candidate.provider.as_ref()
                                         )
                                     } else {
-                                        SharedString::from(candidate.provider)
+                                        SharedString::from(candidate.provider.to_string())
                                     }),
                             )
                             .child(confidence_badge(candidate.confidence)),
@@ -482,5 +487,38 @@ impl Render for LyricsMatch {
                     ),
             )
             .child(self.footer(can_apply, cx))
+    }
+}
+
+/// The plugin's own sheet leads, since it's for this very track. A plugin
+/// that fails only costs its row: the providers still answer. Blocking.
+fn search_with(
+    query: &TrackQuery,
+    plugin: Option<&PluginLyrics>,
+) -> Result<Vec<LyricsCandidate>, String> {
+    let mine = plugin.and_then(|plugin| {
+        plugin.ask(query).unwrap_or_else(|e| {
+            log::warn!("lyrics from {}: {e}", plugin.source);
+            None
+        })
+    });
+
+    let online = match query.artist.is_empty() || query.title.is_empty() {
+        true => Ok(Vec::new()),
+        false => providers::search_lyrics(query),
+    };
+
+    match (mine, online) {
+        (Some(mine), Ok(mut found)) => {
+            found.insert(0, mine);
+            Ok(found)
+        }
+
+        (Some(mine), Err(e)) => {
+            log::warn!("lyrics search: {e}");
+            Ok(vec![mine])
+        }
+
+        (None, online) => online,
     }
 }

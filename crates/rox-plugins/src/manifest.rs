@@ -104,6 +104,10 @@ pub struct SourceCap {
     /// opens or copies on a click.
     #[serde(default)]
     pub links: bool,
+    /// Answers `source.lyrics`: a track's words, which rox only asks for
+    /// once the user switches them on for this plugin.
+    #[serde(default)]
+    pub lyrics: bool,
     /// Answers `source.action`: things the plugin does with its items,
     /// listed in rox's own menus.
     #[serde(default)]
@@ -727,6 +731,7 @@ mod tests {
                 icon: String::new(),
                 radio: false,
                 links: false,
+                lyrics: false,
                 actions: Vec::new(),
             })
         );

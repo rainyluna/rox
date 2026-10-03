@@ -44,7 +44,7 @@ impl LyricsProvider for Lrclib {
                 continue;
             };
             out.push(LyricsCandidate {
-                provider: self.name(),
+                provider: self.name().into(),
                 artist: str_field("artistName").unwrap_or_default(),
                 title: str_field("trackName").unwrap_or_default(),
                 album: str_field("albumName").unwrap_or_default(),

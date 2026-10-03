@@ -16,7 +16,8 @@ in any plugin:
   on every OS when rox goes away without saying goodbye.
 
 It also offers one action, Export WAV, which writes tones to files as a job
-rox polls for progress and can stop.
+rox polls for progress and can stop. A chord names its notes twice: as
+chapters on the seek strip, and as a timed lyrics sheet.
 
 Only the standard library is used, so there's nothing to install.
 """
@@ -58,6 +59,15 @@ CHORDS = [
     ("G major", [196, 247, 294]),
 ]
 CHORD_SECS = 15
+
+# Each note gets a third of the chord, as a chapter and as a lyrics line.
+CHORD_NOTES = {
+    "C major": ["C4", "E4", "G4"],
+    "A minor": ["A3", "C4", "E4"],
+    "F major": ["F3", "A3", "C4"],
+    "G major": ["G3", "B3", "D4"],
+}
+NOTE_SECS = CHORD_SECS // 3
 
 
 def track(key, title, album, number, secs):
@@ -111,7 +121,7 @@ class Failure(Exception):
         self.code = code
 
 
-state = {"volume": 30, "data_dir": None}
+state = {"volume": 30, "data_dir": None, "features": []}
 out_lock = threading.Lock()
 streams = {}
 streams_lock = threading.Lock()
@@ -190,6 +200,9 @@ def token_of(tracks):
 def hello(params):
     config = params.get("config") or {}
     state["data_dir"] = params.get("data_dir")
+    # An older rox refuses a field it doesn't know, so optional parts of the
+    # protocol are only used when hello lists them.
+    state["features"] = params.get("features") or []
     volume = config.get("volume")
     if isinstance(volume, int) and 1 <= volume <= 100:
         state["volume"] = volume
@@ -245,13 +258,34 @@ def open_stream(params):
         stream = f"s{next(stream_ids)}"
         streams[stream] = data
 
-    return {
+    opened = {
         "stream": stream,
         "hint": "wav",
         "length": len(data),
         "seekable": True,
         "live": False,
     }
+
+    notes = notes_of(key)
+    if notes and "chapters" in state["features"]:
+        opened["chapters"] = [{"start_ms": i * NOTE_SECS * 1000, "title": note} for i, note in enumerate(notes)]
+
+    return opened
+
+
+def notes_of(key):
+    return CHORD_NOTES.get(key[len("chord:"):]) if key.startswith("chord:") else None
+
+
+def lyrics(params):
+    # Null says this track has none. rox only asks once the user switched
+    # lyrics on for the plugin.
+    notes = notes_of(params["key"])
+    if not notes:
+        return None
+
+    lines = [f"[{i * NOTE_SECS // 60:02d}:{i * NOTE_SECS % 60:02d}.00]{note}" for i, note in enumerate(notes)]
+    return {"text": "\n".join(lines), "synced": True}
 
 
 def read(params):
@@ -380,6 +414,7 @@ METHODS = {
     "source.action": action,
     "source.job": job_state,
     "source.cancel": cancel,
+    "source.lyrics": lyrics,
 }
 
 

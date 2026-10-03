@@ -436,11 +436,12 @@ fn display_lanes(set: &[Vec<PeakBin>], split: bool) -> &[Vec<PeakBin>] {
 enum Shape {
     /// What everything fades in from and out to.
     Blank,
-    Placeholder,
+    /// The epoch time its track's stand-in started, None while opening.
+    Placeholder(Option<f32>),
     /// The playhead is live while this is the target, frozen once retired.
     Peaks(Arc<PeakLanes>, bool, f32),
     /// Peaks with bins still to come, which draw as the stand-in.
-    Building(Arc<PeakLanes>, Arc<Arrivals>, bool, f32),
+    Building(Arc<PeakLanes>, Arc<Arrivals>, Option<f32>, bool, f32),
     /// Oldest at the left. Every column is played, so no ghost half and no
     /// playhead.
     Live(Arc<Vec<PeakBin>>),
@@ -455,7 +456,7 @@ impl Shape {
     /// different peaks buffer or a flipped split does.
     fn same(&self, other: &Shape) -> bool {
         match (self, other) {
-            (Shape::Blank, Shape::Blank) | (Shape::Placeholder, Shape::Placeholder) => true,
+            (Shape::Blank, Shape::Blank) | (Shape::Placeholder(_), Shape::Placeholder(_)) => true,
             (Shape::Peaks(a, sa, _), Shape::Peaks(b, sb, _)) => Arc::ptr_eq(a, b) && sa == sb,
             // Filling in happens in place, bin by bin, never as a morph.
             (Shape::Building(.., sa, _), Shape::Building(.., sb, _)) => sa == sb,
@@ -470,7 +471,7 @@ impl Shape {
     /// stand-in).
     fn lanes(&self) -> Option<usize> {
         match self {
-            Shape::Peaks(set, split, _) | Shape::Building(set, _, split, _) => {
+            Shape::Peaks(set, split, _) | Shape::Building(set, _, _, split, _) => {
                 Some(display_lanes(set, *split).len().max(1))
             }
             // One row: the tap is mixed to mono on the way in, and the drawn shape
@@ -651,6 +652,8 @@ pub struct WaveformPanel {
     value_edit: panel::ValueEdit,
     /// Time zero for the generating animation's phase.
     epoch: Instant,
+    /// When this track's stand-in started, on the epoch clock.
+    stand_in_since: f32,
     focus: FocusHandle,
     tab_panel: Option<WeakEntity<TabPanel>>,
     /// The PCM tap behind a station's rolling trace.
@@ -730,6 +733,7 @@ impl WaveformPanel {
             _ramp_changes: Vec::new(),
             value_edit: panel::ValueEdit::default(),
             epoch: Instant::now(),
+            stand_in_since: 0.0,
             focus: cx.focus_handle().tab_stop(true),
             tab_panel: None,
             marks: Vec::new(),
@@ -772,6 +776,7 @@ impl WaveformPanel {
         self.track = Some(path.clone());
         self.remote = None;
         self.peaks = Peaks::Decoding;
+        self.stand_in_since = self.epoch.elapsed().as_secs_f32();
         self.generation += 1;
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
@@ -813,6 +818,7 @@ impl WaveformPanel {
         self.track = None;
         self.remote = Some(key.clone());
         self.peaks = Peaks::Decoding;
+        self.stand_in_since = self.epoch.elapsed().as_secs_f32();
         self.generation += 1;
         let generation = self.generation;
 
@@ -1131,6 +1137,37 @@ fn placeholder_tint() -> Rgba {
     palette::alpha(palette::text_muted(), 0x33)
 }
 
+/// How long a track's stand-in pulses before it slows to a stop. A track
+/// over the download cap fills in only as it plays, so without this its
+/// unplayed stretch pulses for the whole episode.
+const STAND_IN_PULSE_SECS: f32 = 60.0;
+
+/// The slowdown's time constant. Five of them in, it's still.
+const STAND_IN_SETTLE_SECS: f32 = 1.5;
+
+/// The stand-in's phase clock: the epoch clock while it pulses, so the
+/// opening stand-in hands over to the track's without a jump, then easing
+/// to a halt with no step in speed.
+fn stand_in_clock(t: f32, since: Option<f32>) -> f32 {
+    let Some(since) = since else {
+        return t;
+    };
+
+    let over = t - since - STAND_IN_PULSE_SECS;
+    if over <= 0.0 {
+        return t;
+    }
+
+    let over = over.min(STAND_IN_SETTLE_SECS * 5.0);
+    since
+        + STAND_IN_PULSE_SECS
+        + STAND_IN_SETTLE_SECS * (1.0 - (-over / STAND_IN_SETTLE_SECS).exp())
+}
+
+fn stand_in_still(t: f32, since: Option<f32>) -> bool {
+    since.is_some_and(|since| t - since >= STAND_IN_PULSE_SECS + STAND_IN_SETTLE_SECS * 5.0)
+}
+
 /// A stable pseudo-random profile per slot and lane, swelling under two
 /// pulse crests that travel left to right in step across the lanes.
 fn placeholder_bar(i: usize, lane: usize, count: usize, t: f32, max_bar: f32) -> f32 {
@@ -1317,7 +1354,9 @@ fn sample(
 ) -> Bar {
     match shape {
         Shape::Blank => Bar::flat(center, palette::alpha(palette::text_muted(), 0)),
-        Shape::Placeholder => placeholder_sample(i, lane, count, t, center, max_bar),
+        Shape::Placeholder(since) => {
+            placeholder_sample(i, lane, count, stand_in_clock(t, *since), center, max_bar)
+        }
         // No ghost half: every column already played. The trace is cut to this
         // bar count, so the fold only runs on the frame between a resize and the
         // restart.
@@ -1347,8 +1386,20 @@ fn sample(
             let fold = |lane: &[PeakBin]| bucket(lane, i, count);
             peaks_sample(data, lane, lanes, &fold, played, center, max_bar, layers)
         }
-        Shape::Building(set, arrived, split, progress) => building_sample(
-            set, arrived, *split, *progress, lane, lanes, i, count, x_mid, w, t, center, max_bar,
+        Shape::Building(set, arrived, since, split, progress) => building_sample(
+            set,
+            arrived,
+            *split,
+            *progress,
+            lane,
+            lanes,
+            i,
+            count,
+            x_mid,
+            w,
+            (t, stand_in_clock(t, *since)),
+            center,
+            max_bar,
             layers,
         ),
     }
@@ -1369,12 +1420,12 @@ fn building_sample(
     count: usize,
     x_mid: f32,
     w: f32,
-    t: f32,
+    (t, pulse): (f32, f32),
     center: f32,
     max_bar: f32,
     layers: (Rgba, Rgba),
 ) -> Bar {
-    let stand_in = placeholder_sample(i, lane, count, t, center, max_bar);
+    let stand_in = placeholder_sample(i, lane, count, pulse, center, max_bar);
     if arrived.is_empty() {
         return stand_in;
     }
@@ -2167,7 +2218,7 @@ impl WaveformPanel {
                 }
             },
             (_, _) if opening => {
-                self.retarget(Shape::Placeholder);
+                self.retarget(Shape::Placeholder(None));
                 self.strip(None, None, Vec::new(), Vec::new(), Vec::new())
                     .into_any_element()
             }
@@ -2191,7 +2242,7 @@ impl WaveformPanel {
             }
             (Some(_), Peaks::Decoding | Peaks::Waiting)
             | (Some(_), Peaks::Building(Building { shown: None, .. })) => {
-                self.retarget(Shape::Placeholder);
+                self.retarget(Shape::Placeholder(Some(self.stand_in_since)));
                 self.strip(marker, ab, marks.clone(), cues.clone(), Vec::new())
                     .into_any_element()
             }
@@ -2211,6 +2262,7 @@ impl WaveformPanel {
                 self.retarget(Shape::Building(
                     lanes.clone(),
                     known.clone(),
+                    Some(self.stand_in_since),
                     self.config.split_channels,
                     progress,
                 ));
@@ -2243,7 +2295,17 @@ impl WaveformPanel {
 
         let morphing = self.morph_at.elapsed().as_secs_f32() < tokens::EASE_SECS;
         // A building strip animates its stand-in bars and polls for the next.
-        let generating = matches!(self.to, Shape::Placeholder | Shape::Building(..));
+        // One built from the tap only grows while it plays, which repaints
+        // anyway, so once its stand-in is still a pause parks it.
+        let still = match &self.to {
+            Shape::Placeholder(since) | Shape::Building(_, _, since, ..) => {
+                stand_in_still(self.epoch.elapsed().as_secs_f32(), *since)
+            }
+            _ => false,
+        };
+        let tapped = matches!(&self.peaks, Peaks::Building(building) if !building.trails());
+        let generating =
+            matches!(self.to, Shape::Placeholder(_) | Shape::Building(..)) && !(still && tapped);
         let settling = between_tracks || morphing || generating;
         if wants_frames(self.config.live, live && playing, playing, settling) {
             window.request_animation_frame();
@@ -2365,7 +2427,7 @@ mod tests {
             rms: 0.5,
         };
         let arrived = vec![None, Some(0.0), None, None];
-        let shape = Shape::Building(Arc::new(lanes), Arc::new(arrived), false, 1.0);
+        let shape = Shape::Building(Arc::new(lanes), Arc::new(arrived), None, false, 1.0);
         let layers = (palette::accent(), palette::accent());
         let bar = |i, t| {
             sample(
@@ -2397,6 +2459,33 @@ mod tests {
     }
 
     #[test]
+    fn a_long_stand_in_slows_to_a_stop() {
+        let since = Some(10.0);
+        assert_eq!(
+            stand_in_clock(30.0, since),
+            30.0,
+            "pulses on the epoch clock"
+        );
+        assert_eq!(
+            stand_in_clock(1e6, None),
+            1e6,
+            "the opening one never settles"
+        );
+
+        let at = 10.0 + STAND_IN_PULSE_SECS;
+        let step = stand_in_clock(at + 0.01, since) - at;
+        assert!((step - 0.01).abs() < 1e-3, "no jump in speed: {step}");
+
+        let held = stand_in_clock(at + 60.0, since);
+        assert!(held < at + STAND_IN_SETTLE_SECS + 1e-3);
+        assert_eq!(stand_in_clock(at + 600.0, since), held, "then it holds");
+
+        assert!(!stand_in_still(at, since));
+        assert!(stand_in_still(at + 60.0, since));
+        assert!(!stand_in_still(1e6, None));
+    }
+
+    #[test]
     fn a_bar_eases_in_from_the_stand_in() {
         // One bar over two bins: a quiet one, then a loud one.
         let bin = |reach: f32| PeakBin {
@@ -2405,7 +2494,7 @@ mod tests {
             rms: reach / 2.0,
         };
         let lanes = Arc::new(vec![vec![bin(0.1), bin(0.8)]]);
-        let shape = |arrived| Shape::Building(lanes.clone(), Arc::new(arrived), false, 1.0);
+        let shape = |arrived| Shape::Building(lanes.clone(), Arc::new(arrived), None, false, 1.0);
         let layers = (palette::accent(), palette::accent());
         let top = |shape: &Shape, t| sample(shape, 0, 1, 0, 1, 0.5, 1.0, t, 50.0, 40.0, layers).top;
 

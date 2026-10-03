@@ -17,7 +17,7 @@ use gpui::{
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use image::Frame;
 use rox_dock::{Panel, PanelEvent, TabPanel};
-use rox_library::cue::{Origin, TrackKey};
+use rox_library::cue::{Origin, SourceId, TrackKey};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -164,6 +164,22 @@ impl Slide {
 /// None means the track has no art.
 type LoadedArt = Option<(Arc<Image>, f32, Option<Arc<RenderImage>>)>;
 
+fn decode_art(bytes: Vec<u8>, mime: &str, disc: Option<DiscShape>) -> LoadedArt {
+    let format = ImageFormat::from_mime_type(mime)?;
+
+    // The shape off the header alone, no decode.
+    let ratio = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .map_or(1.0, |(w, h)| w as f32 / h.max(1) as f32);
+    let base = disc
+        .and_then(|shape| bake_disc(&bytes, shape))
+        .map(|disc| Arc::new(RenderImage::new(vec![Frame::new(disc)])));
+
+    Some((Arc::new(Image::from_bytes(format, bytes)), ratio, base))
+}
+
 pub struct CoverArtPanel {
     state: AppState,
     config: CoverConfig,
@@ -291,9 +307,9 @@ impl CoverArtPanel {
         ratio
     }
 
-    /// A `remote` row has no file or picture slots, so it reads the one
-    /// picture the thumbnail store holds, whichever slot is picked.
-    fn ensure_art(&mut self, path: &Path, remote: bool, cx: &mut Context<Self>) {
+    /// A remote row (`source` is set) has no file or picture slots, so it
+    /// reads the one picture its source has, whichever slot is picked.
+    fn ensure_art(&mut self, path: &Path, source: Option<SourceId>, cx: &mut Context<Self>) {
         if self.art.as_ref().map(|(p, _)| p.as_path()) == Some(path)
             || self.pending.as_deref() == Some(path)
         {
@@ -305,6 +321,7 @@ impl CoverArtPanel {
         let path = path.to_path_buf();
         let kind = self.config.art.kind();
         let disc = self.disc_mode();
+        let remote = source.is_some();
         let thumbs = remote
             .then(|| self.state.thumbs.read(cx).store_conn())
             .flatten();
@@ -323,28 +340,48 @@ impl CoverArtPanel {
                             None if remote => None,
                             None => rox_library::art::cover_art_of(&path, kind),
                         };
-                        art.and_then(|(bytes, mime)| {
-                            let format = ImageFormat::from_mime_type(&mime)?;
-                            // The shape off the header alone, no decode.
-                            let ratio = image::ImageReader::new(std::io::Cursor::new(&bytes))
-                                .with_guessed_format()
-                                .ok()
-                                .and_then(|reader| reader.into_dimensions().ok())
-                                .map_or(1.0, |(w, h)| w as f32 / h.max(1) as f32);
-                            let base = disc
-                                .and_then(|shape| bake_disc(&bytes, shape))
-                                .map(|disc| Arc::new(RenderImage::new(vec![Frame::new(disc)])));
-                            Some((Arc::new(Image::from_bytes(format, bytes)), ratio, base))
-                        })
+                        art.and_then(|(bytes, mime)| decode_art(bytes, &mime, disc))
                     }
                 })
                 .await;
+            let landed = this
+                .update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return false;
+                    }
+                    this.pending = None;
+                    this.art = Some((path.clone(), loaded));
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+
+            let Some(source) = source.filter(|_| landed) else {
+                return;
+            };
+
+            // The thumbnail is a list row's size, up at once so the panel
+            // isn't left on the last track. The full cover fades in over it.
+            let full = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let bytes =
+                            rox_services::sources::full_cover(&source, &path.to_string_lossy())?;
+                        let mime = image::guess_format(&bytes).ok()?.to_mime_type();
+                        decode_art(bytes, mime, disc)
+                    }
+                })
+                .await;
+            let Some(full) = full else {
+                return;
+            };
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
                 }
-                this.pending = None;
-                this.art = Some((path, loaded));
+                this.art = Some((path, Some(full)));
                 cx.notify();
             })
             .ok();
@@ -953,9 +990,9 @@ impl CoverArtPanel {
             }
             Some(key) => {
                 // Art belongs to the file, so cue tracks of one image share
-                // the path-keyed cache. A row with no file reads the
-                // thumbnail store instead.
-                let remote = !key.is_local();
+                // the path-keyed cache. A row with no file asks its source
+                // instead.
+                let remote = (!key.is_local()).then(|| key.source.clone());
                 let stand_in = if key.origin() == Origin::Radio {
                     Slide::Radio
                 } else {

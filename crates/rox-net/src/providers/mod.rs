@@ -221,7 +221,8 @@ pub struct TrackQuery {
 /// `text` is LRC when synced, plain lines otherwise.
 #[derive(Clone)]
 pub struct LyricsCandidate {
-    pub provider: &'static str,
+    /// A built-in provider's name, or the plugin's label.
+    pub provider: std::borrow::Cow<'static, str>,
     pub artist: String,
     pub title: String,
     pub album: String,
@@ -590,7 +591,7 @@ mod tests {
 
     fn candidate(title: &str, artist: &str, album: &str, dur: Option<f64>) -> LyricsCandidate {
         LyricsCandidate {
-            provider: "test",
+            provider: "test".into(),
             artist: artist.into(),
             title: title.into(),
             album: album.into(),

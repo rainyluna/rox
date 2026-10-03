@@ -287,7 +287,15 @@ pub const FEATURES: &[&str] = &[
     "open-duration",
     "go-to",
     "flags",
+    "chapters",
 ];
+
+/// More than a seek strip can tell apart.
+pub const MAX_CHAPTERS: usize = 500;
+
+/// A whole sheet in one answer: an enhanced LRC runs to tens of KB, far past
+/// [`MAX_STRING`], and this stays well under [`MAX_FRAME`].
+pub const MAX_LYRICS: usize = 256 * 1024;
 
 /// More flags than a row has states worth gating an action on.
 pub const MAX_FLAGS: usize = 16;
@@ -648,6 +656,17 @@ pub struct Open {
     /// sent once `hello` listed `open-duration`.
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// Where the stream's parts start, the `chapters` feature.
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
+}
+
+/// One part of a long stream, like an episode's segment.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Chapter {
+    pub start_ms: u64,
+    pub title: String,
 }
 
 /// How much of a stream the host may fetch ahead. A plugin can only lower it.
@@ -665,7 +684,17 @@ impl Checked for Open {
         }
 
         string("stream", &self.stream)?;
-        string("hint", &self.hint)
+        string("hint", &self.hint)?;
+
+        // The order and the titles' content aren't checked here: a bad
+        // chapter list mustn't stop the track playing, so services tidy it.
+        if self.chapters.len() > MAX_CHAPTERS {
+            return Err(format!("an open has more than {MAX_CHAPTERS} chapters"));
+        }
+
+        self.chapters
+            .iter()
+            .try_for_each(|chapter| string("chapter title", &chapter.title))
     }
 }
 
@@ -710,6 +739,29 @@ impl Checked for Link {
     fn check(&self) -> Result<(), String> {
         string("link", &self.url)?;
         web_url("a link", &self.url)
+    }
+}
+
+/// A track's lyrics, `source.lyrics`'s answer: LRC when `synced`, plain
+/// lines otherwise.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LyricsAnswer {
+    pub text: String,
+    #[serde(default)]
+    pub synced: bool,
+}
+
+impl Checked for LyricsAnswer {
+    fn check(&self) -> Result<(), String> {
+        if self.text.trim().is_empty() {
+            return Err("lyrics with no text; answer null for none".into());
+        }
+
+        match self.text.len() > MAX_LYRICS {
+            true => Err(format!("lyrics longer than {MAX_LYRICS} bytes")),
+            false => Ok(()),
+        }
     }
 }
 
@@ -1257,6 +1309,52 @@ mod tests {
         let ahead: Open = decode(json!({"stream": "s1", "buffer": "ahead"})).unwrap();
         assert_eq!(ahead.buffer, Some(Buffer::Ahead));
         assert!(decode::<Open>(json!({"stream": "s1", "buffer": "everything"})).is_err());
+    }
+
+    #[test]
+    fn an_open_may_name_its_chapters() {
+        let open: Open = decode(json!({
+            "stream": "s1",
+            "chapters": [{"start_ms": 0, "title": "Intro"}, {"start_ms": 271_000, "title": "Story"}],
+        }))
+        .unwrap();
+        assert_eq!(open.chapters[1].start_ms, 271_000);
+
+        let plain: Open = decode(json!({"stream": "s1"})).unwrap();
+        assert!(plain.chapters.is_empty());
+
+        let many: Vec<_> = (0..=MAX_CHAPTERS as u64)
+            .map(|i| json!({"start_ms": i, "title": "x"}))
+            .collect();
+        for bad in [
+            json!({"stream": "s1", "chapters": many}),
+            json!({"stream": "s1", "chapters": [{"start_ms": 0}]}),
+            json!({"stream": "s1", "chapters": [{"start_ms": 0, "title": "x".repeat(MAX_STRING + 1)}]}),
+            json!({"stream": "s1", "chapters": [{"start_ms": 0, "title": "x", "end_ms": 9}]}),
+        ] {
+            assert!(decode::<Open>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn lyrics_are_a_sheet_with_text() {
+        let lyrics: LyricsAnswer =
+            decode(json!({"text": "[00:01.00]One", "synced": true})).unwrap();
+        assert!(lyrics.synced);
+
+        let plain: LyricsAnswer = decode(json!({"text": "One\nTwo"})).unwrap();
+        assert!(!plain.synced);
+
+        // Past the per-string cap, which a sheet routinely is.
+        assert!(decode::<LyricsAnswer>(json!({"text": "x".repeat(MAX_STRING * 4)})).is_ok());
+
+        for bad in [
+            json!({"text": "  \n"}),
+            json!({"text": "x".repeat(MAX_LYRICS + 1)}),
+            json!({"text": "x", "source": "y"}),
+        ] {
+            assert!(decode::<LyricsAnswer>(bad).is_err());
+        }
     }
 
     #[test]

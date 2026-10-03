@@ -318,9 +318,12 @@ Remove from Library. One that a kept collection holds gets Stop Keeping,
 which lets go of the whole collection, since the next sync would put a
 single track back.
 
-Under each switched-on plugin, the Plugins page counts its tracks in the
-library and those added one at a time. Show in Library narrows the
-library search to them.
+The chevron beside a switched-on plugin on the Plugins page unfolds its
+details. They count its tracks in the library and those added one at a
+time, and Show in Library narrows the library search to them. A plugin
+that offers lyrics gets a Lyrics switch there, off until you turn it on.
+With it on, the Lyrics panel asks the plugin for its own tracks' lyrics
+before it asks the lyrics providers.
 
 What the panel offers depends on the plugin:
 
@@ -333,6 +336,9 @@ What the panel offers depends on the plugin:
     when it ends. A radio carries on after a restart, and stops when
     continuation is Off in the playback settings.
   - Go to in a track's right-click menu opens its album or artist.
+  - A long track can mark its parts, like an episode's segments, along
+    the top of the Seek panel. Hover a mark for its name, and click it
+    to jump there.
   - Chips over a list switch between the plugin's views, like search
     narrowed to albums. A column heading, like a popularity, sorts by
     it.

@@ -185,6 +185,39 @@ fn a_track_reads_whole_as_a_wav_of_its_stated_length() {
 }
 
 #[test]
+fn a_chord_names_its_notes_as_chapters_and_lyrics() {
+    let Some(host) = host("notes") else {
+        return;
+    };
+
+    let chord = Stream::open(&host, "chord:A minor", Options::default()).unwrap();
+    let starts: Vec<(u64, &str)> = chord
+        .chapters
+        .iter()
+        .map(|chapter| (chapter.start_ms, chapter.title.as_str()))
+        .collect();
+    assert_eq!(starts, [(0, "A3"), (5000, "C4"), (10_000, "E4")]);
+
+    let tone = Stream::open(&host, "tone:A4", Options::default()).unwrap();
+    assert!(tone.chapters.is_empty());
+
+    let sheet: wire::LyricsAnswer = wire::decode(call(
+        &host,
+        "source.lyrics",
+        json!({"key": "chord:A minor"}),
+    ))
+    .unwrap();
+    assert!(sheet.synced);
+    assert_eq!(sheet.text, "[00:00.00]A3\n[00:05.00]C4\n[00:10.00]E4");
+
+    let none = call(&host, "source.lyrics", json!({"key": "tone:A4"}));
+    assert!(none.is_null(), "a tone has no sheet");
+
+    drop((chord, tone));
+    host.stop("test over");
+}
+
+#[test]
 fn export_runs_as_a_job_and_reveals_its_folder() {
     let Some(host) = host("export") else {
         return;

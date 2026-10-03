@@ -581,3 +581,32 @@ takes it when the plugin starts and doesn't restart a running plugin on a langua
 switch, which would cut off what it's playing. Manifest text (labels, action labels,
 settings titles) still shows as written; a per-language map for it waits until a plugin
 ships translations.
+
+**Amended 2026-10-02: chapters and lyrics.** Andrew's product call, after skipping
+through a long episode on a plugin and finding the service's own chapters and lyrics had
+no way in. Both are things a service already knows about its own tracks, so the plugin
+supplies them and rox draws them.
+
+`source.open` may answer `chapters`, gated by the `chapters` feature: where the
+stream's parts start, each a start in milliseconds and a title. They ride on the open
+rather than the track, so only the track that plays pays for them, and a listing stays
+the size it was. The engine never reads them. The wire refuses only their shape, and rox
+tidies the order and drops blank titles itself, because a malformed list must not stop
+a track playing. The seek strip draws them off its top edge as the cues' chevron, fainter,
+since a chapter is the track's and a cue is the user's. Hovering one names it and a click
+seeks to its start. A station ignores them: its top edge is the tape's songs.
+
+A source may declare `lyrics`, and rox then asks `source.lyrics` for a track's sheet, LRC
+or plain. Unlike links, the declaration alone doesn't reach the user: each plugin gets a
+Lyrics switch on the Plugins page, off by default and never turned on by approval,
+because the answer overrides the lookup the user configured and is saved into their
+lyrics store. With it on, the Lyrics panel asks the plugin first for its own tracks and
+saves the answer without the confidence bar automatic lookups have to clear, since it's
+for that very track. That doesn't break [ADR 14](14-adr-online-providers.md)'s rule that
+candidates rank by confidence, not by who answered: an exact-track answer is confidence
+1. The No Lyrics mark still stops it, and a plugin with no sheet falls through to the
+providers. The Providers page's online switch keeps covering the built-in providers
+only, so each source has one switch and no second one controls the same thing.
+
+The declaration sits under `capabilities.source` beside `links`, so `api` stays 1, and
+turning it on shows on the re-approval card as a new capability.

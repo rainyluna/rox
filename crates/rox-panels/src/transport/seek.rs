@@ -22,10 +22,11 @@ use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use rox_library::bookmarks::Bookmark;
-use rox_library::cue::TrackKey;
+use rox_library::cue::{Origin, TrackKey};
 use rox_panel_api::{cue_ui, position_bound};
 use rox_playback::{LiveGap, LiveMark, Shift, StreamState};
 use rox_services::cues::{Cue, CuesChanged};
+use rox_services::plugins::{self, Chapter};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
@@ -748,6 +749,7 @@ fn paint_strip(
     ab: Option<(f32, Option<f32>)>,
     marks: &[bookmark_ui::Mark],
     cues: &[cue_ui::CueMark],
+    chapters: &[cue_ui::CueMark],
     look: StripLook,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -823,6 +825,7 @@ fn paint_strip(
     }
     panel::paint_ab(ab, 1.0, bounds, window);
     bookmark_ui::paint_marks(marks, 1.0, bounds, window);
+    cue_ui::paint_marks(chapters, CHAPTER_WEIGHT, bounds, window);
     cue_ui::paint_marks(cues, 1.0, bounds, window);
     paint_playhead(head_x, look, bounds, window);
 }
@@ -1205,6 +1208,37 @@ fn behind_mark(text: String, player: &Entity<Player>) -> AnyElement {
         .into_any_element()
 }
 
+/// A track's own chevrons, fainter than the cues the user drops on the
+/// same edge so the two read apart.
+const CHAPTER_WEIGHT: f32 = 0.45;
+
+/// Where a chevron off the top edge seeks: a song back in a station's tape,
+/// or a chapter of the track.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TopSeek {
+    Behind(f64),
+    At(f64),
+}
+
+/// A plugin track's chapters along a strip of `duration` seconds. The id is
+/// the index.
+fn chapter_marks(chapters: &[Chapter], duration: f64) -> Vec<cue_ui::CueMark> {
+    if duration <= 0.0 {
+        return Vec::new();
+    }
+
+    chapters
+        .iter()
+        .enumerate()
+        .filter(|(_, chapter)| chapter.start_secs < duration)
+        .map(|(i, chapter)| cue_ui::CueMark {
+            id: i as u64,
+            fraction: (chapter.start_secs / duration).clamp(0.0, 1.0) as f32,
+            position_ms: (chapter.start_secs * 1000.0) as u32,
+        })
+        .collect()
+}
+
 /// A station sending one unsplittable field leaves the artist empty. The
 /// stations panel spells this the same way; neither module owns the
 /// other.
@@ -1216,10 +1250,11 @@ fn song_text(artist: &str, title: &str) -> String {
     format!("{artist} - {title}")
 }
 
-/// [`cue_ui::overlay`]'s shape, with the song's name in the readout and
-/// none of the editing: these marks are the station's.
-fn song_overlay(
-    songs: &[LiveMark],
+/// [`cue_ui::overlay`]'s shape, with the song's or chapter's name in the
+/// readout and none of the editing: these marks are the station's or the
+/// track's. `labels` is by mark id.
+fn top_overlay(
+    labels: &[(String, TopSeek)],
     marks: &[cue_ui::CueMark],
     hovered: Option<u64>,
     scrub: &ScrubState,
@@ -1230,10 +1265,10 @@ fn song_overlay(
 
     for mark in marks {
         let id = mark.id;
-        let Some(song) = songs.get(id as usize) else {
+        let Some((_, seek)) = labels.get(id as usize) else {
             continue;
         };
-        let behind_secs = song.behind_secs;
+        let seek = *seek;
         let player = player.clone();
         let hover_scrub = scrub.clone();
         let hit = div()
@@ -1251,12 +1286,15 @@ fn song_overlay(
                 this.hovered_song = hovered.then_some(id);
                 cx.notify();
             }))
-            // Seeks to the song's own mark, not the pixel, and the strip's seek
+            // Seeks to the mark's own place, not the pixel, and the strip's seek
             // stays out of it.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, _: &gpui::MouseDownEvent, _, cx| {
-                    player.read(cx).seek_live(behind_secs);
+                    match seek {
+                        TopSeek::Behind(secs) => player.read(cx).seek_live(secs),
+                        TopSeek::At(secs) => player.read(cx).seek_to(secs),
+                    }
                     cx.stop_propagation();
                 }),
             );
@@ -1275,16 +1313,13 @@ fn song_overlay(
         );
     }
 
-    if let Some((mark, song)) = hovered.and_then(|id| {
+    if let Some((mark, (text, _))) = hovered.and_then(|id| {
         marks
             .iter()
             .find(|m| m.id == id)
-            .zip(songs.get(id as usize))
+            .zip(labels.get(id as usize))
     }) {
-        layer = layer.child(song_readout(
-            mark.fraction,
-            song_text(&song.artist, &song.title),
-        ));
+        layer = layer.child(song_readout(mark.fraction, text.clone()));
     }
 
     layer
@@ -1761,11 +1796,47 @@ impl SeekStripPanel {
         } else {
             Vec::new()
         };
+        let chapters = match (&shift, now.key.origin()) {
+            (None, Origin::Plugin) if !live => {
+                plugins::chapters(now.key.source.as_ref(), &now.key.path.to_string_lossy())
+            }
+
+            _ => Arc::from([]),
+        };
+        let chapter_marks = now
+            .duration_secs
+            .map(|duration| chapter_marks(&chapters, duration))
+            .unwrap_or_default();
         let song_marks = shift
             .as_ref()
             .map(|shift| tape_marks(&songs, shift))
             .unwrap_or_default();
-        self.settle_song_hover(&song_marks);
+        // A station's songs or a track's chapters: the strip is one or the
+        // other, so they share the hover and the readout.
+        let (top_marks, top_labels): (Vec<cue_ui::CueMark>, Vec<(String, TopSeek)>) =
+            match shift.is_some() {
+                true => (
+                    song_marks.clone(),
+                    songs
+                        .iter()
+                        .map(|song| {
+                            (
+                                song_text(&song.artist, &song.title),
+                                TopSeek::Behind(song.behind_secs),
+                            )
+                        })
+                        .collect(),
+                ),
+
+                false => (
+                    chapter_marks.clone(),
+                    chapters
+                        .iter()
+                        .map(|chapter| (chapter.title.clone(), TopSeek::At(chapter.start_secs)))
+                        .collect(),
+                ),
+            };
+        self.settle_song_hover(&top_marks);
         let hovered_song = self.hovered_song;
         // Mapped on the same tick as the songs, or the two would drift apart.
         let gap_marks = shift
@@ -1830,6 +1901,7 @@ impl SeekStripPanel {
                         let cues = cues.clone();
                         let songs = song_marks.clone();
                         let gaps = gap_marks.clone();
+                        let chapters = chapter_marks.clone();
                         let buffered = buffered.clone();
                         move |bounds, _, window, _| {
                             // Nothing held yet: the flat bar, and no drag to arm.
@@ -1846,8 +1918,8 @@ impl SeekStripPanel {
                                 }
 
                                 None => paint_strip(
-                                    progress, &buffered, marker, ab, &marks, &cues, look, bounds,
-                                    window,
+                                    progress, &buffered, marker, ab, &marks, &cues, &chapters,
+                                    look, bounds, window,
                                 ),
                             }
 
@@ -1897,11 +1969,12 @@ impl SeekStripPanel {
                     cx,
                 ))
             })
-            // On the cues' edge, which a station never uses.
-            .when(!song_marks.is_empty(), |d| {
-                d.child(song_overlay(
-                    &songs,
-                    &song_marks,
+            // On the cues' edge, which a station never uses. Last, so a
+            // chapter under a cue still gives the cue the click.
+            .when(!top_marks.is_empty(), |d| {
+                d.child(top_overlay(
+                    &top_labels,
+                    &top_marks,
                     hovered_song,
                     &self.scrub,
                     &self.state.player,
@@ -2022,8 +2095,9 @@ transport_panel!(
 #[cfg(test)]
 mod tests {
     use super::{
-        LeadIn, LiveMark, SeekConfig, SeekItem, Shift, Sweep, behind_clock, editor_rows,
-        insert_position_ms, shift_behind, shift_held, shift_progress, split_rows, tape_marks,
+        Chapter, LeadIn, LiveMark, SeekConfig, SeekItem, Shift, Sweep, behind_clock, chapter_marks,
+        editor_rows, insert_position_ms, shift_behind, shift_held, shift_progress, split_rows,
+        tape_marks,
     };
 
     fn tape(behind_secs: f64, window_secs: f64, cap_secs: f64) -> Shift {
@@ -2110,6 +2184,23 @@ mod tests {
             artist: "Artist".into(),
             title: "Title".into(),
         }
+    }
+
+    #[test]
+    fn chapters_sit_at_their_start_and_past_the_end_drop() {
+        let chapter = |start_secs: f64| Chapter {
+            start_secs,
+            title: "x".into(),
+        };
+        let marks = chapter_marks(&[chapter(0.0), chapter(50.0), chapter(120.0)], 100.0);
+
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks[1].fraction, 0.5);
+        assert_eq!(marks[1].position_ms, 50_000);
+        assert!(
+            chapter_marks(&[chapter(0.0)], 0.0).is_empty(),
+            "no length yet"
+        );
     }
 
     #[test]

@@ -3558,12 +3558,20 @@ impl SourceBrowserPanel {
         };
 
         match thumb {
-            Thumb::Ready(image) => img(image)
+            // gpui paints a covering image past its own bounds, so the box
+            // around it does the clipping. Art stored before plugin covers
+            // were cropped square can still be any shape.
+            Thumb::Ready(image) => div()
                 .flex_none()
                 .size(side)
                 .overflow_hidden()
-                .object_fit(ObjectFit::Cover)
                 .rounded(tokens::RADIUS)
+                .child(
+                    img(image)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .rounded(tokens::RADIUS),
+                )
                 .into_any_element(),
 
             _ => div()

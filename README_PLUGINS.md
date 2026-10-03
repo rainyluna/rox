@@ -123,7 +123,7 @@ match the folder's name is refused.
 | `api`                 | The plugin API version it targets: `1`.                                                                          |
 | `entry`               | Exactly one of `script` or `native`.                                                                             |
 | `meta`                | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
-| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. `icon` is optional, see [The icon](#the-icon). `radio: true` says the plugin answers [`source.radio`](#sourceradio). `links: true` says it answers [`source.link`](#sourcelink). `actions` lists what it can do with its items, see [Actions](#actions). |
+| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. `icon` is optional, see [The icon](#the-icon). `radio: true` says the plugin answers [`source.radio`](#sourceradio). `links: true` says it answers [`source.link`](#sourcelink). `lyrics: true` says it answers [`source.lyrics`](#sourcelyrics). `actions` lists what it can do with its items, see [Actions](#actions). |
 | `capabilities.panels` | Extra panels listed under the plugin in Add Panel. Optional. See [Panels](#panels).                              |
 | `programs`            | Programs the plugin runs, by name. The page checks the plugin's own `bin/` folder, then Program Folders, then PATH, and reports each name as found or missing. rox doesn't enforce the list. |
 | `config_schema`       | JSON Schema for the plugin's settings.                                                                           |
@@ -234,6 +234,7 @@ rolls to `rox.log.1` at 2 MiB. The plugin never sends requests to rox.
 | `source.cover`   | `key`                             | `{mime, data}` with the image base64, or null    |
 | `source.radio`   | `seed`, `cursor`, `count`         | a batch of tracks and where the next starts      |
 | `source.link`    | `item`                            | `{url}` for its web page, or null                |
+| `source.lyrics`  | `key`                             | `{text, synced}` for the track's sheet, or null  |
 | `source.action`  | `action`, `items`, `params`       | an outcome, or `{job}` for work rox polls        |
 | `source.job`     | `job`                             | the job's progress, and its outcome once it ends |
 | `source.cancel`  | `job`                             | null                                             |
@@ -263,7 +264,7 @@ send it, so a plugin treats a missing `locale` as unknown.
 feature refuses a result that uses it, so a plugin uses one only when it's listed, and
 treats a missing `features` as an empty list. This host lists `notice`, `notice-link`,
 `node-kind`, `node-art`, `sections`, `views`, `fields`, `tiles`, `home`,
-`open-duration`, `go-to` and `flags`.
+`open-duration`, `go-to`, `flags` and `chapters`.
 
 ### source.browse and source.search
 
@@ -467,6 +468,7 @@ with the plugin stopped or the network down.
 | `live`     | A stream with no end and no duration.                                                   |
 | `buffer`   | Optional. `"ahead"` asks rox to read one chunk ahead instead of downloading the whole track. |
 | `duration_ms` | Optional, when `hello` listed `open-duration`. The stream's length in milliseconds. |
+| `chapters` | Optional, when `hello` listed `chapters`. Where the stream's parts start: `[{start_ms, title}]`. |
 
 `buffer: "ahead"` is for a service that meters or throttles fast downloads. A plugin can
 lower rox's buffering this way but never raise it.
@@ -475,6 +477,12 @@ lower rox's buffering this way but never raise it.
 without a segment index. rox needs a length to seek and to draw the waveform. The
 container's own length wins over it, and without either rox falls back to the track's
 `duration_ms` from browse or sync.
+
+`chapters` mark an episode's segments or a mix's tracks. rox draws them along the top of
+the seek strip, names one on hover and seeks to its start on a click. Send at most 500,
+each title under the 4 KiB string cap. rox sorts them and skips blank titles, so a list
+that isn't tidy still plays, but a malformed one (a missing field, an unknown one) fails
+the open. A live stream's chapters are ignored.
 
 ### source.read
 
@@ -561,6 +569,22 @@ The `url` has to be an `http` or `https` address, or the call fails. Answer null
 item with no page. rox asks on every click rather than keeping the answer, so a link
 can change without anything going stale. The page opens in the user's browser or goes
 to the clipboard, and rox itself never fetches it.
+
+### source.lyrics
+
+Sent only to a plugin whose manifest says `"lyrics": true`, and only once the user
+switches Lyrics on for it on the Plugins page. That switch starts off. With it on, the
+Lyrics panel asks the plugin for its own tracks' sheets before it asks the lyrics
+providers, and saves the answer like a match the user picked:
+
+```
+→ {"jsonrpc":"2.0","id":14,"method":"source.lyrics","params":{"key":"chord:A minor"}}
+← {"jsonrpc":"2.0","id":14,"result":{"text":"[00:00.00]A3\n[00:05.00]C4\n[00:10.00]E4","synced":true}}
+```
+
+`text` is LRC when `synced` is true, timed lines rox highlights as they play, and plain
+lines otherwise. Answer null for a track with no sheet, and rox goes on to the
+providers. The text can run to 256 KiB, past the usual string cap.
 
 ### Actions
 
@@ -860,7 +884,7 @@ running. Switch it off on the Plugins page before updating its folder.
 | ---------------------------------------------------- | ------------------------------ |
 | `hello`                                              | 5 s                            |
 | `source.browse`, `source.search`, later sync pages   | 15 s                           |
-| `source.radio`, `source.link`                        | 15 s                           |
+| `source.radio`, `source.link`, `source.lyrics`       | 15 s                           |
 | `source.action`, `source.job`, `source.cancel`       | 15 s                           |
 | A sync's first page                                  | 60 s                           |
 | `source.open`                                        | 20 s                           |
@@ -872,6 +896,8 @@ running. Switch it off on the Plugins page before updating its folder.
 | Actions a plugin declares                            | 16                             |
 | Views a page offers                                  | 12                             |
 | Fields a page declares                               | 4                              |
+| Chapters an open names                               | 500                            |
+| A lyrics sheet                                       | 256 KiB                        |
 | Rows read to sort by a field                         | 1,000                          |
 | Tracks read from a node to play it or start a radio  | 1,000                          |
 | A read's `len`                                       | 256 KiB asked, 512 KiB at most |

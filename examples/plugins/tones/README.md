@@ -13,6 +13,8 @@ The protocol it speaks is in the [plugin guide](../../../README_PLUGINS.md).
 3. Switch Tones on and confirm the card.
 4. Pick Add Panel > Plugins > Tones, which opens the External Sources panel on Tones.
    Tones and Chords are both collections: Keep in the library puts one in your library.
+5. A chord marks its three notes as chapters on the seek strip. Switch Lyrics on under
+   Tones on the Plugins page and the Lyrics panel names each note as it starts.
 
 Python 3 has to be on PATH as `python3` or `python`, or as `py` on Windows.
 

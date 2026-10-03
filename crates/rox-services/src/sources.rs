@@ -40,6 +40,10 @@ use crate::sources_registry;
 /// The thumbnail store downscales again; this only has to beat a grid tile.
 const COVER_SIZE: u32 = 512;
 
+/// The server scales down to this, so a full-resolution scan never comes
+/// over the wire.
+const FULL_COVER_SIZE: u32 = 1280;
+
 /// Long enough that a down server isn't hammered by every repaint.
 const RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 
@@ -704,18 +708,7 @@ fn fetch_cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
 
     match Origin::of(&source) {
         Origin::Subsonic => {
-            let server = accounts
-                .subsonic_servers
-                .iter()
-                .filter_map(server_of)
-                .find(|server| server.source_id() == source)?;
-
-            let cover_id = server.cover_id(key).ok()?;
-            if cover_id.is_empty() {
-                return None;
-            }
-
-            let bytes = server.cover(&cover_id, COVER_SIZE).ok()?;
+            let bytes = subsonic_cover(&accounts, &source, key, COVER_SIZE)?;
             let thumbs = thumbs.lock().ok()?;
 
             rox_library::thumbs::store_bytes(&thumbs, &bytes, key)
@@ -725,6 +718,54 @@ fn fetch_cover(thumbs: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
 
         Origin::Local | Origin::Radio => None,
     }
+}
+
+fn subsonic_cover(accounts: &AccountsState, source: &str, key: &str, size: u32) -> Option<Vec<u8>> {
+    let server = accounts
+        .subsonic_servers
+        .iter()
+        .filter_map(server_of)
+        .find(|server| server.source_id() == source)?;
+
+    let cover_id = server.cover_id(key).ok()?;
+    if cover_id.is_empty() {
+        return None;
+    }
+
+    server.cover(&cover_id, size).ok()
+}
+
+/// A remote track's cover at the size a panel draws it. The thumbnail store
+/// only keeps list-row cuts, which go soft stretched across a panel, so
+/// nothing here is stored. Blocking.
+pub fn full_cover(source: &str, key: &str) -> Option<Vec<u8>> {
+    let accounts = accounts_state();
+    let live = live_in_order(&accounts, &crate::plugins::present);
+    if !live.iter().any(|id| id == source) {
+        return None;
+    }
+
+    let miss = format!("{}|full", plugin_thumb_key(source, key));
+    let now = Instant::now();
+    if MISSES.lock().ok()?.recent(&miss, now) {
+        return None;
+    }
+
+    // A plugin picks its own size; the contract asks for its largest.
+    let found = match Origin::of(source) {
+        Origin::Subsonic => subsonic_cover(&accounts, source, key, FULL_COVER_SIZE),
+        Origin::Plugin => crate::plugins::cover(source, key),
+        Origin::Local | Origin::Radio => None,
+    };
+
+    if let Ok(mut misses) = MISSES.lock() {
+        match found {
+            Some(_) => misses.forget(&miss),
+            None => misses.note(&miss, now),
+        }
+    }
+
+    found
 }
 
 /// Keyed with the source, since two plugins can hand out the same key.
@@ -739,7 +780,8 @@ fn plugin_thumb(thumbs: &Mutex<Connection>, source: &str, key: &str) -> Option<V
     let bytes = crate::plugins::cover(source, key)?;
     let thumbs = thumbs.lock().ok()?;
 
-    rox_library::thumbs::store_bytes(&thumbs, &bytes, &thumb)
+    // Plugin art fills square tiles, and an artist's picture often isn't square.
+    rox_library::thumbs::store_square(&thumbs, &bytes, &thumb)
 }
 
 pub fn plugin_thumb_key(source: &str, key: &str) -> String {

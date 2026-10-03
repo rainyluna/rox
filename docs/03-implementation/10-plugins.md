@@ -129,7 +129,7 @@ The host sets `PYTHONDONTWRITEBYTECODE=1` for every plugin
 | `api` | The plugin API version it targets. Must be in `SUPPORTED_API`. |
 | `entry` | Exactly one of `script` or `native`. |
 | `meta` | `author`, `description`, `website`, `license`, `version`, all optional. The card shows the author and description. |
-| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. |
+| `capabilities.source` | `label` names the source in rox. `scrobble` defaults to false. `lyrics` says it answers `source.lyrics`, which rox asks only once the user switches Lyrics on for it. |
 | `capabilities.panels` | Extra presets of core panel kinds, listed under the plugin in Add Panel. See [Panels](#panels). |
 | `programs` | Programs the plugin runs, by name. The page reports each as found on PATH or missing. rox enforces nothing with it. |
 | `config_schema` | JSON Schema for the plugin's settings. |
@@ -341,6 +341,21 @@ listed `open-duration`: the stream's length for a container that doesn't state o
 local fragmented MP4's `mehd` next, then the stated one, which is the open's
 `duration_ms` or else the row's (`PluginStream::duration_ms`).
 
+With `chapters` listed, the answer may carry `chapters`: `[{start_ms, title}]`, where
+the stream's parts start. The wire refuses only the shape: more than `MAX_CHAPTERS`
+(500), a title past `MAX_STRING`, or an unknown field (`Chapter`, `wire.rs`). Order and
+blank titles are tidied in rox instead, since a bad list mustn't stop the track playing:
+`tidy_chapters` (`rox-services/src/plugins.rs`) sorts by start, drops blank titles and
+keeps the first of two that start together. The engine never sees them. `open` in
+`plugins.rs` notes each non-live open's list against its source and key, keeping the
+last `CHAPTERS_KEPT` (8) tracks', and a reopen with none forgets the old list.
+`plugins::chapters` hands them out. The seek strip reads the playing track's on every
+paint and draws them off the top edge as the cues' chevron at `CHAPTER_WEIGHT`, fainter
+than the cues the user drops there, so the two read apart (`chapter_marks`,
+`rox-panels/src/transport/seek.rs`). A chapter that starts past the track's length isn't
+drawn. Hovering one shows its title and a click seeks to its start, through the same
+overlay a station's songs use (`top_overlay`).
+
 ### `source.read`
 
 ```json
@@ -384,14 +399,42 @@ the answer.
 < {"jsonrpc":"2.0","id":10,"result":null}
 ```
 
-`{mime, data}` with the image base64, or `null` for no cover. Asked for rows with no
-stored cover, off the UI thread (`cover`, `rox-services/src/plugins.rs:1112-1125`).
+`{mime, data}` with the image base64, or `null` for no cover. Answer with the largest
+size the service has that fits under `MAX_FRAME` once encoded: rox cuts its own
+thumbnails for list rows, and the cover panel draws this answer as it is. Asked off the
+UI thread, for rows with no stored thumbnail and for the track a cover panel is showing
+(`cover`, `rox-services/src/plugins.rs:2310-2326`; `full_cover`,
+`rox-services/src/sources.rs`).
+
+### `source.lyrics`
+
+```json
+> {"jsonrpc":"2.0","id":11,"method":"source.lyrics","params":{"key":"chord:A minor"}}
+< {"jsonrpc":"2.0","id":11,"result":{"text":"[00:00.00]A3\n[00:05.00]C4\n[00:10.00]E4","synced":true}}
+```
+
+A track's sheet: LRC when `synced`, plain lines otherwise, or `null` for none. Sent only
+to a plugin whose manifest declares `lyrics` and whose user switched Lyrics on for it
+(`lyrics_from`, `rox-services/src/plugins.rs`). The text has its own cap, `MAX_LYRICS`
+(256 KiB), since an enhanced sheet runs well past `MAX_STRING`; a blank one is refused,
+since `null` says none (`LyricsAnswer`, `wire.rs`). It takes the listing timeout.
+
+`target_for` (`rox-services/src/lyrics.rs`) reads the switch once per track and, when
+it's on, puts a `PluginLyrics` on the `LyricsTarget`. The Lyrics panel's automatic
+lookup asks it first (`maybe_auto_search`, `rox-panels/src/lyrics.rs`) and saves its
+sheet through the same path a provider's match takes, without `AUTO_SAVE_CONFIDENCE`:
+the answer is for this very track, so it comes in at confidence 1. A plugin with none,
+or that fails, falls through to the providers when online lookups are on. The No Lyrics
+mark still stops both. The match window lists the plugin's sheet first, under the
+plugin's label, then the providers' (`search_with`, `rox/src/lyrics/matcher.rs`). Find
+Online shows for a plugin track with the switch on even while online lookups are off,
+since the switch is the user's choice for that source.
 
 ### `shutdown`
 
 ```json
-> {"jsonrpc":"2.0","id":11,"method":"shutdown"}
-< {"jsonrpc":"2.0","id":11,"result":null}
+> {"jsonrpc":"2.0","id":12,"method":"shutdown"}
+< {"jsonrpc":"2.0","id":12,"result":null}
 ```
 
 Then the plugin exits. It should also exit whenever stdin closes: that's the one signal
@@ -594,6 +637,11 @@ user leaves Scrobble Plays on (`may_scrobble`, `rox-services/src/lastfm.rs:150-1
 A plugin that isn't loaded never scrobbles, whatever its record says. Capture never
 applies: a plugin stream doesn't pass through the HTTP source or its ICY wrapper.
 
+Lyrics are the same gate with the other default: a manifest that declares `lyrics`
+gets a Lyrics switch under the plugin, off until the user turns it on, and approval
+never turns it on (`set_lyrics`, `PluginRecord::lyrics`). The Providers page's online
+switch covers the built-in providers only.
+
 ## Panels
 
 Contract capability `panels` (WT-P9). Every running plugin is listed under Add Panel >
@@ -653,8 +701,8 @@ the shader approvals (`plugin_approved` and `approve_plugin`,
 `rox-core/src/settings.rs:1484-1521`). They're machine-local, so a copied settings file
 doesn't carry someone else's trust decision. What rox remembers about a plugin is its
 `PluginRecord` in `accounts.json` (`settings.rs:2048-2082`): the switch, the label, the
-hash and manifest at the last approval, the scrobble choice, the kept collections and
-the config.
+hash and manifest at the last approval, the scrobble and lyrics choices, the kept
+collections and the config.
 
 Switching a plugin on checks the folder's current hash against the machine's approval
 (`switch_plugin`, `rox/src/settings/window/plugins_page.rs`). The same hash switches on
@@ -697,12 +745,13 @@ The Plugins page's copy, in English, for finding each string in the other locale
 | Card body | It runs as a program on this computer with your permissions. rox doesn't sandbox it. |
 | Card, source | Adds { $label } as a source: rox browses, searches, syncs and plays it through the plugin. |
 | Card, scrobbling | Asks to scrobble what it plays. |
+| Card, lyrics | Offers lyrics for its tracks. rox only asks once you switch them on. |
 | Card, programs | Uses { $program }, found on this computer. / Uses { $program }, which isn't on this computer's PATH. |
 | Card, re-approval | Changed since you last switched it on: / The manifest is the same as last time. Other files in the folder changed. |
 | Card, changes | New capability: { $name } / Dropped capability: { $name } / New program: { $program } / Now asks to scrobble / No longer asks to scrobble / Starts a different way |
 | Card button | Switch On |
 | Page switch | Enable Plugins: Let the plugins in the plugins folder run. Each one still has its own switch below, and runs as a program on this computer with your permissions |
-| Under a switched-on plugin | Scrobble Plays, Synced Collections, Sync Now, The last sync failed |
+| Under a switched-on plugin | Scrobble Plays, Lyrics: Ask this plugin for its tracks' lyrics before the lyrics providers. Offered because the plugin answers them, Synced Collections, Sync Now, The last sync failed |
 | Developer mode tooltip | Developer mode: until rox quits, a change to this plugin's folder is approved on its own and restarts it. A change to what its manifest declares still switches it off |
 | Nothing kept | Nothing synced yet. Switch sync on for a collection in the plugin's source browser |
 | Remove title | Remove "{ $name }"? |
@@ -776,6 +825,7 @@ Its tests are `tests/echo.rs` against the fixture in `tests/fixtures/echo/`, and
 The services side is `crates/rox-services/src/plugins.rs` (the host table, apply and
 approval, browse, search, sync, pick, covers, the opener and the pre-open), with
 `sources.rs` (`live_ids`, hiding and departing rows), `lastfm.rs` (the scrobble gate),
+`lyrics.rs` (`PluginLyrics`, the lyrics gate),
 `openers.rs` (the opener slot) and `thumbs.rs` (covers through the plugin). Records and
 approvals are `PluginRecord`, `SyncedCollection` and `approved_plugins` in
 `crates/rox-core/src/settings.rs`. The library side is `crates/rox-library/src/members.rs`

@@ -10,7 +10,7 @@ use gpui::{App, Entity};
 use rox_core::settings::{LyricsSave, Settings, lyrics_dir};
 use rox_library::cue::{Origin, TrackKey};
 use rox_library::lyrics::{self, Source, Subject};
-use rox_net::providers::TrackQuery;
+use rox_net::providers::{LyricsCandidate, TrackQuery};
 use rox_playback::IcyTitle;
 
 use crate::catalog::Library;
@@ -21,6 +21,37 @@ use crate::catalog::Library;
 pub struct LyricsTarget {
     pub subject: Subject,
     pub query: TrackQuery,
+    /// The track's plugin, when the user switched its lyrics on.
+    pub plugin: Option<PluginLyrics>,
+}
+
+/// A plugin asked for its own track's sheet, ahead of the providers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginLyrics {
+    pub source: String,
+    pub key: String,
+    pub label: String,
+}
+
+impl PluginLyrics {
+    /// Its sheet as a candidate: certain, since it's for this very track.
+    /// None when the plugin has none. Blocking.
+    pub fn ask(&self, query: &TrackQuery) -> Result<Option<LyricsCandidate>, String> {
+        let Some((text, synced)) = crate::plugins::lyrics(&self.source, &self.key)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(LyricsCandidate {
+            provider: self.label.clone().into(),
+            artist: query.artist.clone(),
+            title: query.title.clone(),
+            album: query.album.clone(),
+            duration_secs: query.duration_secs,
+            synced,
+            text,
+            confidence: 1.0,
+        }))
+    }
 }
 
 impl LyricsTarget {
@@ -77,9 +108,20 @@ pub fn target_for(
         query.duration_secs = None;
     }
 
+    let subject = subject_for(key, live)?;
+    let plugin = (key.origin() == Origin::Plugin)
+        .then(|| crate::plugins::lyrics_from(key.source.as_ref()))
+        .flatten()
+        .map(|label| PluginLyrics {
+            source: key.source.as_ref().to_string(),
+            key: key.path.to_string_lossy().into_owned(),
+            label,
+        });
+
     Some(LyricsTarget {
-        subject: subject_for(key, live)?,
+        subject,
         query,
+        plugin,
     })
 }
 

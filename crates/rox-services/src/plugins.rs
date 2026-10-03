@@ -809,6 +809,10 @@ pub fn set_scrobble(id: &str, on: bool) {
     edit(id, move |record| record.scrobble = on);
 }
 
+pub fn set_lyrics(id: &str, on: bool) {
+    edit(id, move |record| record.lyrics = on);
+}
+
 /// One config value. The host picks it up when [`apply`] next runs, which
 /// restarts it with the new config.
 pub fn set_config(id: &str, key: &str, value: Value) {
@@ -1097,6 +1101,64 @@ pub(crate) fn await_first_apply(source: &str) {
     );
 }
 
+/// Where a part of a plugin track starts, for the seek strip's marks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chapter {
+    pub start_secs: f64,
+    pub title: String,
+}
+
+/// The chapters of the last few tracks opened, newest last. Only the
+/// playing track's are ever asked for, so a handful covers a skip back.
+static CHAPTERS: Mutex<Vec<(SourceKey, Arc<[Chapter]>)>> = Mutex::new(Vec::new());
+type SourceKey = (String, String);
+const CHAPTERS_KEPT: usize = 8;
+
+/// The wire refuses only the shape, so a list out of order or with blank
+/// titles still plays: it's sorted, and what can't be drawn drops here.
+fn tidy_chapters(sent: &[wire::Chapter]) -> Vec<Chapter> {
+    let mut chapters: Vec<Chapter> = sent
+        .iter()
+        .filter(|chapter| !chapter.title.trim().is_empty())
+        .map(|chapter| Chapter {
+            start_secs: chapter.start_ms as f64 / 1000.0,
+            title: chapter.title.trim().to_string(),
+        })
+        .collect();
+
+    chapters.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+    chapters.dedup_by(|later, earlier| later.start_secs == earlier.start_secs);
+    chapters
+}
+
+fn note_chapters(source: &str, key: &str, sent: &[wire::Chapter]) {
+    let id = (source.to_string(), key.to_string());
+    let mut kept = CHAPTERS.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|(at, _)| *at != id);
+
+    let chapters = tidy_chapters(sent);
+    if chapters.is_empty() {
+        return;
+    }
+
+    kept.push((id, chapters.into()));
+    if kept.len() > CHAPTERS_KEPT {
+        kept.remove(0);
+    }
+}
+
+/// What the last open of this track said its chapters are. Empty before
+/// it opens, and for a plugin that sends none.
+pub fn chapters(source: &str, key: &str) -> Arc<[Chapter]> {
+    CHAPTERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|((s, k), _)| s == source && k == key)
+        .map(|(_, chapters)| chapters.clone())
+        .unwrap_or_else(|| Arc::from([]))
+}
+
 /// What the engine calls, on its decode thread, for every plugin entry.
 fn open(stream: &PluginStream) -> Result<Opened, String> {
     await_first_apply(&stream.source);
@@ -1135,6 +1197,10 @@ fn open(stream: &PluginStream) -> Result<Opened, String> {
         OPENED_JOINED.load(Ordering::Relaxed),
         OPENED_COLD.load(Ordering::Relaxed),
     );
+
+    if !stream.live {
+        note_chapters(&stream.source, &stream.key, &opened.chapters);
+    }
 
     Ok(Opened {
         hint: opened.hint.clone(),
@@ -1565,6 +1631,43 @@ pub fn link(source: &str, item: String, cx: &App) -> Task<Result<Option<String>,
 
         wire::decode::<wire::Link>(answer).map(|link| Some(link.url))
     })
+}
+
+/// The label of a running plugin whose lyrics the user switched on, or
+/// None. Reads the settings file, so ask once per track, not per frame.
+pub fn lyrics_from(source: &str) -> Option<String> {
+    let id = source.strip_prefix(PLUGIN_PREFIX)?;
+    let on = Settings::load()
+        .accounts
+        .plugins
+        .iter()
+        .any(|record| record.id == id && record.lyrics);
+    if !on {
+        return None;
+    }
+
+    let running = running(source)?;
+    let cap = running.host.manifest().capabilities.source.as_ref()?;
+
+    cap.lyrics.then(|| cap.label.clone())
+}
+
+/// A track's sheet from its plugin: the text, and whether it's LRC. None
+/// when the plugin has none. Blocking.
+pub fn lyrics(source: &str, key: &str) -> Result<Option<(String, bool)>, String> {
+    await_first_apply(source);
+    let host = host_for(source)?;
+
+    let answer = host.call(
+        "source.lyrics",
+        json!({ "key": key }),
+        host.timeouts().listing,
+    )?;
+    if answer.is_null() {
+        return Ok(None);
+    }
+
+    wire::decode::<wire::LyricsAnswer>(answer).map(|sheet| Some((sheet.text, sheet.synced)))
 }
 
 /// One batch of a station, and where the next starts. Blocking.
@@ -2444,6 +2547,48 @@ pub fn live_sources() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sent(start_ms: u64, title: &str) -> wire::Chapter {
+        wire::Chapter {
+            start_ms,
+            title: title.into(),
+        }
+    }
+
+    #[test]
+    fn chapters_come_sorted_with_the_blank_and_doubled_dropped() {
+        let tidy = tidy_chapters(&[
+            sent(271_000, " Story "),
+            sent(0, "Intro"),
+            sent(90_000, "  "),
+            sent(271_000, "Again"),
+        ]);
+
+        assert_eq!(
+            tidy,
+            vec![
+                Chapter {
+                    start_secs: 0.0,
+                    title: "Intro".into()
+                },
+                Chapter {
+                    start_secs: 271.0,
+                    title: "Story".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reopen_with_no_chapters_forgets_the_old_ones() {
+        let (source, key) = ("plugin:test-chapters", "reopened");
+        note_chapters(source, key, &[sent(0, "Intro")]);
+        assert_eq!(chapters(source, key).len(), 1);
+
+        note_chapters(source, key, &[]);
+        assert!(chapters(source, key).is_empty());
+        assert!(chapters(source, "never-opened").is_empty());
+    }
 
     #[test]
     fn a_station_saves_where_it_got_to() {

@@ -614,6 +614,18 @@ impl LyricsPanel {
     }
 
     /// Open the match window. Nothing is written until the user confirms a pick.
+    /// Online lookups, or the shown track's plugin with its lyrics on. Off
+    /// the cached target, so it's cheap in a paint.
+    fn can_look_up(&self) -> bool {
+        let plugin = self
+            .target
+            .as_ref()
+            .and_then(|cache| cache.built.as_ref())
+            .is_some_and(|target| target.plugin.is_some());
+
+        plugin || providers::lyrics_online()
+    }
+
     fn open_match(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.resolved.get(self.config.source, &self.state, cx) else {
             return;
@@ -1194,7 +1206,7 @@ impl Panel for LyricsPanel {
                     this.update(cx, |this, cx| this.open_edit(cx));
                 }),
         );
-        let menu = if providers::lyrics_online() {
+        let menu = if self.can_look_up() {
             let weak = cx.entity().downgrade();
             menu.item(
                 PopupMenuItem::new(rox_i18n::t!("lyrics-find-online"))
@@ -1344,8 +1356,7 @@ impl LyricsPanel {
             self.empty_size.height > px(0.) && self.empty_size.height < px(EMPTY_INLINE_MAX_H);
         let marked = subject.is_some_and(|subject| self.marked_for(subject));
         // No subject is a station between announcements, with no song to search for.
-        let show_button =
-            self.config.search_button && providers::lyrics_online() && subject.is_some();
+        let show_button = self.config.search_button && self.can_look_up() && subject.is_some();
         let button = show_button.then(|| {
             if marked {
                 settings_ui::small_button(
@@ -1443,10 +1454,16 @@ impl LyricsPanel {
     }
 
     /// Look the shown track up once and save the top match if it clears
-    /// [`AUTO_SAVE_CONFIDENCE`]. Never runs on a marked track: the mark is there
-    /// because a lookup got it wrong.
+    /// [`AUTO_SAVE_CONFIDENCE`]. A plugin the user switched lyrics on for is
+    /// asked first, and its sheet saves without the bar: it's for this very
+    /// track. Never runs on a marked track: the mark is there because a
+    /// lookup got it wrong.
     fn maybe_auto_search(&mut self, subject: &Subject, cx: &mut Context<Self>) {
-        if !self.config.auto_search || !providers::lyrics_online() {
+        let Some(target) = self.target.as_ref().and_then(|cache| cache.built.as_ref()) else {
+            return;
+        };
+        let online = providers::lyrics_online();
+        if !self.config.auto_search || !(online || target.plugin.is_some()) {
             return;
         }
         if self.auto_tried.as_ref() == Some(subject) {
@@ -1456,13 +1473,13 @@ impl LyricsPanel {
         if lyrics::marked_none(subject, Some(&lyrics_dir())) {
             return;
         }
-        let Some(query) = self.target.as_ref().and_then(|cache| cache.built.as_ref()) else {
-            return;
-        };
-        let query = query.query.clone();
-        if query.artist.is_empty() || query.title.is_empty() {
+
+        let (query, plugin) = (target.query.clone(), target.plugin.clone());
+        let named = !query.artist.is_empty() && !query.title.is_empty();
+        if plugin.is_none() && !named {
             return;
         }
+
         let subject = subject.clone();
         cx.spawn(async move |_, cx| {
             let saved = cx
@@ -1470,11 +1487,26 @@ impl LyricsPanel {
                 .spawn({
                     let subject = subject.clone();
                     async move {
-                        let found = providers::search_lyrics(&query).ok()?;
-                        let best = found.into_iter().next()?;
-                        if best.confidence < AUTO_SAVE_CONFIDENCE {
-                            return None;
-                        }
+                        let mine = plugin.as_ref().and_then(|plugin| {
+                            plugin.ask(&query).unwrap_or_else(|e| {
+                                log::warn!("lyrics from {}: {e}", plugin.source);
+                                None
+                            })
+                        });
+
+                        let best = match mine {
+                            Some(mine) => mine,
+                            None if online && named => {
+                                let found = providers::search_lyrics(&query).ok()?;
+                                let best = found.into_iter().next()?;
+                                if best.confidence < AUTO_SAVE_CONFIDENCE {
+                                    return None;
+                                }
+                                best
+                            }
+                            None => return None,
+                        };
+
                         let target = rox_services::lyrics::save_target(&subject);
                         lyrics::save(&subject, &target, &best.text, Some(&lyrics_dir())).ok()
                     }

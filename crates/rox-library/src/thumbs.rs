@@ -179,7 +179,7 @@ pub fn thumbnail(conn: &Mutex<Connection>, path: &Path) -> Option<Vec<u8>> {
                 Some(image) => image,
                 None => {
                     // Undecodable bytes pool an empty image, so failures cache too.
-                    let encoded = encode(&bytes).unwrap_or_default();
+                    let encoded = encode(&bytes, false).unwrap_or_default();
                     if whole {
                         let conn = conn.lock().unwrap();
                         conn.prepare_cached(
@@ -238,7 +238,28 @@ fn stored(conn: &Mutex<Connection>, key: &str) -> Option<Vec<u8>> {
 /// station favicon), keyed by the row's own key with zero identity columns.
 /// Takes the connection directly: a source sync owns it outright.
 pub fn store_bytes(conn: &Connection, bytes: &[u8], key: &str) -> Option<Vec<u8>> {
-    let hash = content_hash(bytes);
+    store(conn, bytes, key, false)
+}
+
+/// [`store_bytes`] cropped to the picture's centred square, for art that only
+/// ever fills square tiles. gpui clips to rectangles, so a picture that isn't
+/// square can't keep a tile's rounded corners.
+pub fn store_square(conn: &Connection, bytes: &[u8], key: &str) -> Option<Vec<u8>> {
+    store(conn, bytes, key, true)
+}
+
+/// Marks a square crop's pool hash, so it never stands in for the whole
+/// picture of the same bytes, or the other way round.
+const SQUARE: i64 = 0x5351_5541_5245_0000;
+
+fn store(conn: &Connection, bytes: &[u8], key: &str, square: bool) -> Option<Vec<u8>> {
+    let hash = match square {
+        true => match content_hash(bytes) ^ SQUARE {
+            0 => 1,
+            hash => hash,
+        },
+        false => content_hash(bytes),
+    };
 
     let pooled: Option<Vec<u8>> = conn
         .prepare_cached("SELECT image FROM images WHERE hash = ?1")
@@ -252,7 +273,7 @@ pub fn store_bytes(conn: &Connection, bytes: &[u8], key: &str) -> Option<Vec<u8>
 
         None => {
             // Undecodable bytes pool an empty image, so failures cache too.
-            let encoded = encode(bytes).unwrap_or_default();
+            let encoded = encode(bytes, square).unwrap_or_default();
             conn.prepare_cached("INSERT OR IGNORE INTO images (hash, image) VALUES (?1, ?2)")
                 .ok()?
                 .execute(rusqlite::params![hash, encoded])
@@ -303,8 +324,18 @@ fn no_art_identity(path: &Path) -> (String, i64, i64) {
     }
 }
 
-fn encode(bytes: &[u8]) -> Option<Vec<u8>> {
-    let cover = image::load_from_memory(bytes).ok()?;
+fn encode(bytes: &[u8], square: bool) -> Option<Vec<u8>> {
+    let mut cover = image::load_from_memory(bytes).ok()?;
+    if square {
+        let side = cover.width().min(cover.height());
+        cover = cover.crop_imm(
+            (cover.width() - side) / 2,
+            (cover.height() - side) / 2,
+            side,
+            side,
+        );
+    }
+
     let small = cover.thumbnail(SIZE, SIZE).into_rgb8();
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, QUALITY)
@@ -537,6 +568,40 @@ mod tests {
         assert!(
             thumbnail(&conn, Path::new("https://host/nothing")).is_none(),
             "a key nothing was stored under stays blank"
+        );
+    }
+
+    #[test]
+    fn a_square_crop_is_square_and_pools_apart_from_the_whole_picture() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate::run(&conn, MIGRATIONS).unwrap();
+
+        let mut wide = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut wide, 90)
+            .encode(&[128; 8 * 4 * 3], 8, 4, image::ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let whole = store_bytes(&conn, &wide, "whole").expect("a thumbnail");
+        let square = store_square(&conn, &wide, "square").expect("a thumbnail");
+
+        let dims = |bytes: &[u8]| {
+            let decoded = image::load_from_memory(bytes).unwrap();
+            (decoded.width(), decoded.height())
+        };
+        assert_eq!(
+            dims(&whole),
+            (SIZE, SIZE / 2),
+            "store_bytes keeps the picture's shape"
+        );
+        assert_eq!(
+            dims(&square),
+            (SIZE, SIZE),
+            "store_square crops it to its centre"
+        );
+        assert_eq!(
+            count(&Mutex::new(conn), "images"),
+            2,
+            "the crop and the whole pool apart"
         );
     }
 

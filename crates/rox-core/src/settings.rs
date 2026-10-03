@@ -2084,6 +2084,8 @@ pub struct PluginRecord {
     pub approved_manifest: serde_json::Value,
     /// Off by default: a plugin row never scrobbles unless this is on.
     pub scrobble: bool,
+    /// Off by default: rox never asks the plugin for lyrics unless this is on.
+    pub lyrics: bool,
     pub synced: Vec<SyncedCollection>,
     /// The plugin's own settings, secrets included, as its config schema
     /// shapes them.
@@ -3894,6 +3896,7 @@ mod tests {
             hash: "ab12".into(),
             approved_manifest: serde_json::json!({ "id": "demo", "api": 0 }),
             scrobble: true,
+            lyrics: true,
             synced: vec![SyncedCollection {
                 id: "likes".into(),
                 title: "Liked".into(),

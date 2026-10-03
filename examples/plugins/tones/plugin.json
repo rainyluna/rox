@@ -16,6 +16,7 @@
     "source": {
       "label": "Tones",
       "scrobble": false,
+      "lyrics": true,
       "actions": [
         {
           "id": "export",
